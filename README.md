@@ -19,7 +19,7 @@ cargo run -- capabilities
 
 Use `Engine<E>` with a host-selected `Executor` and `AuthorityVerifier`. A host creates the canonical action hash, atomically consumes its own approval, binds its UID/subject, session, policy generation, risk, expiry, operation ID, and hash into `AuthorityGrant`, and signs it. Praefectus never owns host approval or policy ledgers. Hosts can use `CancellationToken` for cooperative cancellation and implement another executor for platform-specific integration.
 
-`RsPeekabooExecutor` reports live platform permissions and supports only currently fenced coordinate click/move actions. It does not advertise unfenced focus-dependent typing, paste, key, scroll, or value-setting actions. Coordinate actions require a fresh (30-second) provenance record created by `RsPeekabooExecutor::observe_coordinates`; arbitrary `rs_peekaboo` snapshot IDs are rejected. Element actions are rejected when missing, hidden, disabled, stale, ambiguous, or mismatched.
+`NativeExecutor` is Praefectus-owned. On macOS it uses the system CoreGraphics framework for fenced coordinate click/move actions after verifying current Accessibility permission. Windows and Linux report an unavailable backend with no executable actions. It does not advertise unfenced focus-dependent typing, paste, key, scroll, value-setting, or semantic accessibility actions. Coordinate actions require a fresh (30-second) native display-topology provenance record created by `NativeExecutor::observe_coordinates`; arbitrary snapshot IDs are rejected. Element actions are rejected when missing, hidden, disabled, stale, ambiguous, or mismatched.
 
 ## Protocol guarantees
 
@@ -55,7 +55,7 @@ ISC. See `LICENSE`.
 
 ## Acknowledgements
 
-Praefectus uses [rs_peekaboo](https://github.com/undivisible/rs_peekaboo) by undivisible, licensed under the ISC License, for cross-platform accessibility inspection, screen capture, input synthesis, and desktop automation.
+Praefectus provides its own native runtime. [rs_peekaboo](https://github.com/undivisible/rs_peekaboo), licensed under the ISC License, was evaluated during design but is not used or linked. Its surface was informed by [Peekaboo](https://github.com/openclaw/Peekaboo), licensed under the MIT License, and [Cua Driver](https://github.com/trycua/cua), licensed under the MIT License.
 
 The action protocol and safety model were informed by the OpenAI Computer use guide, Anthropic computer use documentation, Playwright actionability checks, the W3C WebDriver stale-element model, Microsoft UI Automation, Apple Accessibility, and the XDG Desktop Portal RemoteDesktop and ScreenCast interfaces. These projects and specifications do not endorse Praefectus.
 
