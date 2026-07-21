@@ -2,7 +2,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use praefectus::{DenyAuthority, Engine, RsPeekabooExecutor, default_ledger_path};
+use praefectus::{DenyAuthority, Engine, NativeExecutor, default_ledger_path};
 use serde::Serialize;
 
 const EXIT_USAGE: u8 = 2;
@@ -91,7 +91,7 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
                 .into_iter()
                 .next()
                 .ok_or_else(|| usage("status requires an operation ID"))?;
-            let engine = Engine::new(RsPeekabooExecutor::default(), ledger, DenyAuthority);
+            let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
             Ok((
                 serialize(
                     engine
@@ -102,7 +102,7 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
             ))
         }
         "capabilities" => {
-            let engine = Engine::new(RsPeekabooExecutor::default(), ledger, DenyAuthority);
+            let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
             Ok((
                 serialize(
                     engine

@@ -8,10 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use fs2::FileExt;
-use rs_peekaboo::automation::Target;
-use rs_peekaboo::{
-    Direction as PeekabooDirection, ImageMode, Peekaboo, Point as PeekabooPoint, UiNode,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -285,7 +281,7 @@ pub struct Capabilities {
 #[derive(Clone, Debug)]
 pub struct Observation {
     pub evidence: Evidence,
-    pub element: Option<UiNode>,
+    pub element: Option<NativeElement>,
     pub state: Value,
 }
 
@@ -301,9 +297,294 @@ pub struct CoordinateObservation {
 
 #[derive(Clone, Debug)]
 pub enum ResolvedTarget {
-    Point(PeekabooPoint),
-    Element(Box<UiNode>),
+    Point(NativePoint),
+    Element(Box<NativeElement>),
     None,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePoint {
+    pub x: i64,
+    pub y: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeBounds {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeElement {
+    pub backend: String,
+    pub id: String,
+    pub app: String,
+    pub process_id: Option<i32>,
+    pub window: Option<String>,
+    pub role: String,
+    pub label: Option<String>,
+    pub title: Option<String>,
+    pub bounds: Option<NativeBounds>,
+    pub state: Value,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+enum Target {
+    Point(NativePoint),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ImageMode {
+    Screen,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NativeSnapshot {
+    snapshot_id: String,
+    display_geometry_hash: String,
+}
+
+#[derive(Debug)]
+struct NativeError;
+
+impl std::fmt::Display for NativeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native runtime error")
+    }
+}
+
+impl std::error::Error for NativeError {}
+
+struct NativeRuntime;
+
+impl NativeRuntime {
+    fn new() -> Self {
+        Self
+    }
+
+    fn permissions(&self) -> Value {
+        native_permissions()
+    }
+
+    fn resolve_backend(&self) -> &'static str {
+        native_backend()
+    }
+
+    fn list_screens(&self) -> Result<Value, NativeError> {
+        native_screens()
+    }
+
+    fn see(
+        &self,
+        _app: Option<&str>,
+        _mode: ImageMode,
+        _path: Option<&Path>,
+        _retina: bool,
+    ) -> Result<NativeSnapshot, NativeError> {
+        let screens = self.list_screens()?;
+        Ok(NativeSnapshot {
+            snapshot_id: format!("native-{}", hash_value(&screens).map_err(|_| NativeError)?),
+            display_geometry_hash: hash_value(&screens).map_err(|_| NativeError)?,
+        })
+    }
+
+    fn resolve_selector(
+        &self,
+        _selector: &str,
+        _snapshot: Option<&str>,
+    ) -> Result<NativeElement, NativeError> {
+        Err(NativeError)
+    }
+
+    fn click_with_options(
+        &self,
+        target: Target,
+        button: &str,
+        _background: bool,
+    ) -> Result<(), NativeError> {
+        let Target::Point(point) = target;
+        native_click(&point, button)
+    }
+
+    fn move_cursor(&self, target: Target) -> Result<(), NativeError> {
+        let Target::Point(point) = target;
+        native_move(&point)
+    }
+
+    fn type_text(
+        &self,
+        _text: &str,
+        _clear: bool,
+        _press_return: bool,
+        _delay_ms: Option<u64>,
+        _app: Option<&str>,
+    ) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+
+    fn press(&self, _key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+
+    fn paste(&self, _text: &str) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+
+    fn hotkey(&self, _keys: &[&str]) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+
+    fn scroll(&self, _direction: Direction, _amount: u32) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+
+    fn set_value(&self, _target: Target, _value: &str) -> Result<(), NativeError> {
+        Err(NativeError)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+fn native_backend() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "praefectus-coregraphics",
+        "windows" => "praefectus-unavailable-windows",
+        "linux" => "praefectus-unavailable-linux",
+        _ => "praefectus-unavailable",
+    }
+}
+
+fn native_permissions() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        serde_json::json!({
+            "accessibility": unsafe { AXIsProcessTrusted() },
+            "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    serde_json::json!({"accessibility": false, "screen_recording": false})
+}
+
+fn native_screens() -> Result<Value, NativeError> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::display::CGDisplay;
+
+        let displays = CGDisplay::active_displays().map_err(|_| NativeError)?;
+        Ok(Value::Array(
+            displays
+                .into_iter()
+                .map(|id| {
+                    let bounds = CGDisplay::new(id).bounds();
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "x": bounds.origin.x as i64,
+                        "y": bounds.origin.y as i64,
+                        "width": bounds.size.width as i64,
+                        "height": bounds.size.height as i64,
+                    })
+                })
+                .collect(),
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(Value::Array(Vec::new()))
+}
+
+fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        use core_graphics::geometry::CGPoint;
+
+        if !native_permissions()
+            .get("accessibility")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(NativeError);
+        }
+        let (down, up, mouse_button) = match button {
+            "left" => (
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+                CGMouseButton::Left,
+            ),
+            "right" => (
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+                CGMouseButton::Right,
+            ),
+            "middle" => (
+                CGEventType::OtherMouseDown,
+                CGEventType::OtherMouseUp,
+                CGMouseButton::Center,
+            ),
+            _ => return Err(NativeError),
+        };
+        let position = CGPoint::new(point.x as f64, point.y as f64);
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| NativeError)?;
+        let event = CGEvent::new_mouse_event(source, down, position, mouse_button)
+            .map_err(|_| NativeError)?;
+        event.post(CGEventTapLocation::HID);
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| NativeError)?;
+        let event = CGEvent::new_mouse_event(source, up, position, mouse_button)
+            .map_err(|_| NativeError)?;
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (point, button);
+        Err(NativeError)
+    }
+}
+
+fn native_move(point: &NativePoint) -> Result<(), NativeError> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        use core_graphics::geometry::CGPoint;
+
+        if !native_permissions()
+            .get("accessibility")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(NativeError);
+        }
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| NativeError)?;
+        let event = CGEvent::new_mouse_event(
+            source,
+            CGEventType::MouseMoved,
+            CGPoint::new(point.x as f64, point.y as f64),
+            CGMouseButton::Left,
+        )
+        .map_err(|_| NativeError)?;
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = point;
+        Err(NativeError)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -630,27 +911,27 @@ impl<E: Executor> Engine<E> {
     }
 }
 
-pub struct RsPeekabooExecutor {
-    peekaboo: Peekaboo,
+pub struct NativeExecutor {
+    runtime: NativeRuntime,
 }
 
-impl Default for RsPeekabooExecutor {
+impl Default for NativeExecutor {
     fn default() -> Self {
         Self {
-            peekaboo: Peekaboo::new(),
+            runtime: NativeRuntime::new(),
         }
     }
 }
 
-impl RsPeekabooExecutor {
+impl NativeExecutor {
     pub fn observe_coordinates(&self) -> Result<CoordinateObservation, ProtocolError> {
         let snapshot = self
-            .peekaboo
+            .runtime
             .see(None, ImageMode::Screen, None, false)
             .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
         let display_geometry_hash = hash_value(
             &self
-                .peekaboo
+                .runtime
                 .list_screens()
                 .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?,
         )?;
@@ -705,7 +986,7 @@ impl RsPeekabooExecutor {
         }
         let mut effect_started = false;
         if clear {
-            self.peekaboo
+            self.runtime
                 .type_text("", true, false, None, None)
                 .map_err(ambiguous_dispatch)?;
             effect_started = true;
@@ -724,7 +1005,7 @@ impl RsPeekabooExecutor {
             }
             chunk.push(character);
             if chunk.chars().count() == chunk_size {
-                self.peekaboo
+                self.runtime
                     .type_text(&chunk, false, false, delay_ms, None)
                     .map_err(ambiguous_dispatch)?;
                 effect_started = true;
@@ -732,7 +1013,7 @@ impl RsPeekabooExecutor {
             }
         }
         if !chunk.is_empty() {
-            self.peekaboo
+            self.runtime
                 .type_text(&chunk, false, false, delay_ms, None)
                 .map_err(ambiguous_dispatch)?;
             effect_started = true;
@@ -747,7 +1028,7 @@ impl RsPeekabooExecutor {
             });
         }
         if press_return {
-            self.peekaboo
+            self.runtime
                 .type_text("", false, true, None, None)
                 .map_err(ambiguous_dispatch)?;
         }
@@ -755,9 +1036,9 @@ impl RsPeekabooExecutor {
     }
 }
 
-impl Executor for RsPeekabooExecutor {
+impl Executor for NativeExecutor {
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
-        let permission_value = self.peekaboo.permissions();
+        let permission_value = self.runtime.permissions();
         let permissions: BTreeMap<String, bool> = permission_value
             .as_object()
             .map(|values| {
@@ -768,7 +1049,7 @@ impl Executor for RsPeekabooExecutor {
             })
             .unwrap_or_default();
         let screens = self
-            .peekaboo
+            .runtime
             .list_screens()
             .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
         let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
@@ -778,7 +1059,7 @@ impl Executor for RsPeekabooExecutor {
         }
         Ok(Capabilities {
             platform: std::env::consts::OS.to_string(),
-            backend: self.peekaboo.resolve_backend().to_string(),
+            backend: self.runtime.resolve_backend().to_string(),
             supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
             permissions,
             display_geometry_hash: hash_value(&screens)?,
@@ -790,7 +1071,7 @@ impl Executor for RsPeekabooExecutor {
         let element = match target {
             TargetRef::Element { selector, .. } => {
                 let element = self
-                    .peekaboo
+                    .runtime
                     .resolve_selector(selector, None)
                     .map_err(|_| ProtocolError::TargetNotFound("target not found".to_string()))?;
                 validate_live_element(&element)?;
@@ -834,9 +1115,6 @@ impl Executor for RsPeekabooExecutor {
                 snapshot_id,
                 snapshot_content_hash,
             } => {
-                let snapshot = rs_peekaboo::cache::load_snapshot(snapshot_id).map_err(|_| {
-                    ProtocolError::StaleTarget("snapshot is unavailable".to_string())
-                })?;
                 let observation = load_coordinate_observation(snapshot_id)?;
                 if observation.protocol_version != PROTOCOL_VERSION
                     || observation.snapshot_id != *snapshot_id
@@ -844,14 +1122,13 @@ impl Executor for RsPeekabooExecutor {
                     || observation.snapshot_content_hash != *snapshot_content_hash
                     || now_ms().saturating_sub(observation.observed_at_ms)
                         > MAX_COORDINATE_OBSERVATION_AGE_MS
-                    || hash_serializable(&snapshot)? != *snapshot_content_hash
                 {
                     return Err(ProtocolError::StaleTarget(
                         "coordinate observation provenance does not match".to_string(),
                     ));
                 }
                 let screens = self
-                    .peekaboo
+                    .runtime
                     .list_screens()
                     .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
                 let current = hash_value(&screens)?;
@@ -883,7 +1160,7 @@ impl Executor for RsPeekabooExecutor {
                         "coordinate is outside its named display".to_string(),
                     ));
                 }
-                Ok(ResolvedTarget::Point(PeekabooPoint { x: *x, y: *y }))
+                Ok(ResolvedTarget::Point(NativePoint { x: *x, y: *y }))
             }
             TargetRef::Element {
                 selector,
@@ -892,7 +1169,7 @@ impl Executor for RsPeekabooExecutor {
                 ..
             } => {
                 let cached = self
-                    .peekaboo
+                    .runtime
                     .resolve_selector(selector, Some(snapshot_id))
                     .map_err(|_| {
                         ProtocolError::StaleTarget(
@@ -906,7 +1183,7 @@ impl Executor for RsPeekabooExecutor {
                     ));
                 }
                 let node = self
-                    .peekaboo
+                    .runtime
                     .resolve_selector(selector, None)
                     .map_err(|_| ProtocolError::TargetNotFound("target not found".to_string()))?;
                 validate_live_element(&node)?;
@@ -941,9 +1218,11 @@ impl Executor for RsPeekabooExecutor {
                 "action is unavailable with current permissions or backend",
             ));
         }
-        let rs_target = || match target {
+        let native_target = || match target {
             ResolvedTarget::Point(point) => Ok(Target::Point(point.clone())),
-            ResolvedTarget::Element(element) => Ok(Target::Element(*element.clone())),
+            ResolvedTarget::Element(_) => {
+                Err(no_effect("this backend requires coordinate targets"))
+            }
             ResolvedTarget::None => Err(no_effect("action requires a target")),
         };
         if matches!(action, Action::Click { .. } | Action::Move)
@@ -970,7 +1249,7 @@ impl Executor for RsPeekabooExecutor {
             )?;
             Self::check_after_effect(cancellation, deadline_at_ms)?;
             return Ok(DispatchReceipt {
-                backend: self.peekaboo.resolve_backend().to_string(),
+                backend: self.runtime.resolve_backend().to_string(),
                 fallback_chain: Vec::new(),
             });
         }
@@ -982,16 +1261,28 @@ impl Executor for RsPeekabooExecutor {
                 if matches!(button, MouseButton::Middle) && !cfg!(target_os = "windows") {
                     return Err(unsupported("middle click is not reliable on this backend"));
                 }
-                self.peekaboo.click_with_options(
-                    rs_target()?,
-                    match button {
-                        MouseButton::Left => "left",
-                        MouseButton::Right => "right",
-                        MouseButton::Middle => "middle",
-                    },
-                    *count,
-                    false,
-                )
+                for index in 0..*count {
+                    if index > 0 && (cancellation.is_cancelled() || now_ms() >= deadline_at_ms) {
+                        return Err(ambiguous("click interrupted after partial dispatch"));
+                    }
+                    self.runtime
+                        .click_with_options(
+                            native_target()?,
+                            match button {
+                                MouseButton::Left => "left",
+                                MouseButton::Right => "right",
+                                MouseButton::Middle => "middle",
+                            },
+                            false,
+                        )
+                        .map_err(ambiguous_dispatch)?;
+                }
+                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
+                    DispatchReceipt {
+                        backend: self.runtime.resolve_backend().to_string(),
+                        fallback_chain: Vec::new(),
+                    }
+                });
             }
             Action::TypeText { .. } => unreachable!("type text handled above"),
             Action::Press {
@@ -1012,7 +1303,7 @@ impl Executor for RsPeekabooExecutor {
                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                         return Err(ambiguous("press interrupted after partial dispatch"));
                     }
-                    self.peekaboo
+                    self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
                     if index + 1 < *count
@@ -1023,7 +1314,7 @@ impl Executor for RsPeekabooExecutor {
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
                     DispatchReceipt {
-                        backend: self.peekaboo.resolve_backend().to_string(),
+                        backend: self.runtime.resolve_backend().to_string(),
                         fallback_chain: Vec::new(),
                     }
                 });
@@ -1032,7 +1323,7 @@ impl Executor for RsPeekabooExecutor {
                 if text.is_empty() || text.len() > 16 * 1024 {
                     return Err(no_effect("paste parameters are invalid"));
                 }
-                self.peekaboo.paste(text)
+                self.runtime.paste(text)
             }
             Action::Hotkey { keys } => {
                 let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1042,7 +1333,7 @@ impl Executor for RsPeekabooExecutor {
                 {
                     return Err(no_effect("hotkey parameters are invalid"));
                 }
-                self.peekaboo.hotkey(&keys)
+                self.runtime.hotkey(&keys)
             }
             Action::Scroll { direction, amount } => {
                 if !(1..=100).contains(amount) {
@@ -1054,13 +1345,13 @@ impl Executor for RsPeekabooExecutor {
                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                         return Err(ambiguous("scroll interrupted after partial dispatch"));
                     }
-                    self.peekaboo
+                    self.runtime
                         .scroll(
                             match direction {
-                                Direction::Up => PeekabooDirection::Up,
-                                Direction::Down => PeekabooDirection::Down,
-                                Direction::Left => PeekabooDirection::Left,
-                                Direction::Right => PeekabooDirection::Right,
+                                Direction::Up => Direction::Up,
+                                Direction::Down => Direction::Down,
+                                Direction::Left => Direction::Left,
+                                Direction::Right => Direction::Right,
                             },
                             1,
                         )
@@ -1068,12 +1359,12 @@ impl Executor for RsPeekabooExecutor {
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
                     DispatchReceipt {
-                        backend: self.peekaboo.resolve_backend().to_string(),
+                        backend: self.runtime.resolve_backend().to_string(),
                         fallback_chain: Vec::new(),
                     }
                 });
             }
-            Action::Move => self.peekaboo.move_cursor(rs_target()?),
+            Action::Move => self.runtime.move_cursor(native_target()?),
             Action::SetValue { value } => {
                 if !cfg!(target_os = "macos") || value.len() > 16 * 1024 {
                     return Err(unsupported("set_value is unavailable on this backend"));
@@ -1081,7 +1372,7 @@ impl Executor for RsPeekabooExecutor {
                 if !matches!(target, ResolvedTarget::Element(element) if element.bounds.is_some()) {
                     return Err(no_effect("set_value requires an element with bounds"));
                 }
-                self.peekaboo.set_value(rs_target()?, value)
+                self.runtime.set_value(native_target()?, value)
             }
         };
         result.map_err(|error| DispatchError {
@@ -1091,19 +1382,19 @@ impl Executor for RsPeekabooExecutor {
         })?;
         Self::check_after_effect(cancellation, deadline_at_ms)?;
         Ok(DispatchReceipt {
-            backend: self.peekaboo.resolve_backend().to_string(),
+            backend: self.runtime.resolve_backend().to_string(),
             fallback_chain: Vec::new(),
         })
     }
 }
 
-impl From<&UiNode> for ElementFingerprint {
-    fn from(node: &UiNode) -> Self {
+impl From<&NativeElement> for ElementFingerprint {
+    fn from(node: &NativeElement) -> Self {
         Self {
             backend: node.backend.clone(),
             id: node.id.clone(),
             app: node.app.clone(),
-            process_id: node.pid.unwrap_or_default(),
+            process_id: node.process_id.unwrap_or_default(),
             window: node.window.clone().unwrap_or_default(),
             role: node.role.clone(),
             label: node
@@ -1121,17 +1412,18 @@ impl From<&UiNode> for ElementFingerprint {
     }
 }
 
-fn validate_live_element(node: &UiNode) -> Result<(), ProtocolError> {
+fn validate_live_element(node: &NativeElement) -> Result<(), ProtocolError> {
     let visible = node.state.get("visible").and_then(Value::as_bool) == Some(true)
         && node.state.get("hidden").and_then(Value::as_bool) != Some(true);
     if node.id.is_empty()
         || node.app.is_empty()
         || node.window.as_deref().is_none_or(str::is_empty)
-        || node.pid.unwrap_or_default() <= 0
+        || node.process_id.unwrap_or_default() <= 0
         || node.enabled != Some(true)
         || !visible
         || !node
             .bounds
+            .as_ref()
             .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
     {
         return Err(ProtocolError::StaleTarget(
@@ -1470,7 +1762,7 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     }
     if let TargetRef::Coordinates { snapshot_id, .. } | TargetRef::Element { snapshot_id, .. } =
         &request.target
-        && rs_peekaboo::cache::validate_snapshot_id(snapshot_id).is_err()
+        && !valid_snapshot_id(snapshot_id)
     {
         return Err(ProtocolError::InvalidRequest(
             "invalid snapshot ID".to_string(),
@@ -1595,7 +1887,7 @@ fn ambiguous(message: &str) -> DispatchError {
     }
 }
 
-fn ambiguous_dispatch(error: rs_peekaboo::PeekabooError) -> DispatchError {
+fn ambiguous_dispatch(error: NativeError) -> DispatchError {
     let _ = error;
     ambiguous("desktop backend failed after dispatch began")
 }
@@ -1616,12 +1908,27 @@ fn redact_message(_message: &str) -> String {
 }
 
 fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolError> {
-    rs_peekaboo::cache::validate_snapshot_id(snapshot_id)
-        .map_err(|_| ProtocolError::InvalidRequest("invalid snapshot ID".to_string()))?;
-    Ok(rs_peekaboo::cache::cache_dir()
-        .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?
-        .join("praefectus-observations")
+    if !valid_snapshot_id(snapshot_id) {
+        return Err(ProtocolError::InvalidRequest(
+            "invalid snapshot ID".to_string(),
+        ));
+    }
+    let root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir);
+    Ok(root
+        .join("praefectus")
+        .join("observations")
         .join(format!("{snapshot_id}.json")))
+}
+
+fn valid_snapshot_id(snapshot_id: &str) -> bool {
+    snapshot_id.len() <= 256
+        && snapshot_id.starts_with("native-")
+        && snapshot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn persist_coordinate_observation(
