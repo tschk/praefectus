@@ -22,6 +22,7 @@ pub struct ActionRequest {
     pub protocol_version: u16,
     pub action_version: u16,
     pub target_version: u16,
+    pub verification_version: u16,
     pub operation_id: String,
     pub subject: String,
     pub session_id: String,
@@ -132,13 +133,6 @@ pub enum Action {
 }
 
 impl Action {
-    fn requires_target(&self) -> bool {
-        matches!(
-            self,
-            Self::Click { .. } | Self::Move | Self::SetValue { .. }
-        )
-    }
-
     fn name(&self) -> &'static str {
         match self {
             Self::Click { .. } => "click",
@@ -313,7 +307,7 @@ struct ElementObservation {
     snapshot_id: String,
     selector_hash: String,
     display_geometry_hash: String,
-    element_fingerprint: ElementFingerprint,
+    element_fingerprint_hash: String,
     observed_at_ms: i64,
 }
 
@@ -437,11 +431,13 @@ impl NativeRuntime {
         target: Target,
         button: &str,
         _background: bool,
-    ) -> Result<(), NativeError> {
+    ) -> Result<(), DispatchError> {
         match target {
-            Target::Point(point) => native_click(&point, button),
+            Target::Point(point) => native_click(&point, button).map_err(ambiguous_dispatch),
             Target::Element(element) if button == "left" => native_element_press(&element),
-            Target::Element(_) => Err(NativeError),
+            Target::Element(_) => Err(unsupported(
+                "semantic elements support only the accessibility press action",
+            )),
         }
     }
 
@@ -487,10 +483,10 @@ impl NativeRuntime {
         Err(NativeError)
     }
 
-    fn set_value(&self, target: Target, value: &str) -> Result<(), NativeError> {
+    fn set_value(&self, target: Target, value: &str) -> Result<(), DispatchError> {
         match target {
             Target::Element(element) => native_element_set_value(&element, value),
-            Target::Point(_) => Err(NativeError),
+            Target::Point(_) => Err(unsupported("set_value requires an element target")),
         }
     }
 }
@@ -513,7 +509,7 @@ fn native_platform_permissions() -> Value {
     serde_json::json!({
         "accessibility": unsafe { accessibility_sys::AXIsProcessTrusted() },
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
-        "coordinate_capture": native_capture_available(),
+        "coordinate_capture": false,
         "private_state": true,
     })
 }
@@ -661,59 +657,6 @@ fn native_target_content_hash(point: &NativePoint) -> Result<String, NativeError
     }
 }
 
-#[cfg(target_os = "macos")]
-fn native_capture_available() -> bool {
-    if macos_major_version().is_none_or(|version| version >= 15)
-        || !core_graphics::access::ScreenCaptureAccess.preflight()
-    {
-        return false;
-    }
-    core_graphics::display::CGDisplay::active_displays()
-        .ok()
-        .and_then(|displays| displays.into_iter().next())
-        .and_then(|display| core_graphics::display::CGDisplay::new(display).image())
-        .is_some()
-}
-
-#[cfg(target_os = "macos")]
-fn macos_major_version() -> Option<u32> {
-    let name = b"kern.osproductversion\0";
-    let mut length = 0;
-    if unsafe {
-        libc::sysctlbyname(
-            name.as_ptr().cast(),
-            std::ptr::null_mut(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-        || length == 0
-    {
-        return None;
-    }
-    let mut value = vec![0_u8; length];
-    if unsafe {
-        libc::sysctlbyname(
-            name.as_ptr().cast(),
-            value.as_mut_ptr().cast(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return None;
-    }
-    let end = value.iter().position(|byte| *byte == 0).unwrap_or(length);
-    std::str::from_utf8(value.get(..end)?)
-        .ok()?
-        .split('.')
-        .next()?
-        .parse()
-        .ok()
-}
-
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
@@ -747,16 +690,16 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
             _ => return Err(NativeError),
         };
         let position = CGPoint::new(point.x as f64, point.y as f64);
-        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        let down_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| NativeError)?;
-        let event = CGEvent::new_mouse_event(source, down, position, mouse_button)
+        let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
             .map_err(|_| NativeError)?;
-        event.post(CGEventTapLocation::HID);
-        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        let up_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| NativeError)?;
-        let event = CGEvent::new_mouse_event(source, up, position, mouse_button)
+        let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
             .map_err(|_| NativeError)?;
-        event.post(CGEventTapLocation::HID);
+        down_event.post(CGEventTapLocation::HID);
+        up_event.post(CGEventTapLocation::HID);
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
@@ -1075,58 +1018,68 @@ fn native_element_at(_point: &NativePoint) -> Result<NativeElement, NativeError>
     Err(NativeError)
 }
 
-fn native_element_press(expected: &NativeElement) -> Result<(), NativeError> {
+fn native_element_press(expected: &NativeElement) -> Result<(), DispatchError> {
     #[cfg(target_os = "macos")]
     {
         use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
         use core_foundation::base::TCFType;
         use core_foundation::string::CFString;
 
-        let bounds = expected.bounds.as_ref().ok_or(NativeError)?;
+        let action = CFString::new("AXPress");
+        let bounds = expected
+            .bounds
+            .as_ref()
+            .ok_or_else(|| no_effect("semantic target has no bounds"))?;
         let point = NativePoint {
             x: bounds.x.saturating_add(bounds.width / 2),
             y: bounds.y.saturating_add(bounds.height / 2),
         };
-        let element = mac_ax_element_at(&point)?;
-        let current = mac_native_element(&element)?;
-        if ElementFingerprint::from(&current) != ElementFingerprint::from(expected) {
-            return Err(NativeError);
-        }
-        let action = CFString::new("AXPress");
+        let element =
+            mac_ax_element_at(&point).map_err(|_| no_effect("semantic target is unavailable"))?;
+        let current = mac_native_element(&element)
+            .map_err(|_| no_effect("semantic target is unavailable"))?;
+        validate_matching_live_element(&current, expected)
+            .map_err(|_| no_effect("semantic target changed"))?;
         if unsafe { AXUIElementPerformAction(element.0, action.as_concrete_TypeRef()) }
             == kAXErrorSuccess
         {
             Ok(())
         } else {
-            Err(NativeError)
+            Err(ambiguous(
+                "accessibility action failed after dispatch began",
+            ))
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = expected;
-        Err(NativeError)
+        Err(unsupported("accessibility actions are unavailable"))
     }
 }
 
-fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(), NativeError> {
+fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(), DispatchError> {
     #[cfg(target_os = "macos")]
     {
         use accessibility_sys::{AXUIElementSetAttributeValue, kAXErrorSuccess};
         use core_foundation::base::TCFType;
         use core_foundation::string::CFString;
 
-        let bounds = expected.bounds.as_ref().ok_or(NativeError)?;
+        let attribute = CFString::new("AXValue");
+        let value = CFString::new(value);
+        let bounds = expected
+            .bounds
+            .as_ref()
+            .ok_or_else(|| no_effect("semantic target has no bounds"))?;
         let point = NativePoint {
             x: bounds.x.saturating_add(bounds.width / 2),
             y: bounds.y.saturating_add(bounds.height / 2),
         };
-        let element = mac_ax_element_at(&point)?;
-        let current = mac_native_element(&element)?;
-        if ElementFingerprint::from(&current) != ElementFingerprint::from(expected) {
-            return Err(NativeError);
-        }
-        let attribute = CFString::new("AXValue");
-        let value = CFString::new(value);
+        let element =
+            mac_ax_element_at(&point).map_err(|_| no_effect("semantic target is unavailable"))?;
+        let current = mac_native_element(&element)
+            .map_err(|_| no_effect("semantic target is unavailable"))?;
+        validate_matching_live_element(&current, expected)
+            .map_err(|_| no_effect("semantic target changed"))?;
         if unsafe {
             AXUIElementSetAttributeValue(
                 element.0,
@@ -1137,13 +1090,15 @@ fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(),
         {
             Ok(())
         } else {
-            Err(NativeError)
+            Err(ambiguous(
+                "accessibility action failed after dispatch began",
+            ))
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (expected, value);
-        Err(NativeError)
+        Err(unsupported("accessibility actions are unavailable"))
     }
 }
 
@@ -1394,10 +1349,34 @@ impl<E: Executor> Engine<E> {
             effect_deadline_at_ms,
         );
         let terminal = match dispatched {
+            Ok(dispatch) if cancellation.is_cancelled() || now_ms() >= effect_deadline_at_ms => {
+                let mut receipt = empty_receipt(request, &action_hash, Effect::Unknown);
+                receipt.started_at_ms = started_at_ms;
+                receipt.finished_at_ms = now_ms();
+                receipt.before = Some(before.evidence);
+                receipt.backend = dispatch.backend;
+                receipt.fallback_chain = dispatch.fallback_chain;
+                Terminal::OutcomeUnknown {
+                    receipt,
+                    message: "action completed at the cancellation or deadline boundary"
+                        .to_string(),
+                }
+            }
             Ok(dispatch) => {
                 let after = self.executor.observe(&request.target);
-                let (effect, warnings) =
-                    verify(&request.verification, &before, after.as_ref().ok());
+                let expected_target_fingerprint_hash = match &request.target {
+                    TargetRef::Element {
+                        element_fingerprint,
+                        ..
+                    } => Some(element_fingerprint_hash(element_fingerprint)?),
+                    _ => None,
+                };
+                let (effect, warnings) = verify(
+                    &request.verification,
+                    &before,
+                    after.as_ref().ok(),
+                    expected_target_fingerprint_hash.as_deref(),
+                );
                 let receipt = Receipt {
                     protocol_version: PROTOCOL_VERSION,
                     action_name: request.action.name().to_string(),
@@ -1438,7 +1417,7 @@ impl<E: Executor> Engine<E> {
             Err(error) if error.effect == EffectKnowledge::ExpiredBeforeEffect => {
                 Terminal::ExpiredBeforeEffect
             }
-            Err(error) => Terminal::Failed {
+            Err(error) => Terminal::Rejected {
                 code: error.code,
                 message: dispatch_message(&error),
             },
@@ -1465,6 +1444,11 @@ impl<E: Executor> Engine<E> {
     }
 
     pub fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
+        if !valid_identifier(operation_id) {
+            return Err(ProtocolError::InvalidRequest(
+                "invalid operation_id".to_string(),
+            ));
+        }
         self.ledger.status(operation_id)
     }
 
@@ -1527,7 +1511,7 @@ impl NativeExecutor {
             snapshot_id: snapshot_id.clone(),
             selector_hash: hash_bytes(selector.as_bytes()),
             display_geometry_hash: capabilities.display_geometry_hash,
-            element_fingerprint: element_fingerprint.clone(),
+            element_fingerprint_hash: element_fingerprint_hash(&element_fingerprint)?,
             observed_at_ms: now_ms(),
         })?;
         Ok(TargetRef::Element {
@@ -1644,20 +1628,9 @@ impl Executor for NativeExecutor {
             .list_screens()
             .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
         let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-        let screen_recording = permissions
-            .get("screen_recording")
-            .copied()
-            .unwrap_or(false);
-        let coordinate_capture = permissions
-            .get("coordinate_capture")
-            .copied()
-            .unwrap_or(false);
         let mut supported_actions = Vec::new();
         if accessibility {
             supported_actions.extend(["click", "set_value"]);
-        }
-        if accessibility && screen_recording && coordinate_capture {
-            supported_actions.push("move");
         }
         Ok(Capabilities {
             platform: std::env::consts::OS.to_string(),
@@ -1696,7 +1669,7 @@ impl Executor for NativeExecutor {
         let target_fingerprint_hash = element
             .as_ref()
             .map(ElementFingerprint::from)
-            .map(|fingerprint| hash_serializable(&fingerprint))
+            .map(|fingerprint| element_fingerprint_hash(&fingerprint))
             .transpose()?;
         let observation_hash = hash_serializable(&(
             &capabilities.display_geometry_hash,
@@ -1794,7 +1767,8 @@ impl Executor for NativeExecutor {
                     || observation.snapshot_id != *snapshot_id
                     || observation.selector_hash != hash_bytes(selector.as_bytes())
                     || observation.display_geometry_hash != capabilities.display_geometry_hash
-                    || observation.element_fingerprint != *element_fingerprint
+                    || observation.element_fingerprint_hash
+                        != element_fingerprint_hash(element_fingerprint)?
                     || observation.observed_at_ms > now_ms()
                     || now_ms().saturating_sub(observation.observed_at_ms)
                         > MAX_COORDINATE_OBSERVATION_AGE_MS
@@ -1828,6 +1802,26 @@ impl Executor for NativeExecutor {
         deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError> {
         Self::check_before_effect(cancellation, deadline_at_ms)?;
+        validate_action(action).map_err(|_| no_effect("action parameters are invalid"))?;
+        match target {
+            ResolvedTarget::Point(_) => {
+                return Err(unsupported(
+                    "coordinate effects require artifact-bound observation provenance",
+                ));
+            }
+            ResolvedTarget::None => return Err(no_effect("action requires a fenced target")),
+            ResolvedTarget::Element(element) => validate_live_element(element)
+                .map_err(|_| no_effect("semantic target is unavailable"))?,
+        }
+        if matches!(
+            (action, target),
+            (
+                Action::Click { count, .. },
+                ResolvedTarget::Element(_)
+            ) if *count > 1
+        ) {
+            return Err(unsupported("repeated semantic clicks are unavailable"));
+        }
         let capabilities = self
             .capabilities()
             .map_err(|_| unsupported("runtime capabilities are unavailable"))?;
@@ -1868,9 +1862,6 @@ impl Executor for NativeExecutor {
         }
         let result = match action {
             Action::Click { button, count, .. } => {
-                if !(1..=3).contains(count) {
-                    return Err(no_effect("click count must be between one and three"));
-                }
                 if matches!(button, MouseButton::Middle) && !cfg!(target_os = "windows") {
                     return Err(unsupported("middle click is not reliable on this backend"));
                 }
@@ -1887,17 +1878,15 @@ impl Executor for NativeExecutor {
                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                         return Err(ambiguous("click interrupted after partial dispatch"));
                     }
-                    self.runtime
-                        .click_with_options(
-                            native_target()?,
-                            match button {
-                                MouseButton::Left => "left",
-                                MouseButton::Right => "right",
-                                MouseButton::Middle => "middle",
-                            },
-                            false,
-                        )
-                        .map_err(ambiguous_dispatch)?;
+                    self.runtime.click_with_options(
+                        native_target()?,
+                        match button {
+                            MouseButton::Left => "left",
+                            MouseButton::Right => "right",
+                            MouseButton::Middle => "middle",
+                        },
+                        false,
+                    )?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
                     return Err(ambiguous("native input event delivery cannot be verified"));
@@ -1915,13 +1904,6 @@ impl Executor for NativeExecutor {
                 count,
                 delay_ms,
             } => {
-                if key.is_empty()
-                    || key.len() > 64
-                    || !(1..=100).contains(count)
-                    || delay_ms.is_some_and(|delay| delay > 1_000)
-                {
-                    return Err(no_effect("press action parameters are invalid"));
-                }
                 for index in 0..*count {
                     if index == 0 {
                         Self::check_before_effect(cancellation, deadline_at_ms)?;
@@ -1944,26 +1926,12 @@ impl Executor for NativeExecutor {
                     }
                 });
             }
-            Action::Paste { text } => {
-                if text.is_empty() || text.len() > 16 * 1024 {
-                    return Err(no_effect("paste parameters are invalid"));
-                }
-                self.runtime.paste(text)
-            }
+            Action::Paste { text } => self.runtime.paste(text),
             Action::Hotkey { keys } => {
                 let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
-                if keys.is_empty()
-                    || keys.len() > 8
-                    || keys.iter().any(|key| key.is_empty() || key.len() > 64)
-                {
-                    return Err(no_effect("hotkey parameters are invalid"));
-                }
                 self.runtime.hotkey(&keys)
             }
             Action::Scroll { direction, amount } => {
-                if !(1..=100).contains(amount) {
-                    return Err(no_effect("scroll amount is invalid"));
-                }
                 for index in 0..*amount {
                     if index == 0 {
                         Self::check_before_effect(cancellation, deadline_at_ms)?;
@@ -2005,14 +1973,20 @@ impl Executor for NativeExecutor {
                 });
             }
             Action::SetValue { value } => {
-                if !cfg!(target_os = "macos") || value.len() > 16 * 1024 {
+                if !cfg!(target_os = "macos") {
                     return Err(unsupported("set_value is unavailable on this backend"));
                 }
                 if !matches!(target, ResolvedTarget::Element(element) if element.bounds.is_some()) {
                     return Err(no_effect("set_value requires an element with bounds"));
                 }
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
-                self.runtime.set_value(native_target()?, value)
+                self.runtime.set_value(native_target()?, value)?;
+                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
+                    DispatchReceipt {
+                        backend: self.runtime.resolve_backend().to_string(),
+                        fallback_chain: Vec::new(),
+                    }
+                });
             }
         };
         result.map_err(|error| DispatchError {
@@ -2069,6 +2043,17 @@ fn validate_live_element(node: &NativeElement) -> Result<(), ProtocolError> {
         return Err(ProtocolError::StaleTarget(
             "target is missing, disabled, or hidden".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_matching_live_element(
+    current: &NativeElement,
+    expected: &NativeElement,
+) -> Result<(), NativeError> {
+    validate_live_element(current).map_err(|_| NativeError)?;
+    if ElementFingerprint::from(current) != ElementFingerprint::from(expected) {
+        return Err(NativeError);
     }
     Ok(())
 }
@@ -2223,18 +2208,59 @@ impl OperationLedger {
     fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
         let _guard = self.execution_lock()?;
         self.repair_tail()?;
-        Ok(self
-            .records()?
-            .into_iter()
-            .rev()
-            .find_map(|record| match record {
+        let mut claim = None;
+        let mut terminal = None;
+        for record in self.records()? {
+            match record {
+                LedgerRecord::Claim {
+                    operation_id: claimed_operation_id,
+                    action_hash,
+                    claimed_at_ms,
+                } if claimed_operation_id == operation_id => {
+                    claim = Some((action_hash, claimed_at_ms));
+                }
                 LedgerRecord::Terminal { acknowledgement }
                     if acknowledgement.operation_id == operation_id =>
                 {
-                    Some(*acknowledgement)
+                    terminal = Some(*acknowledgement);
                 }
-                _ => None,
-            }))
+                _ => {}
+            }
+        }
+        if terminal.is_some() {
+            return Ok(terminal);
+        }
+        let Some((action_hash, claimed_at_ms)) = claim else {
+            return Ok(None);
+        };
+        let finished_at_ms = now_ms();
+        let acknowledgement = ActionAck {
+            protocol_version: PROTOCOL_VERSION,
+            operation_id: operation_id.to_string(),
+            sequence: 2,
+            action_hash: action_hash.clone(),
+            replayed: false,
+            state: AckState::Terminal {
+                terminal: Box::new(Terminal::OutcomeUnknown {
+                    receipt: Receipt {
+                        protocol_version: PROTOCOL_VERSION,
+                        action_name: "unknown".to_string(),
+                        action_hash,
+                        started_at_ms: claimed_at_ms,
+                        finished_at_ms,
+                        backend: "unknown".to_string(),
+                        fallback_chain: Vec::new(),
+                        effect: Effect::Unknown,
+                        before: None,
+                        after: None,
+                        warnings: Vec::new(),
+                    },
+                    message: "a durable claim existed without a terminal receipt".to_string(),
+                }),
+            },
+        };
+        self.finish(&acknowledgement)?;
+        Ok(Some(acknowledgement))
     }
 
     fn records(&self) -> Result<Vec<LedgerRecord>, ProtocolError> {
@@ -2334,6 +2360,7 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
+        || request.verification_version != PROTOCOL_VERSION
     {
         return Err(ProtocolError::InvalidRequest(
             "unsupported protocol version".to_string(),
@@ -2353,11 +2380,17 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
-    if request.action.requires_target() && matches!(request.target, TargetRef::None) {
+    if matches!(request.target, TargetRef::None) {
         return Err(ProtocolError::InvalidRequest(
             "action requires a target".to_string(),
         ));
     }
+    if matches!(request.target, TargetRef::Coordinates { .. }) {
+        return Err(ProtocolError::InvalidRequest(
+            "coordinate targets require artifact-bound observation provenance".to_string(),
+        ));
+    }
+    validate_action(&request.action)?;
     if request.deadline_at_ms <= 0
         || request.authority.signature.len() != 128
         || !request
@@ -2393,14 +2426,14 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         } => {
             !snapshot_id.is_empty()
                 && snapshot_id.len() <= 256
-                && !selector.is_empty()
-                && selector.len() <= 1024
-                && !element_fingerprint.backend.is_empty()
-                && !element_fingerprint.id.is_empty()
-                && !element_fingerprint.app.is_empty()
+                && valid_bounded_text(selector, 1024, false)
+                && valid_bounded_text(&element_fingerprint.backend, 128, false)
+                && valid_bounded_text(&element_fingerprint.id, 512, false)
+                && valid_bounded_text(&element_fingerprint.app, 256, false)
                 && element_fingerprint.process_id > 0
-                && !element_fingerprint.window.is_empty()
-                && !element_fingerprint.role.is_empty()
+                && valid_bounded_text(&element_fingerprint.window, 512, false)
+                && valid_bounded_text(&element_fingerprint.role, 128, false)
+                && valid_bounded_text(&element_fingerprint.label, 1024, true)
                 && element_fingerprint
                     .bounds
                     .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
@@ -2426,12 +2459,55 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+fn validate_action(action: &Action) -> Result<(), ProtocolError> {
+    let valid = match action {
+        Action::Click { count, .. } => (1..=3).contains(count),
+        Action::TypeText { text, delay_ms, .. } => {
+            !text.is_empty()
+                && text.len() <= 16 * 1024
+                && delay_ms.is_none_or(|delay| delay <= 1_000)
+        }
+        Action::Press {
+            key,
+            count,
+            delay_ms,
+        } => {
+            !key.is_empty()
+                && key.len() <= 64
+                && (1..=100).contains(count)
+                && delay_ms.is_none_or(|delay| delay <= 1_000)
+        }
+        Action::Paste { text } => !text.is_empty() && text.len() <= 16 * 1024,
+        Action::Hotkey { keys } => {
+            !keys.is_empty()
+                && keys.len() <= 8
+                && keys.iter().all(|key| !key.is_empty() && key.len() <= 64)
+        }
+        Action::Scroll { amount, .. } => (1..=100).contains(amount),
+        Action::Move => true,
+        Action::SetValue { value } => value.len() <= 16 * 1024,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidRequest(
+            "invalid action parameters".to_string(),
+        ))
+    }
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+}
+
+fn valid_bounded_text(value: &str, max_len: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.is_empty())
+        && value.len() <= max_len
+        && value.chars().all(|character| !character.is_control())
 }
 
 fn is_hash(value: &str) -> bool {
@@ -2443,6 +2519,7 @@ pub fn normalized_action_hash(request: &ActionRequest) -> Result<String, Protoco
         request.protocol_version,
         request.action_version,
         request.target_version,
+        request.verification_version,
         &request.subject,
         &request.session_id,
         &request.action,
@@ -2453,10 +2530,15 @@ pub fn normalized_action_hash(request: &ActionRequest) -> Result<String, Protoco
     ))
 }
 
+pub fn element_fingerprint_hash(fingerprint: &ElementFingerprint) -> Result<String, ProtocolError> {
+    hash_serializable(fingerprint)
+}
+
 fn verify(
     policy: &VerificationPolicy,
     before: &Observation,
     after: Option<&Observation>,
+    expected_target_fingerprint_hash: Option<&str>,
 ) -> (Effect, Vec<String>) {
     match (policy, after) {
         (VerificationPolicy::None, _) => (
@@ -2470,13 +2552,28 @@ fn verify(
         (VerificationPolicy::SnapshotChanged, Some(after))
             if before.evidence.observation_hash != after.evidence.observation_hash =>
         {
-            (Effect::Verified, Vec::new())
+            (
+                Effect::ExecutedUnverified,
+                vec![
+                    "post-action observation changed but does not verify the requested effect"
+                        .to_string(),
+                ],
+            )
         }
         (VerificationPolicy::SnapshotChanged, Some(_)) => (
             Effect::ExecutedUnverified,
             vec!["post-action observation did not change".to_string()],
         ),
-        (VerificationPolicy::TargetState { expected }, Some(after)) if &after.state == expected => {
+        (VerificationPolicy::TargetState { expected }, Some(after))
+            if &after.state == expected
+                && before.evidence.target_fingerprint_hash.is_some()
+                && before.evidence.target_fingerprint_hash
+                    == after.evidence.target_fingerprint_hash
+                && before.evidence.target_fingerprint_hash.as_deref()
+                    == expected_target_fingerprint_hash
+                && before.evidence.display_geometry_hash
+                    == after.evidence.display_geometry_hash =>
+        {
             (Effect::Verified, Vec::new())
         }
         (VerificationPolicy::TargetState { .. }, Some(_)) => (
@@ -2493,15 +2590,23 @@ fn protocol_failure(error: ProtocolError) -> Terminal {
         ProtocolError::InvalidRequest(_) => FailureCode::InvalidRequest,
         _ => FailureCode::DispatchFailed,
     };
-    Terminal::Failed {
-        code,
-        message: match error {
-            ProtocolError::StaleTarget(_) => "stale target".to_string(),
-            ProtocolError::TargetNotFound(_) => "target not found".to_string(),
-            ProtocolError::InvalidRequest(_) => "invalid request".to_string(),
-            ProtocolError::AuthorityDenied => "authority denied".to_string(),
-            _ => "executor failed".to_string(),
-        },
+    let rejected = matches!(
+        &error,
+        ProtocolError::StaleTarget(_)
+            | ProtocolError::TargetNotFound(_)
+            | ProtocolError::InvalidRequest(_)
+    );
+    let message = match error {
+        ProtocolError::StaleTarget(_) => "stale target".to_string(),
+        ProtocolError::TargetNotFound(_) => "target not found".to_string(),
+        ProtocolError::InvalidRequest(_) => "invalid request".to_string(),
+        ProtocolError::AuthorityDenied => "authority denied".to_string(),
+        _ => "executor failed".to_string(),
+    };
+    if rejected {
+        Terminal::Rejected { code, message }
+    } else {
+        Terminal::Failed { code, message }
     }
 }
 
@@ -2596,7 +2701,8 @@ fn native_snapshot_id(display_geometry_hash: &str) -> String {
     static OBSERVATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     format!(
-        "native-{display_geometry_hash}-{}-{}",
+        "native-{display_geometry_hash}-{}-{}-{}",
+        std::process::id(),
         now_ms(),
         OBSERVATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
@@ -2711,7 +2817,7 @@ fn private_open_options() -> OpenOptions {
 
 #[cfg(unix)]
 fn validate_private_directory(
-    path: &Path,
+    _path: &Path,
     metadata: &std::fs::Metadata,
 ) -> Result<(), ProtocolError> {
     use std::os::unix::fs::MetadataExt;
@@ -2719,10 +2825,7 @@ fn validate_private_directory(
     if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
         return Err(ProtocolError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            format!(
-                "Praefectus state directory is not private: {}",
-                path.display()
-            ),
+            "Praefectus state directory is not private",
         )));
     }
     Ok(())
@@ -2887,8 +2990,11 @@ pub fn default_ledger_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorityGrant, NativeBounds, NativePoint, PROTOCOL_VERSION, SafetyClass,
-        canonical_authority_bytes, native_snapshot_id, target_capture_bounds,
+        Action, AuthorityGrant, CancellationToken, EffectKnowledge, ElementFingerprint,
+        ElementObservation, Executor, FailureCode, MouseButton, NativeBounds, NativeElement,
+        NativeExecutor, NativePoint, PROTOCOL_VERSION, Rect, ResolvedTarget, SafetyClass,
+        VerificationPolicy, canonical_authority_bytes, hash_serializable, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element,
     };
 
     #[test]
@@ -2942,6 +3048,102 @@ mod tests {
             Some((100, 50, 64, 64))
         );
         assert!(target_capture_bounds(&display, &NativePoint { x: 300, y: 50 }).is_none());
+    }
+
+    #[test]
+    fn matching_live_element_must_remain_enabled_and_visible() {
+        let expected = NativeElement {
+            backend: "test".to_string(),
+            id: "element".to_string(),
+            app: "app".to_string(),
+            process_id: Some(1),
+            window: Some("window".to_string()),
+            role: "button".to_string(),
+            label: Some("label".to_string()),
+            title: None,
+            bounds: Some(NativeBounds {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+            state: serde_json::json!({"visible": true, "hidden": false}),
+            enabled: Some(true),
+        };
+        let mut current = expected.clone();
+        current.enabled = Some(false);
+        assert!(validate_matching_live_element(&current, &expected).is_err());
+        current.enabled = Some(true);
+        current.state = serde_json::json!({"visible": false, "hidden": true});
+        assert!(validate_matching_live_element(&current, &expected).is_err());
+    }
+
+    #[test]
+    fn repeated_semantic_click_is_rejected_before_effect() {
+        let target = ResolvedTarget::Element(Box::new(NativeElement {
+            backend: "test".to_string(),
+            id: "element".to_string(),
+            app: "app".to_string(),
+            process_id: Some(1),
+            window: Some("window".to_string()),
+            role: "button".to_string(),
+            label: Some("Button".to_string()),
+            title: None,
+            bounds: Some(NativeBounds {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+            state: serde_json::json!({"visible": true, "hidden": false}),
+            enabled: Some(true),
+        }));
+        let error = NativeExecutor::default()
+            .dispatch(
+                &Action::Click {
+                    button: MouseButton::Left,
+                    count: 2,
+                    allow_coordinate_fallback: false,
+                },
+                &target,
+                &VerificationPolicy::None,
+                &CancellationToken::default(),
+                i64::MAX,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.effect, EffectKnowledge::NoEffect);
+        assert!(matches!(error.code, FailureCode::Unsupported));
+    }
+
+    #[test]
+    fn persisted_element_observation_excludes_accessibility_text() {
+        let fingerprint = ElementFingerprint {
+            backend: "backend".to_string(),
+            id: "private-identifier".to_string(),
+            app: "private-app".to_string(),
+            process_id: 1,
+            window: "private-window".to_string(),
+            role: "button".to_string(),
+            label: "private-label".to_string(),
+            bounds: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+        };
+        let observation = ElementObservation {
+            protocol_version: PROTOCOL_VERSION,
+            snapshot_id: "native-snapshot".to_string(),
+            selector_hash: "0".repeat(64),
+            display_geometry_hash: "1".repeat(64),
+            element_fingerprint_hash: hash_serializable(&fingerprint).unwrap(),
+            observed_at_ms: 1,
+        };
+        let persisted = serde_json::to_string(&observation).unwrap();
+
+        assert!(!persisted.contains("private-"));
     }
 
     #[cfg(windows)]

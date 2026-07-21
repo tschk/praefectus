@@ -17,19 +17,21 @@ cargo run -- capabilities
 
 ## Library
 
-Use `Engine<E>` with a host-selected `Executor` and `AuthorityVerifier`. A host creates the canonical action hash, atomically consumes its own approval, binds its UID/subject, session, policy generation, risk, expiry, operation ID, and hash into `AuthorityGrant`, and signs it. Praefectus never owns host approval or policy ledgers. Hosts can use `CancellationToken` for cooperative cancellation and implement another executor for platform-specific integration.
+Use `Engine<E>` with a host-selected `Executor` and `AuthorityVerifier`. A host creates the canonical action hash, atomically consumes its own approval, binds its UID/subject, session, policy generation, risk, expiry, operation ID, and hash into `AuthorityGrant`, and signs it. Praefectus never owns host approval or policy ledgers. Hosts can use `CancellationToken` for cooperative cancellation and implement another executor for platform-specific integration. The host must isolate its ledger and observation directory from untrusted same-UID filesystem writers; Unix `0600` permissions do not create a boundary between processes running as the same user.
 
-`NativeExecutor` is Praefectus-owned. On macOS it uses system Accessibility for fenced semantic press and value actions. On macOS releases before 15 it can also use CoreGraphics for fenced coordinate click/move actions after checking the required permissions and a live capture probe. macOS 15 and later report `coordinate_capture: false` and do not advertise coordinate movement because Apple obsoleted the required CoreGraphics capture API; semantic accessibility actions remain available. Windows and Linux report an unavailable backend with no executable actions. Unix state is restricted to the current user; Windows reports `private_state: false` and persistence fails closed until a private ACL implementation is available. It does not advertise unfenced focus-dependent typing, paste, key, or scroll actions. Coordinate actions require a fresh (30-second) Praefectus-owned screen-content hash and display-topology provenance record created by `NativeExecutor::observe_coordinates`; the returned observation includes the display IDs and bounds needed to construct the target, and arbitrary snapshot IDs are rejected. CoreGraphics cannot confirm delivery of a posted input event, so coordinate execution terminates as `outcome_unknown` unless a fresh bounded target observation proves the requested change. `NativeExecutor::observe_element_at` records the process, window, display topology, selector hash, and element fingerprint before a semantic action; missing, hidden, disabled, stale, ambiguous, or mismatched elements are rejected.
+`NativeExecutor` is Praefectus-owned. On macOS it uses system Accessibility for fenced semantic press and value actions. Coordinate effects are unavailable because the v1 target cannot bind the exact external image pixels, crop, scale, and native-space transform shown to a model; the backend reports `coordinate_capture: false` and does not advertise movement. Windows and Linux report an unavailable backend with no executable actions. Unix state is restricted to the current user; Windows reports `private_state: false` and persistence fails closed until a private ACL implementation is available. It does not advertise unfenced focus-dependent typing, paste, key, or scroll actions. `NativeExecutor::observe_element_at` records the process, window, display topology, selector hash, and element fingerprint before a semantic action; missing, hidden, disabled, stale, ambiguous, or mismatched elements are rejected. Persisted observations contain hashes rather than selector or accessibility text.
 
 ## Protocol guarantees
 
-- Strict protocol version and JSON fields.
+- Strict protocol, action, target, and verification versions and JSON fields.
 - Same operation ID and action hash replays the stored terminal result.
 - Same operation ID with a different hash is rejected as a conflict.
 - A durable claim without a terminal result becomes `outcome_unknown` on recovery.
-- Cached element and coordinate targets are rejected when their live fingerprints or display geometry are stale.
+- Every effect requires an observation-fenced element target; unfenced and coordinate targets fail before authority consumption.
+- Cached element targets are rejected when their live process, window, display, or element fingerprint is stale.
 - Cancellation and deadlines are checked before target resolution and dispatch.
 - Receipts contain hashes and backend metadata, not screenshot or action content.
+- Changed pixels are evidence, not effect verification; only an explicit matching target state is `verified`.
 - Requested verification that cannot prove the expected result terminates as `outcome_unknown`, never success.
 
 ## Host bridges and plugins
