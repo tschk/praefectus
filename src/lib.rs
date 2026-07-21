@@ -2047,6 +2047,7 @@ fn validate_live_element(node: &NativeElement) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_matching_live_element(
     current: &NativeElement,
     expected: &NativeElement,
