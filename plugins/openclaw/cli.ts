@@ -66,6 +66,9 @@ export async function runHostExecutor(
   if (!command?.length) throw new Error("host executor is not configured");
   const [file, ...args] = command;
   if (!file) throw new Error("host executor is not configured");
+  const input = Buffer.from(JSON.stringify({ operation: "execute", request }));
+  if (input.length > MAX_OUTPUT_BYTES)
+    throw new Error("host executor input exceeded limit");
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
       stdio: ["pipe", "pipe", "ignore"],
@@ -83,6 +86,11 @@ export async function runHostExecutor(
       clearTimeout(timeout);
       reject(new Error("host executor failed"));
     });
+    child.stdin.on("error", () => {
+      clearTimeout(timeout);
+      child.kill();
+      reject(new Error("host executor failed"));
+    });
     child.on("close", (code) => {
       clearTimeout(timeout);
       if (code !== 0 || outputBytes > MAX_OUTPUT_BYTES) {
@@ -95,6 +103,6 @@ export async function runHostExecutor(
         reject(new Error("host executor returned invalid JSON"));
       }
     });
-    child.stdin.end(JSON.stringify({ operation: "execute", request }));
+    child.stdin.end(input);
   });
 }
