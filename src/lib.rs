@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -388,9 +388,10 @@ impl NativeRuntime {
         _retina: bool,
     ) -> Result<NativeSnapshot, NativeError> {
         let screens = self.list_screens()?;
+        let display_geometry_hash = hash_value(&screens).map_err(|_| NativeError)?;
         Ok(NativeSnapshot {
-            snapshot_id: format!("native-{}", hash_value(&screens).map_err(|_| NativeError)?),
-            display_geometry_hash: hash_value(&screens).map_err(|_| NativeError)?,
+            snapshot_id: native_snapshot_id(&display_geometry_hash),
+            display_geometry_hash,
         })
     }
 
@@ -1277,12 +1278,7 @@ impl Executor for NativeExecutor {
                         )
                         .map_err(ambiguous_dispatch)?;
                 }
-                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
-                    DispatchReceipt {
-                        backend: self.runtime.resolve_backend().to_string(),
-                        fallback_chain: Vec::new(),
-                    }
-                });
+                return Err(ambiguous("native input event delivery cannot be verified"));
             }
             Action::TypeText { .. } => unreachable!("type text handled above"),
             Action::Press {
@@ -1364,7 +1360,12 @@ impl Executor for NativeExecutor {
                     }
                 });
             }
-            Action::Move => self.runtime.move_cursor(native_target()?),
+            Action::Move => {
+                self.runtime
+                    .move_cursor(native_target()?)
+                    .map_err(ambiguous_dispatch)?;
+                return Err(ambiguous("native input event delivery cannot be verified"));
+            }
             Action::SetValue { value } => {
                 if !cfg!(target_os = "macos") || value.len() > 16 * 1024 {
                     return Err(unsupported("set_value is unavailable on this backend"));
@@ -1931,6 +1932,16 @@ fn valid_snapshot_id(snapshot_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+fn native_snapshot_id(display_geometry_hash: &str) -> String {
+    static OBSERVATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    format!(
+        "native-{display_geometry_hash}-{}-{}",
+        now_ms(),
+        OBSERVATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn persist_coordinate_observation(
     observation: &CoordinateObservation,
 ) -> Result<(), ProtocolError> {
@@ -2061,4 +2072,18 @@ fn now_ms() -> i64 {
 
 pub fn default_ledger_path() -> PathBuf {
     Path::new("praefectus-operations.jsonl").to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_snapshot_id;
+
+    #[test]
+    fn native_snapshot_ids_are_unique() {
+        let geometry_hash = "0".repeat(64);
+        assert_ne!(
+            native_snapshot_id(&geometry_hash),
+            native_snapshot_id(&geometry_hash)
+        );
+    }
 }
