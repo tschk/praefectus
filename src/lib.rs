@@ -1931,10 +1931,10 @@ impl Executor for NativeExecutor {
                     self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
-                    if index + 1 < *count
-                        && let Some(delay) = delay_ms
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(*delay));
+                    if index + 1 < *count {
+                        if let Some(delay) = delay_ms {
+                            std::thread::sleep(std::time::Duration::from_millis(*delay));
+                        }
                     }
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
@@ -2412,10 +2412,13 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid target provenance".to_string(),
         ));
     }
-    if let TargetRef::Coordinates { snapshot_id, .. } | TargetRef::Element { snapshot_id, .. } =
-        &request.target
-        && !valid_protocol_snapshot_id(snapshot_id)
-    {
+    let snapshot_id = match &request.target {
+        TargetRef::Coordinates { snapshot_id, .. } | TargetRef::Element { snapshot_id, .. } => {
+            Some(snapshot_id)
+        }
+        TargetRef::None => None,
+    };
+    if snapshot_id.is_some_and(|snapshot_id| !valid_protocol_snapshot_id(snapshot_id)) {
         return Err(ProtocolError::InvalidRequest(
             "invalid snapshot ID".to_string(),
         ));
