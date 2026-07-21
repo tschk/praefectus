@@ -1,0 +1,6 @@
+/target
+*.jsonl
+*.lock.tmp
+node_modules/
+dist/
+__pycache__/

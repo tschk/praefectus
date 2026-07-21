@@ -1,0 +1,9 @@
+name: praefectus
+version: 0.1.0
+description: "Host-authorized durable desktop actions through a host-owned Praefectus bridge."
+author: undivisible
+kind: backend
+provides_tools:
+  - praefectus_execute
+  - praefectus_status
+  - praefectus_capabilities
