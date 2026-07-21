@@ -516,17 +516,17 @@ fn native_platform_permissions() -> Value {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn native_platform_permissions() -> Value {
-    serde_json::json!({"accessibility": false, "screen_recording": false, "private_state": true})
+    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": true})
 }
 
 #[cfg(windows)]
 fn native_platform_permissions() -> Value {
-    serde_json::json!({"accessibility": false, "screen_recording": false, "private_state": false})
+    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": false})
 }
 
 #[cfg(not(any(unix, windows)))]
 fn native_platform_permissions() -> Value {
-    serde_json::json!({"accessibility": false, "screen_recording": false, "private_state": false})
+    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": false})
 }
 
 fn native_screens() -> Result<Value, NativeError> {
