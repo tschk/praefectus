@@ -19,7 +19,7 @@ cargo run -- capabilities
 
 Use `Engine<E>` with a host-selected `Executor` and `AuthorityVerifier`. A host creates the canonical action hash, atomically consumes its own approval, binds its UID/subject, session, policy generation, risk, expiry, operation ID, and hash into `AuthorityGrant`, and signs it. Praefectus never owns host approval or policy ledgers. Hosts can use `CancellationToken` for cooperative cancellation and implement another executor for platform-specific integration.
 
-`NativeExecutor` is Praefectus-owned. On macOS it uses the system CoreGraphics framework for fenced coordinate click/move actions after verifying current Accessibility and Screen Recording permission. Windows and Linux report an unavailable backend with no executable actions. It does not advertise unfenced focus-dependent typing, paste, key, scroll, value-setting, or semantic accessibility actions. Coordinate actions require a fresh (30-second) Praefectus-owned screen-content hash and display-topology provenance record created by `NativeExecutor::observe_coordinates`; arbitrary snapshot IDs are rejected. CoreGraphics cannot confirm delivery of a posted input event, so coordinate execution terminates as `outcome_unknown` unless a fresh owned screen observation proves the requested change. Element actions are rejected when missing, hidden, disabled, stale, ambiguous, or mismatched.
+`NativeExecutor` is Praefectus-owned. On macOS it uses system Accessibility for fenced semantic press and value actions and CoreGraphics for fenced coordinate click/move actions after checking the required permissions. Windows and Linux report an unavailable backend with no executable actions. Unix state is restricted to the current user; Windows reports `private_state: false` and persistence fails closed until a private ACL implementation is available. It does not advertise unfenced focus-dependent typing, paste, key, or scroll actions. Coordinate actions require a fresh (30-second) Praefectus-owned screen-content hash and display-topology provenance record created by `NativeExecutor::observe_coordinates`; the returned observation includes the display IDs and bounds needed to construct the target, and arbitrary snapshot IDs are rejected. CoreGraphics cannot confirm delivery of a posted input event, so coordinate execution terminates as `outcome_unknown` unless a fresh bounded target observation proves the requested change. `NativeExecutor::observe_element_at` records the process, window, display topology, selector hash, and element fingerprint before a semantic action; missing, hidden, disabled, stale, ambiguous, or mismatched elements are rejected.
 
 ## Protocol guarantees
 
@@ -46,7 +46,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --all-targets --all-features
 cargo build --release
-cargo package --allow-dirty
+cargo package
 ```
 
 ## License

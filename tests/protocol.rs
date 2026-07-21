@@ -7,8 +7,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use praefectus::{
     AckState, Action, ActionRequest, AuthorityGrant, CancellationToken, Capabilities, Direction,
     DispatchError, DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge, Engine,
-    Evidence, Executor, FailureCode, Observation, PROTOCOL_VERSION, ProtocolError, ResolvedTarget,
-    SafetyClass, SignedAuthority, TargetRef, Terminal, VerificationPolicy, normalized_action_hash,
+    Evidence, Executor, FailureCode, Observation, PROTOCOL_VERSION, ProtocolError, Rect,
+    ResolvedTarget, SafetyClass, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
+    normalized_action_hash,
 };
 
 #[derive(Clone, Copy)]
@@ -153,7 +154,10 @@ fn sign_request(request: &mut ActionRequest) {
     request.authority.grant.action_hash = normalized_action_hash(request).expect("action hash");
     request.authority.signature = hex::encode(
         signing_key()
-            .sign(&serde_json::to_vec(&request.authority.grant).expect("grant JSON"))
+            .sign(
+                &praefectus::canonical_authority_bytes(&request.authority.grant)
+                    .expect("grant JSON"),
+            )
             .to_bytes(),
     );
 }
@@ -335,6 +339,65 @@ fn nested_protocol_versions_are_strict() {
         engine.execute(&invalid, &CancellationToken::default()),
         Err(ProtocolError::InvalidRequest(_))
     ));
+}
+
+#[test]
+fn provider_snapshot_ids_are_not_native_runtime_ids() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let engine = Engine::new(
+        MockExecutor::new(),
+        directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let mut custom = request("provider-snapshot");
+    custom.target = TargetRef::Element {
+        selector: "provider-selector".to_string(),
+        snapshot_id: "provider/session snapshot".to_string(),
+        element_fingerprint: praefectus::ElementFingerprint {
+            backend: "provider".to_string(),
+            id: "element-1".to_string(),
+            app: "provider-app".to_string(),
+            process_id: 42,
+            window: "window-1".to_string(),
+            role: "button".to_string(),
+            label: "Submit".to_string(),
+            bounds: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+        },
+    };
+    sign_request(&mut custom);
+
+    assert!(
+        engine
+            .execute(&custom, &CancellationToken::default())
+            .is_ok()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn newly_created_ledger_directory_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temp directory");
+    let state = directory.path().join("private/state");
+    let engine = Engine::new(MockExecutor::new(), state.join("ledger.jsonl"), authority());
+    engine
+        .execute(&request("private-directory"), &CancellationToken::default())
+        .expect("execution");
+
+    assert_eq!(
+        fs::metadata(state)
+            .expect("state metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
 }
 
 #[test]

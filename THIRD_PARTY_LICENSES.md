@@ -2,6 +2,7 @@
 
 Generated from `cargo metadata --locked --format-version 1` on 2026-07-21. This inventory includes target- and development-resolution packages recorded in `Cargo.lock`; each package retains its original notices and license text.
 
+- `accessibility-sys` 0.2.0 — MIT / Apache-2.0
 - `base64ct` 1.8.3 — Apache-2.0 OR MIT
 - `bitflags` 2.13.1 — MIT OR Apache-2.0
 - `block-buffer` 0.10.4 — MIT OR Apache-2.0
