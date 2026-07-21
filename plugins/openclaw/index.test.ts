@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Value } from "typebox/value";
 import { runHostExecutor } from "./cli.ts";
 import { praefectusPlugin, tools } from "./index.ts";
 
@@ -83,6 +84,90 @@ describe("Praefectus OpenClaw tools", () => {
     const output = await execute.execute("call-1", {} as never);
     expect(output.details).toEqual({
       error: { code: "host_executor_unavailable" },
+      retry_safe: false,
+    });
+  });
+
+  test("returns redacted stable errors for unavailable CLI operations", async () => {
+    const registered = tools({}, async () => {
+      throw new Error("backend secret");
+    });
+    const capabilities = registered.find(
+      (tool) => tool.name === "praefectus_capabilities",
+    )!;
+    const status = registered.find(
+      (tool) => tool.name === "praefectus_status",
+    )!;
+    await expect(
+      capabilities.execute("call-1", {} as never),
+    ).resolves.toMatchObject({
+      details: { error: { code: "praefectus_unavailable" } },
+    });
+    await expect(
+      status.execute("call-2", { operation_id: "operation-1" }),
+    ).resolves.toMatchObject({
+      details: { error: { code: "praefectus_unavailable" } },
+    });
+  });
+
+  test("enforces the core request bounds in the tool schema", () => {
+    const execute = tools({}).find(
+      (tool) => tool.name === "praefectus_execute",
+    )!;
+    const request = {
+      operation_id: "operation-1",
+      action: {
+        kind: "click",
+        button: "left",
+        count: 1,
+        allow_coordinate_fallback: false,
+      },
+      target: {
+        kind: "coordinates",
+        x: 1,
+        y: 2,
+        display_id: "main",
+        display_geometry_hash: "a".repeat(64),
+        snapshot_id: "backend:snapshot/1",
+        snapshot_content_hash: "b".repeat(64),
+      },
+      deadline_at_ms: 1,
+      verification: { kind: "snapshot_changed" },
+      safety: "reversible",
+    };
+    expect(Value.Check(execute.parameters, request)).toBeTrue();
+    expect(
+      Value.Check(execute.parameters, {
+        ...request,
+        operation_id: "contains spaces",
+      }),
+    ).toBeFalse();
+    expect(
+      Value.Check(execute.parameters, {
+        ...request,
+        action: { ...request.action, count: 4 },
+      }),
+    ).toBeFalse();
+    expect(
+      Value.Check(execute.parameters, {
+        ...request,
+        target: { ...request.target, snapshot_content_hash: "not-a-hash" },
+      }),
+    ).toBeFalse();
+  });
+
+  test("redacts malformed error codes from child processes", async () => {
+    const registered = tools({}, async () => ({
+      ok: false,
+      error: { code: "backend secret", message: "credential" },
+    }));
+    const capabilities = registered.find(
+      (tool) => tool.name === "praefectus_capabilities",
+    )!;
+    const output = await capabilities.execute("call-1", {} as never);
+    expect(output.details).toEqual({
+      ok: false,
+      error: { code: "praefectus_error" },
     });
   });
 
@@ -98,5 +183,20 @@ describe("Praefectus OpenClaw tools", () => {
       operation: "execute",
       request: { operation_id: "op-1" },
     });
+  });
+
+  test("rejects oversized host executor output", async () => {
+    await expect(
+      runHostExecutor(
+        { operation_id: "op-1" },
+        {
+          hostExecutorCommand: [
+            process.execPath,
+            "-e",
+            'process.stdout.write("x".repeat(1048577))',
+          ],
+        },
+      ),
+    ).rejects.toThrow("host executor failed");
   });
 });

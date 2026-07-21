@@ -8,46 +8,59 @@ import {
 } from "./cli.ts";
 
 const NonEmpty = Type.String({ minLength: 1 });
-const Timestamp = Type.Integer();
+const Identifier = Type.String({
+  minLength: 1,
+  maxLength: 256,
+  pattern: "^[A-Za-z0-9_:-]+$",
+});
+const Hash = Type.String({
+  minLength: 64,
+  maxLength: 64,
+  pattern: "^[0-9A-Fa-f]+$",
+});
+const SnapshotId = Type.String({
+  minLength: 1,
+  maxLength: 256,
+  pattern: "^[^\\x00-\\x1F\\x7F-\\x9F]+$",
+});
+const Key = Type.String({ minLength: 1, maxLength: 64 });
+const Timestamp = Type.Integer({ minimum: 1 });
 const Target = Type.Union([
   Type.Object(
     {
       kind: Type.Literal("coordinates"),
       x: Type.Integer(),
       y: Type.Integer(),
-      display_id: NonEmpty,
-      display_geometry_hash: NonEmpty,
-      snapshot_id: NonEmpty,
-      snapshot_content_hash: NonEmpty,
+      display_id: Type.String({ minLength: 1, maxLength: 256 }),
+      display_geometry_hash: Hash,
+      snapshot_id: SnapshotId,
+      snapshot_content_hash: Hash,
     },
     { additionalProperties: false },
   ),
   Type.Object(
     {
       kind: Type.Literal("element"),
-      selector: NonEmpty,
-      snapshot_id: NonEmpty,
+      selector: Type.String({ minLength: 1, maxLength: 1024 }),
+      snapshot_id: SnapshotId,
       element_fingerprint: Type.Object(
         {
           backend: NonEmpty,
           id: NonEmpty,
           app: NonEmpty,
-          process_id: Type.Integer({ minimum: 0 }),
+          process_id: Type.Integer({ minimum: 1 }),
           window: NonEmpty,
-          role: Type.String(),
+          role: NonEmpty,
           label: Type.String(),
-          bounds: Type.Union([
-            Type.Object(
-              {
-                x: Type.Integer(),
-                y: Type.Integer(),
-                width: Type.Integer(),
-                height: Type.Integer(),
-              },
-              { additionalProperties: false },
-            ),
-            Type.Null(),
-          ]),
+          bounds: Type.Object(
+            {
+              x: Type.Integer(),
+              y: Type.Integer(),
+              width: Type.Integer({ minimum: 1 }),
+              height: Type.Integer({ minimum: 1 }),
+            },
+            { additionalProperties: false },
+          ),
         },
         { additionalProperties: false },
       ),
@@ -56,7 +69,7 @@ const Target = Type.Union([
   ),
   Type.Object({ kind: Type.Literal("none") }, { additionalProperties: false }),
 ]);
-const Delay = Type.Optional(Type.Integer({ minimum: 0 }));
+const Delay = Type.Optional(Type.Integer({ minimum: 0, maximum: 1000 }));
 const Action = Type.Union([
   Type.Object(
     {
@@ -66,7 +79,7 @@ const Action = Type.Union([
         Type.Literal("right"),
         Type.Literal("middle"),
       ]),
-      count: Type.Integer({ minimum: 1 }),
+      count: Type.Integer({ minimum: 1, maximum: 3 }),
       allow_coordinate_fallback: Type.Boolean(),
     },
     { additionalProperties: false },
@@ -74,7 +87,7 @@ const Action = Type.Union([
   Type.Object(
     {
       kind: Type.Literal("type_text"),
-      text: Type.String(),
+      text: Type.String({ minLength: 1, maxLength: 16384 }),
       clear: Type.Boolean(),
       press_return: Type.Boolean(),
       delay_ms: Delay,
@@ -84,20 +97,23 @@ const Action = Type.Union([
   Type.Object(
     {
       kind: Type.Literal("press"),
-      key: NonEmpty,
-      count: Type.Integer({ minimum: 1 }),
+      key: Key,
+      count: Type.Integer({ minimum: 1, maximum: 100 }),
       delay_ms: Delay,
     },
     { additionalProperties: false },
   ),
   Type.Object(
-    { kind: Type.Literal("paste"), text: Type.String() },
+    {
+      kind: Type.Literal("paste"),
+      text: Type.String({ minLength: 1, maxLength: 16384 }),
+    },
     { additionalProperties: false },
   ),
   Type.Object(
     {
       kind: Type.Literal("hotkey"),
-      keys: Type.Array(NonEmpty, { minItems: 1 }),
+      keys: Type.Array(Key, { minItems: 1, maxItems: 8 }),
     },
     { additionalProperties: false },
   ),
@@ -110,13 +126,16 @@ const Action = Type.Union([
         Type.Literal("left"),
         Type.Literal("right"),
       ]),
-      amount: Type.Integer({ minimum: 1 }),
+      amount: Type.Integer({ minimum: 1, maximum: 100 }),
     },
     { additionalProperties: false },
   ),
   Type.Object({ kind: Type.Literal("move") }, { additionalProperties: false }),
   Type.Object(
-    { kind: Type.Literal("set_value"), value: Type.String() },
+    {
+      kind: Type.Literal("set_value"),
+      value: Type.String({ maxLength: 16384 }),
+    },
     { additionalProperties: false },
   ),
 ]);
@@ -133,7 +152,7 @@ const Verification = Type.Union([
 ]);
 const Request = Type.Object(
   {
-    operation_id: NonEmpty,
+    operation_id: Identifier,
     action: Action,
     target: Target,
     deadline_at_ms: Timestamp,
@@ -155,6 +174,8 @@ const RedactedKeys = new Set([
   "credential",
   "error",
   "evidence",
+  "expected",
+  "fallback_chain",
   "issuer",
   "key",
   "locator",
@@ -181,10 +202,11 @@ function jsonSafe(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
       if (key === "error") {
+        const code = isObject(item) ? item.code : undefined;
         return [
           key,
-          isObject(item) && typeof item.code === "string"
-            ? { code: item.code }
+          typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)
+            ? { code }
             : { code: "praefectus_error" },
         ];
       }
@@ -244,7 +266,11 @@ export function tools(
         "Report the desktop actions and permissions exposed by Praefectus",
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute() {
-        return result(await run("capabilities", undefined, options));
+        try {
+          return result(await run("capabilities", undefined, options));
+        } catch {
+          return result({ error: { code: "praefectus_unavailable" } });
+        }
       },
     },
     {
@@ -252,11 +278,15 @@ export function tools(
       label: "Praefectus operation status",
       description: "Read the durable status of one Praefectus operation",
       parameters: Type.Object(
-        { operation_id: NonEmpty },
+        { operation_id: Identifier },
         { additionalProperties: false },
       ),
       async execute(_id: string, params: { operation_id: string }) {
-        return result(await run("status", params.operation_id, options));
+        try {
+          return result(await run("status", params.operation_id, options));
+        } catch {
+          return result({ error: { code: "praefectus_unavailable" } });
+        }
       },
     },
     {
@@ -269,7 +299,10 @@ export function tools(
         try {
           return result(await hostExecutor(requestForHost(params)));
         } catch {
-          return result({ error: { code: "host_executor_unavailable" } });
+          return result({
+            error: { code: "host_executor_unavailable" },
+            retry_safe: false,
+          });
         }
       },
     },

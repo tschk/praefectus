@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+
 export type PraefectusOptions = {
   command?: string;
   ledger?: string;
@@ -20,20 +22,27 @@ export async function runPraefectus(
   if (operation === "status") args.push(String(input));
   return new Promise((resolve, reject) => {
     const child = spawn(options.command ?? "praefectus", args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     });
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
+    let outputBytes = 0;
     const timeout = setTimeout(() => child.kill(), 30_000);
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", (error) => {
+    child.stdout.on("data", (chunk: Buffer) => {
+      outputBytes += chunk.length;
+      if (outputBytes <= MAX_OUTPUT_BYTES) stdout.push(chunk);
+      else child.kill();
+    });
+    child.on("error", () => {
       clearTimeout(timeout);
-      reject(error);
+      reject(new Error("praefectus command failed"));
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      if (outputBytes > MAX_OUTPUT_BYTES) {
+        reject(new Error("praefectus output exceeded limit"));
+        return;
+      }
       const output = Buffer.concat(stdout).toString("utf8");
       let value: unknown;
       try {
@@ -59,19 +68,24 @@ export async function runHostExecutor(
   if (!file) throw new Error("host executor is not configured");
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     });
     const stdout: Buffer[] = [];
+    let outputBytes = 0;
     const timeout = setTimeout(() => child.kill(), 30_000);
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      outputBytes += chunk.length;
+      if (outputBytes <= MAX_OUTPUT_BYTES) stdout.push(chunk);
+      else child.kill();
+    });
     child.on("error", () => {
       clearTimeout(timeout);
       reject(new Error("host executor failed"));
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
-      if (code !== 0) {
+      if (code !== 0 || outputBytes > MAX_OUTPUT_BYTES) {
         reject(new Error("host executor failed"));
         return;
       }

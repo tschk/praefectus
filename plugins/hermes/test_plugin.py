@@ -48,11 +48,20 @@ class PluginTest(unittest.TestCase):
     def test_execute_fails_closed_without_host_authority(self):
         with patch.dict(os.environ, {}, clear=True):
             result = json.loads(plugin._execute({}))
-        self.assertEqual(result["error"], "Praefectus host executor is unavailable")
+        self.assertEqual(result["error"], {"code": "host_executor_unavailable"})
+        self.assertFalse(result["retry_safe"])
 
     def test_coordinate_targets_require_snapshot_content_hash(self):
         coordinate = plugin._TARGET["oneOf"][1]
         self.assertIn("snapshot_content_hash", coordinate["required"])
+        self.assertEqual(coordinate["properties"]["snapshot_content_hash"]["maxLength"], 64)
+        self.assertNotIn("native-", coordinate["properties"]["snapshot_id"]["pattern"])
+        click = plugin._ACTION["oneOf"][0]
+        self.assertEqual(click["properties"]["count"]["maximum"], 3)
+        operation_id = plugin.EXECUTE_SCHEMA["parameters"]["properties"]["operation_id"]
+        self.assertEqual(operation_id["maxLength"], 256)
+        self.assertIn("pattern", operation_id)
+        self.assertEqual(plugin.STATUS_SCHEMA["parameters"]["properties"]["operation_id"], operation_id)
 
     def test_host_executor_errors_do_not_escape(self):
         with patch.object(plugin, "_run_host_executor", side_effect=RuntimeError("backend secret")):
@@ -60,11 +69,48 @@ class PluginTest(unittest.TestCase):
         self.assertNotIn("backend secret", json.dumps(result))
 
     def test_host_executor_receives_a_single_json_request(self):
-        completed = types.SimpleNamespace(returncode=0, stdout='{"ok":true}')
-        with patch.dict(os.environ, {"PRAEFECTUS_HOST_EXECUTOR": "/host/praefectus-bridge"}, clear=True), patch.object(plugin.subprocess, "run", return_value=completed) as run:
+        with patch.dict(os.environ, {"PRAEFECTUS_HOST_EXECUTOR": "/host/praefectus-bridge"}, clear=True), patch.object(plugin, "_invoke", return_value=(0, {"ok": True})) as invoke:
             self.assertEqual(plugin._run_host_executor({"operation_id": "op-1"}), {"ok": True})
-        self.assertEqual(run.call_args.args[0], ["/host/praefectus-bridge"])
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"operation": "execute", "request": {"operation_id": "op-1"}})
+        self.assertEqual(invoke.call_args.args, (["/host/praefectus-bridge"], {"operation": "execute", "request": {"operation_id": "op-1"}}, "host executor failed"))
+
+    def test_subprocess_output_is_bounded(self):
+        with self.assertRaisesRegex(RuntimeError, "host executor failed"):
+            plugin._invoke([sys.executable, "-c", 'import sys;sys.stdout.write("x" * 1048577)'], None, "host executor failed")
+
+    def test_cli_envelopes_are_preserved_and_redacted(self):
+        result = {
+            "ok": True,
+            "data": {
+                "acknowledgements": [
+                    {
+                        "operation_id": "op-1",
+                        "state": {
+                            "kind": "terminal",
+                            "terminal": {
+                                "kind": "outcome_unknown",
+                                "message": "backend secret",
+                                "receipt": {"effect": "unknown", "warnings": ["secret"]},
+                            },
+                        },
+                    }
+                ]
+            },
+        }
+        redacted = plugin._redact(result)
+        terminal = redacted["data"]["acknowledgements"][0]["terminal"]
+        self.assertFalse(terminal["retry_safe"])
+        self.assertNotIn("backend secret", json.dumps(redacted))
+
+    def test_cli_errors_do_not_escape_backend_details(self):
+        with patch.object(plugin, "_run", side_effect=RuntimeError("backend secret")):
+            status = json.loads(plugin._status({"operation_id": "op-1"}))
+            capabilities = json.loads(plugin._capabilities({}))
+        self.assertEqual(status["error"], "Praefectus status is unavailable")
+        self.assertEqual(capabilities["error"], "Praefectus capabilities are unavailable")
+
+    def test_malformed_error_codes_are_redacted(self):
+        result = plugin._redact({"ok": False, "error": {"code": "backend secret", "message": "credential"}, "retry_safe": False})
+        self.assertEqual(result, {"ok": False, "error": {"code": "praefectus_error"}, "retry_safe": False})
 
 
 if __name__ == "__main__":
