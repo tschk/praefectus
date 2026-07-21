@@ -81,6 +81,7 @@ impl Executor for MockExecutor {
         &self,
         _action: &Action,
         _target: &ResolvedTarget,
+        _verification: &VerificationPolicy,
         _cancellation: &CancellationToken,
         _deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError> {

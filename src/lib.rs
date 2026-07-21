@@ -348,6 +348,7 @@ enum ImageMode {
 struct NativeSnapshot {
     snapshot_id: String,
     display_geometry_hash: String,
+    content_hash: String,
 }
 
 #[derive(Debug)]
@@ -389,9 +390,11 @@ impl NativeRuntime {
     ) -> Result<NativeSnapshot, NativeError> {
         let screens = self.list_screens()?;
         let display_geometry_hash = hash_value(&screens).map_err(|_| NativeError)?;
+        let content_hash = native_screen_content_hash()?;
         Ok(NativeSnapshot {
             snapshot_id: native_snapshot_id(&display_geometry_hash),
             display_geometry_hash,
+            content_hash,
         })
     }
 
@@ -416,6 +419,10 @@ impl NativeRuntime {
     fn move_cursor(&self, target: Target) -> Result<(), NativeError> {
         let Target::Point(point) = target;
         native_move(&point)
+    }
+
+    fn screen_content_hash(&self) -> Result<String, NativeError> {
+        native_screen_content_hash()
     }
 
     fn type_text(
@@ -501,6 +508,34 @@ fn native_screens() -> Result<Value, NativeError> {
     }
     #[cfg(not(target_os = "macos"))]
     Ok(Value::Array(Vec::new()))
+}
+
+fn native_screen_content_hash() -> Result<String, NativeError> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::display::CGDisplay;
+
+        if !native_permissions()
+            .get("screen_recording")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(NativeError);
+        }
+        let mut hasher = Sha256::new();
+        for id in CGDisplay::active_displays().map_err(|_| NativeError)? {
+            let display = CGDisplay::new(id);
+            let image = display.image().ok_or(NativeError)?;
+            let data = image.data();
+            hasher.update(id.to_be_bytes());
+            hasher.update(image.width().to_be_bytes());
+            hasher.update(image.height().to_be_bytes());
+            hasher.update(data.as_ref());
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err(NativeError)
 }
 
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
@@ -618,6 +653,7 @@ pub trait Executor: Send + Sync {
         &self,
         action: &Action,
         target: &ResolvedTarget,
+        verification: &VerificationPolicy,
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError>;
@@ -829,6 +865,7 @@ impl<E: Executor> Engine<E> {
         let dispatched = self.executor.dispatch(
             &request.action,
             &resolved,
+            &request.verification,
             cancellation,
             effect_deadline_at_ms,
         );
@@ -930,17 +967,12 @@ impl NativeExecutor {
             .runtime
             .see(None, ImageMode::Screen, None, false)
             .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
-        let display_geometry_hash = hash_value(
-            &self
-                .runtime
-                .list_screens()
-                .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?,
-        )?;
+        let display_geometry_hash = snapshot.display_geometry_hash.clone();
         let observation = CoordinateObservation {
             protocol_version: PROTOCOL_VERSION,
             snapshot_id: snapshot.snapshot_id.clone(),
             display_geometry_hash,
-            snapshot_content_hash: hash_serializable(&snapshot)?,
+            snapshot_content_hash: snapshot.content_hash,
             observed_at_ms: now_ms(),
         };
         persist_coordinate_observation(&observation)?;
@@ -1054,8 +1086,12 @@ impl Executor for NativeExecutor {
             .list_screens()
             .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
         let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
+        let screen_recording = permissions
+            .get("screen_recording")
+            .copied()
+            .unwrap_or(false);
         let mut supported_actions = Vec::new();
-        if accessibility {
+        if accessibility && screen_recording {
             supported_actions.extend(["click", "move"]);
         }
         Ok(Capabilities {
@@ -1080,10 +1116,16 @@ impl Executor for NativeExecutor {
             }
             _ => None,
         };
-        let state = element
-            .as_ref()
-            .map(|node| node.state.clone())
-            .unwrap_or(Value::Null);
+        let state = match element.as_ref() {
+            Some(node) => node.state.clone(),
+            None if matches!(target, TargetRef::Coordinates { .. }) => serde_json::json!({
+                "snapshot_content_hash": self
+                    .runtime
+                    .screen_content_hash()
+                    .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?,
+            }),
+            None => Value::Null,
+        };
         let target_fingerprint_hash = element
             .as_ref()
             .map(ElementFingerprint::from)
@@ -1136,6 +1178,15 @@ impl Executor for NativeExecutor {
                 if &current != display_geometry_hash {
                     return Err(ProtocolError::StaleTarget(
                         "display geometry changed".to_string(),
+                    ));
+                }
+                let current_content_hash = self
+                    .runtime
+                    .screen_content_hash()
+                    .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
+                if &current_content_hash != snapshot_content_hash {
+                    return Err(ProtocolError::StaleTarget(
+                        "screen observation changed".to_string(),
                     ));
                 }
                 let on_display = screens.as_array().is_some_and(|values| {
@@ -1203,6 +1254,7 @@ impl Executor for NativeExecutor {
         &self,
         action: &Action,
         target: &ResolvedTarget,
+        verification: &VerificationPolicy,
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError> {
@@ -1278,7 +1330,15 @@ impl Executor for NativeExecutor {
                         )
                         .map_err(ambiguous_dispatch)?;
                 }
-                return Err(ambiguous("native input event delivery cannot be verified"));
+                if matches!(verification, VerificationPolicy::None) {
+                    return Err(ambiguous("native input event delivery cannot be verified"));
+                }
+                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
+                    DispatchReceipt {
+                        backend: self.runtime.resolve_backend().to_string(),
+                        fallback_chain: Vec::new(),
+                    }
+                });
             }
             Action::TypeText { .. } => unreachable!("type text handled above"),
             Action::Press {
@@ -1364,7 +1424,15 @@ impl Executor for NativeExecutor {
                 self.runtime
                     .move_cursor(native_target()?)
                     .map_err(ambiguous_dispatch)?;
-                return Err(ambiguous("native input event delivery cannot be verified"));
+                if matches!(verification, VerificationPolicy::None) {
+                    return Err(ambiguous("native input event delivery cannot be verified"));
+                }
+                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
+                    DispatchReceipt {
+                        backend: self.runtime.resolve_backend().to_string(),
+                        fallback_chain: Vec::new(),
+                    }
+                });
             }
             Action::SetValue { value } => {
                 if !cfg!(target_os = "macos") || value.len() > 16 * 1024 {
