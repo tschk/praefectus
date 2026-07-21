@@ -513,6 +513,7 @@ fn native_platform_permissions() -> Value {
     serde_json::json!({
         "accessibility": unsafe { accessibility_sys::AXIsProcessTrusted() },
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
+        "coordinate_capture": native_capture_available(),
         "private_state": true,
     })
 }
@@ -564,7 +565,7 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
         use core_graphics::display::CGDisplay;
 
         if !native_permissions()
-            .get("screen_recording")
+            .get("coordinate_capture")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
@@ -616,7 +617,7 @@ fn native_target_content_hash(point: &NativePoint) -> Result<String, NativeError
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
         if !native_permissions()
-            .get("screen_recording")
+            .get("coordinate_capture")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
@@ -658,6 +659,59 @@ fn native_target_content_hash(point: &NativePoint) -> Result<String, NativeError
         let _ = point;
         Err(NativeError)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn native_capture_available() -> bool {
+    if macos_major_version().is_none_or(|version| version >= 15)
+        || !core_graphics::access::ScreenCaptureAccess.preflight()
+    {
+        return false;
+    }
+    core_graphics::display::CGDisplay::active_displays()
+        .ok()
+        .and_then(|displays| displays.into_iter().next())
+        .and_then(|display| core_graphics::display::CGDisplay::new(display).image())
+        .is_some()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> Option<u32> {
+    let name = b"kern.osproductversion\0";
+    let mut length = 0;
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length == 0
+    {
+        return None;
+    }
+    let mut value = vec![0_u8; length];
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            value.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let end = value.iter().position(|byte| *byte == 0).unwrap_or(length);
+    std::str::from_utf8(value.get(..end)?)
+        .ok()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
@@ -1594,11 +1648,15 @@ impl Executor for NativeExecutor {
             .get("screen_recording")
             .copied()
             .unwrap_or(false);
+        let coordinate_capture = permissions
+            .get("coordinate_capture")
+            .copied()
+            .unwrap_or(false);
         let mut supported_actions = Vec::new();
         if accessibility {
             supported_actions.extend(["click", "set_value"]);
         }
-        if accessibility && screen_recording {
+        if accessibility && screen_recording && coordinate_capture {
             supported_actions.push("move");
         }
         Ok(Capabilities {
