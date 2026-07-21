@@ -2943,4 +2943,16 @@ mod tests {
         );
         assert!(target_capture_bounds(&display, &NativePoint { x: 300, y: 50 }).is_none());
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_state_fails_closed_on_windows() {
+        let error = super::require_private_storage().expect_err("Windows storage must fail closed");
+        match error {
+            super::ProtocolError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 }
