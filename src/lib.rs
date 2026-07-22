@@ -1114,7 +1114,7 @@ impl NativeRuntime {
                 return Err(NativeError);
             }
             use std::process::Command;
-            let status = Command::new("pbcopy")
+            let status = Command::new("/usr/bin/pbcopy")
                 .stdin(std::process::Stdio::piped())
                 .spawn()
                 .and_then(|mut child| {
