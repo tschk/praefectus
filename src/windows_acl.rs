@@ -28,11 +28,15 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, FileRenameInfo, GetFileInformationByHandle,
-    OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, FileRenameInfoEx,
+    GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, ReOpenFile,
+    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+};
 use windows::core::{PWSTR, w};
 
 struct OwnedHandle(HANDLE);
@@ -181,13 +185,25 @@ fn initialize_managed_state() -> io::Result<()> {
 }
 
 pub(crate) fn restrict_file(file: &File) -> io::Result<()> {
-    let handle = HANDLE(file.as_raw_handle());
-    validate_file_handle(handle, Some(false))?;
+    let original = HANDLE(file.as_raw_handle());
+    validate_file_handle(original, Some(false))?;
+    let handle = OwnedHandle(
+        unsafe {
+            ReOpenFile(
+                original,
+                FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0 | WRITE_DAC.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        }
+        .map_err(windows_error)?,
+    );
+    validate_file_handle(handle.0, Some(false))?;
     let user = CurrentUser::load()?;
     let acl = owner_acl(&user, false)?;
     let status = unsafe {
         SetSecurityInfo(
-            handle,
+            handle.0,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             None,
@@ -199,7 +215,7 @@ pub(crate) fn restrict_file(file: &File) -> io::Result<()> {
     if status != ERROR_SUCCESS {
         return Err(permission_error());
     }
-    validate_handle(handle, &user, true, true)
+    validate_handle(handle.0, &user, true, true)
 }
 
 pub(crate) fn restrict_directory(path: &Path) -> io::Result<()> {
@@ -521,7 +537,8 @@ pub(crate) fn replace_file_durable(source: &Path, destination: &Path) -> io::Res
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         Some(false),
     )?;
-    let destination = wide_path(&absolute_path(destination)?)?;
+    let destination_path = absolute_path(destination)?;
+    let destination = wide_path(&destination_path)?;
     let name = &destination[..destination.len() - 1];
     let name_bytes = name
         .len()
@@ -529,7 +546,12 @@ pub(crate) fn replace_file_durable(source: &Path, destination: &Path) -> io::Res
         .and_then(|length| u32::try_from(length).ok())
         .ok_or_else(permission_error)?;
     let buffer_len = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
-        .checked_add(name.len().checked_mul(2).ok_or_else(permission_error)?)
+        .checked_add(
+            destination
+                .len()
+                .checked_mul(2)
+                .ok_or_else(permission_error)?,
+        )
         .ok_or_else(permission_error)?;
     let words = buffer_len
         .checked_add(std::mem::size_of::<usize>() - 1)
@@ -538,18 +560,38 @@ pub(crate) fn replace_file_durable(source: &Path, destination: &Path) -> io::Res
     let mut buffer = vec![0usize; words];
     let rename = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
-        (*rename).Anonymous.ReplaceIfExists = true;
+        (*rename).Anonymous.Flags =
+            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
         (*rename).RootDirectory = HANDLE::default();
         (*rename).FileNameLength = name_bytes;
-        ptr::copy_nonoverlapping(name.as_ptr(), (*rename).FileName.as_mut_ptr(), name.len());
+        ptr::copy_nonoverlapping(
+            destination.as_ptr(),
+            (*rename).FileName.as_mut_ptr(),
+            destination.len(),
+        );
         SetFileInformationByHandle(
             source.0,
-            FileRenameInfo,
+            FileRenameInfoEx,
             rename.cast(),
             u32::try_from(buffer_len).map_err(|_| permission_error())?,
         )
     }
-    .map_err(windows_error)
+    .map_err(windows_error)?;
+    let renamed = open_path(&destination_path, FILE_READ_ATTRIBUTES.0, Some(false))?;
+    if file_identity(source.0)? != file_identity(renamed.0)? {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
+fn file_identity(handle: HANDLE) -> io::Result<(u32, u32, u32)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(handle, &mut info) }.map_err(windows_error)?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
 }
 
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {
@@ -715,12 +757,15 @@ mod tests {
 
     #[test]
     fn durable_replace_uses_the_open_source() {
+        use std::io::Read;
+
         let directory = tempfile::tempdir().expect("temporary directory");
         restrict_directory(directory.path()).expect("restrict directory");
         let source = directory.path().join("source.json");
         let destination = directory.path().join("destination.json");
         std::fs::write(&source, b"new").expect("write source");
         std::fs::write(&destination, b"old").expect("write destination");
+        let mut old_destination = File::open(&destination).expect("open old destination");
 
         replace_file_durable(&source, &destination).expect("replace file");
 
@@ -729,6 +774,11 @@ mod tests {
             std::fs::read(destination).expect("read destination"),
             b"new"
         );
+        let mut old_contents = Vec::new();
+        old_destination
+            .read_to_end(&mut old_contents)
+            .expect("read old destination");
+        assert_eq!(old_contents, b"old");
     }
 
     #[test]
