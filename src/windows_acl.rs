@@ -343,7 +343,7 @@ fn validate_descriptor(
         return Err(permission_error());
     }
     let owner_is_user = unsafe { EqualSid(owner, user.sid) }.is_ok();
-    if strict && !owner_is_user || !strict && !trusted_principal(owner, user) {
+    if !trusted_principal(owner, user) {
         return Err(permission_error());
     }
     if !strict {
