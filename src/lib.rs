@@ -5948,19 +5948,33 @@ fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolErr
         .join(format!("{snapshot_id}.json")))
 }
 
+fn fallback_temp_dir() -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+    static FALLBACK: OnceLock<PathBuf> = OnceLock::new();
+    FALLBACK
+        .get_or_init(|| {
+            let random_id = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            std::env::temp_dir().join(format!("praefectus-{random_id:016x}"))
+        })
+        .clone()
+}
+
 #[cfg(not(windows))]
 fn observation_root() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(fallback_temp_dir)
 }
 
 #[cfg(windows)]
 fn observation_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(fallback_temp_dir)
 }
 
 fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolError> {
@@ -6510,7 +6524,7 @@ pub fn default_ledger_path() -> PathBuf {
 pub fn default_ledger_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(fallback_temp_dir)
         .join("praefectus")
         .join("praefectus-operations.jsonl")
 }

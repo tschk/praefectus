@@ -16,7 +16,15 @@ fn capabilities_expose_all_actions() {
     let executor = NativeExecutor::default();
     let caps = executor.capabilities().expect("capabilities");
     let expected = [
-        "invoke", "set_value", "click", "type_text", "press", "paste", "hotkey", "move", "scroll",
+        "invoke",
+        "set_value",
+        "click",
+        "type_text",
+        "press",
+        "paste",
+        "hotkey",
+        "move",
+        "scroll",
     ];
     for action in &expected {
         assert!(
@@ -24,7 +32,12 @@ fn capabilities_expose_all_actions() {
             "missing action: {action}"
         );
     }
-    assert!(caps.permissions.get("accessibility").copied().unwrap_or(false));
+    assert!(
+        caps.permissions
+            .get("accessibility")
+            .copied()
+            .unwrap_or(false)
+    );
 }
 
 #[test]
