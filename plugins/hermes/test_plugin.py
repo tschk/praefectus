@@ -471,15 +471,37 @@ class PluginTest(unittest.TestCase):
             },
         )
 
-    def test_outcome_unknown_requires_unknown_effect(self):
+    def test_preserves_valid_outcome_unknown_effects_as_nonretryable(self):
+        for request, effect in (
+            (invoke_request(), "executed_unverified"),
+            (set_value_request(), "executed_unverified"),
+            (set_value_request(), "verified"),
+        ):
+            result = outcome_unknown()
+            terminal = result["acknowledgements"][0]["state"]["terminal"]
+            terminal["receipt"]["action_name"] = request["action"]["kind"]
+            terminal["receipt"]["effect"] = effect
+            with patch.object(plugin, "_run_host_executor", return_value=result):
+                executed = json.loads(plugin._execute(request))
+            with patch.object(plugin, "_run", return_value=(0, result)):
+                status = json.loads(plugin._status({"operation_id": "op-1"}))
+            for safe_result in (executed, status):
+                self.assertNotIn("error", safe_result)
+                safe_terminal = safe_result["acknowledgements"][0]["terminal"]
+                self.assertFalse(safe_terminal["retry_safe"])
+                self.assertEqual(safe_terminal["receipt"]["effect"], effect)
+
+    def test_status_preserves_verified_invoke_when_terminal_durability_is_unknown(self):
         result = outcome_unknown()
         result["acknowledgements"][0]["state"]["terminal"]["receipt"]["effect"] = (
-            "executed_unverified"
+            "verified"
         )
-        self.assertEqual(
-            plugin._redact(result, "op-1"),
-            {"error": {"code": "praefectus_error"}},
-        )
+        with patch.object(plugin, "_run", return_value=(0, result)):
+            status = json.loads(plugin._status({"operation_id": "op-1"}))
+        self.assertNotIn("error", status)
+        terminal = status["acknowledgements"][0]["terminal"]
+        self.assertFalse(terminal["retry_safe"])
+        self.assertEqual(terminal["receipt"]["effect"], "verified")
 
     def test_receipt_rejects_invalid_delivery_and_context_facts(self):
         invalid = []
@@ -505,6 +527,14 @@ class PluginTest(unittest.TestCase):
                 context_preservation="unchanged_at_boundaries",
             )
         )
+        changed_effect = outcome_unknown(
+            interaction_mode="background_only",
+            context_preservation="changed",
+        )
+        changed_effect["acknowledgements"][0]["state"]["terminal"]["receipt"][
+            "effect"
+        ] = "executed_unverified"
+        invalid.append(changed_effect)
         changed_success = outcome_unknown(
             interaction_mode="background_only",
             context_preservation="changed",
@@ -520,6 +550,15 @@ class PluginTest(unittest.TestCase):
         terminal["receipt"]["effect"] = "executed_unverified"
         del terminal["message"]
         invalid.append(recovery_success)
+        unverified_set_value_success = outcome_unknown()
+        terminal = unverified_set_value_success["acknowledgements"][0]["state"][
+            "terminal"
+        ]
+        terminal["kind"] = "succeeded"
+        terminal["receipt"]["action_name"] = "set_value"
+        terminal["receipt"]["effect"] = "executed_unverified"
+        del terminal["message"]
+        invalid.append(unverified_set_value_success)
         for result in invalid:
             self.assertEqual(
                 plugin._redact(result, "op-1"),

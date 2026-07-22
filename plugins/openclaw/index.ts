@@ -248,6 +248,19 @@ function receipt(value: unknown): Record<string, unknown> | undefined {
   };
 }
 
+function validTerminalEffect(
+  receipt: Record<string, unknown>,
+  terminalKind: unknown,
+): boolean {
+  if (terminalKind === "succeeded")
+    return (
+      (receipt.action_name === "invoke" &&
+        ["executed_unverified", "verified"].includes(String(receipt.effect))) ||
+      (receipt.action_name === "set_value" && receipt.effect === "verified")
+    );
+  return terminalKind === "outcome_unknown";
+}
+
 function acknowledgement(
   value: unknown,
   expectedOperationId?: string,
@@ -338,9 +351,7 @@ function acknowledgement(
     const safeReceipt = receipt(terminal.receipt);
     if (!safeReceipt) return undefined;
     if (
-      (terminal.kind === "succeeded" && safeReceipt.effect === "unknown") ||
-      (terminal.kind === "outcome_unknown" &&
-        safeReceipt.effect !== "unknown") ||
+      !validTerminalEffect(safeReceipt, terminal.kind) ||
       !validReceiptContext(safeReceipt, terminal.kind)
     )
       return undefined;
@@ -600,6 +611,21 @@ function validExecution(
     !validReceiptContext(terminal.receipt, terminal.kind)
   )
     return false;
+  if (terminal.kind === "outcome_unknown") {
+    if (terminal.receipt.effect === "unknown") return true;
+    if (request.action.kind === "invoke")
+      return (
+        request.verification.kind === "none" &&
+        terminal.receipt.effect === "executed_unverified"
+      );
+    return (
+      request.action.kind === "set_value" &&
+      request.verification.kind === "target_value_hash" &&
+      ["executed_unverified", "verified"].includes(
+        String(terminal.receipt.effect),
+      )
+    );
+  }
   if (terminal.kind !== "succeeded") return true;
   return request.action.kind === "invoke"
     ? request.verification.kind === "none" &&
@@ -627,7 +653,7 @@ function validReceiptContext(
     return receipt.context_preservation === "host_isolated";
   return (
     receipt.session_isolation === "shared_desktop" &&
-    (terminalKind === "succeeded"
+    (terminalKind === "succeeded" || receipt.effect !== "unknown"
       ? receipt.context_preservation === "unchanged_at_boundaries"
       : [
           "not_applicable",

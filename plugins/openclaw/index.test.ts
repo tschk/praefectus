@@ -547,9 +547,16 @@ describe("Praefectus OpenClaw tools", () => {
     const invalidContextPreservation = outcomeUnknown();
     invalidContextPreservation.acknowledgements[0].state.terminal.receipt.context_preservation =
       "host_isolated";
-    const contradictoryUnknown = outcomeUnknown();
-    contradictoryUnknown.acknowledgements[0].state.terminal.receipt.effect =
-      "executed_unverified";
+    const contradictoryVerifiedInvoke = outcomeUnknown();
+    contradictoryVerifiedInvoke.acknowledgements[0].state.terminal.receipt.effect =
+      "verified";
+    const unverifiedSetValueSuccess = outcomeUnknown();
+    const unverifiedSetValueTerminal =
+      unverifiedSetValueSuccess.acknowledgements[0].state.terminal;
+    unverifiedSetValueTerminal.kind = "succeeded";
+    unverifiedSetValueTerminal.receipt.action_name = "set_value";
+    unverifiedSetValueTerminal.receipt.effect = "executed_unverified";
+    delete (unverifiedSetValueTerminal as { message?: string }).message;
     const inconsistentRecoverySuccess = legacyRecovery();
     const recoveryTerminal =
       inconsistentRecoverySuccess.acknowledgements[0].state.terminal;
@@ -575,7 +582,8 @@ describe("Praefectus OpenClaw tools", () => {
       missingDeliveryRoute,
       mismatchedInteractionMode,
       invalidContextPreservation,
-      contradictoryUnknown,
+      contradictoryVerifiedInvoke,
+      unverifiedSetValueSuccess,
       inconsistentRecoverySuccess,
     ]) {
       const execute = tools(
@@ -589,6 +597,78 @@ describe("Praefectus OpenClaw tools", () => {
         retry_safe: false,
       });
     }
+  });
+
+  test("preserves valid outcome-unknown effects as nonretryable", async () => {
+    for (const [request, effect] of [
+      [invokeRequest(), "executed_unverified"],
+      [setValueRequest(), "executed_unverified"],
+      [setValueRequest(), "verified"],
+    ] as const) {
+      const childOutput = outcomeUnknown();
+      const terminal = childOutput.acknowledgements[0].state.terminal;
+      terminal.receipt.action_name = request.action.kind;
+      terminal.receipt.effect = effect;
+      const registered = tools(
+        {},
+        async () => childOutput,
+        async () => childOutput,
+      );
+      const execute = registered.find(
+        (tool) => tool.name === "praefectus_execute",
+      )!;
+      const status = registered.find(
+        (tool) => tool.name === "praefectus_status",
+      )!;
+      for (const output of [
+        await execute.execute("call-1", request),
+        await status.execute("call-2", { operation_id: "operation-1" }),
+      ]) {
+        expect(output.details).not.toHaveProperty("error");
+        expect(output.details).toHaveProperty("retry_safe", false);
+        expect(output.details).toHaveProperty(
+          "acknowledgements.0.terminal.retry_safe",
+          false,
+        );
+        expect(output.details).toHaveProperty(
+          "acknowledgements.0.terminal.receipt.effect",
+          effect,
+        );
+      }
+    }
+  });
+
+  test("status preserves a verified invoke when terminal durability is unknown", async () => {
+    const childOutput = outcomeUnknown();
+    childOutput.acknowledgements[0].state.terminal.receipt.effect = "verified";
+    const registered = tools({}, async () => childOutput);
+    const status = registered.find(
+      (tool) => tool.name === "praefectus_status",
+    )!;
+    const output = await status.execute("call-1", {
+      operation_id: "operation-1",
+    });
+    expect(output.details).not.toHaveProperty("error");
+    expect(output.details).toHaveProperty("retry_safe", false);
+    expect(output.details).toHaveProperty(
+      "acknowledgements.0.terminal.receipt.effect",
+      "verified",
+    );
+  });
+
+  test("rejects a known effect when shared desktop context changed", async () => {
+    const childOutput = outcomeUnknown();
+    const receipt = childOutput.acknowledgements[0].state.terminal.receipt;
+    receipt.interaction_mode = "background_only";
+    receipt.context_preservation = "changed";
+    receipt.effect = "executed_unverified";
+    const status = tools({}, async () => childOutput).find(
+      (tool) => tool.name === "praefectus_status",
+    )!;
+    const output = await status.execute("call-1", {
+      operation_id: "operation-1",
+    });
+    expect(output.details).toEqual({ error: { code: "praefectus_error" } });
   });
 
   test("rejects mismatched verification before the host", async () => {

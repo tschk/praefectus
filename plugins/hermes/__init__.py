@@ -391,7 +391,7 @@ def _valid_receipt_context(receipt: dict[str, Any], terminal_kind: Any) -> bool:
         return receipt.get("context_preservation") == "host_isolated"
     if receipt.get("session_isolation") != "shared_desktop":
         return False
-    if terminal_kind == "succeeded":
+    if terminal_kind == "succeeded" or receipt.get("effect") != "unknown":
         return receipt.get("context_preservation") == "unchanged_at_boundaries"
     return receipt.get("context_preservation") in (
         "not_applicable",
@@ -399,6 +399,18 @@ def _valid_receipt_context(receipt: dict[str, Any], terminal_kind: Any) -> bool:
         "changed",
         "unavailable",
     )
+
+
+def _valid_terminal_effect(receipt: dict[str, Any], terminal_kind: Any) -> bool:
+    if terminal_kind == "succeeded":
+        return (
+            receipt.get("action_name") == "invoke"
+            and receipt.get("effect") in ("executed_unverified", "verified")
+        ) or (
+            receipt.get("action_name") == "set_value"
+            and receipt.get("effect") == "verified"
+        )
+    return terminal_kind == "outcome_unknown"
 
 
 def _is_recovery_receipt(receipt: dict[str, Any], terminal_kind: Any) -> bool:
@@ -514,14 +526,9 @@ def _ack(
             receipt = _receipt(terminal["receipt"])
             if receipt is None:
                 return None
-            if (
-                (terminal["kind"] == "succeeded" and receipt["effect"] == "unknown")
-                or (
-                    terminal["kind"] == "outcome_unknown"
-                    and receipt["effect"] != "unknown"
-                )
-                or not _valid_receipt_context(receipt, terminal["kind"])
-            ):
+            if not _valid_terminal_effect(
+                receipt, terminal["kind"]
+            ) or not _valid_receipt_context(receipt, terminal["kind"]):
                 return None
             terminal_result["receipt"] = receipt
         if (
@@ -743,6 +750,19 @@ def _valid_execution(result: dict[str, Any], request: dict[str, Any]) -> bool:
         )
     ):
         return False
+    if terminal.get("kind") == "outcome_unknown":
+        effect = receipt.get("effect")
+        if effect == "unknown":
+            return True
+        if action.get("kind") == "invoke":
+            return (
+                verification.get("kind") == "none" and effect == "executed_unverified"
+            )
+        return (
+            action.get("kind") == "set_value"
+            and verification.get("kind") == "target_value_hash"
+            and effect in ("executed_unverified", "verified")
+        )
     if terminal.get("kind") != "succeeded":
         return True
     return (
