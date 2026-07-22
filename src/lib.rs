@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -5948,19 +5949,33 @@ fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolErr
         .join(format!("{snapshot_id}.json")))
 }
 
+fn secure_temp_dir() -> PathBuf {
+    static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
+    TEMP_DIR.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(0);
+        let id = hasher.finish();
+        let path = std::env::temp_dir().join(format!("praefectus-{:016x}", id));
+        let _ = ensure_directory(&path, true);
+        path
+    })
+    .clone()
+}
+
 #[cfg(not(windows))]
 fn observation_root() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(secure_temp_dir)
 }
 
 #[cfg(windows)]
 fn observation_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(secure_temp_dir)
 }
 
 fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolError> {
@@ -6510,7 +6525,7 @@ pub fn default_ledger_path() -> PathBuf {
 pub fn default_ledger_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(secure_temp_dir)
         .join("praefectus")
         .join("praefectus-operations.jsonl")
 }
