@@ -33,6 +33,56 @@ fn usage_errors_are_json_with_exit_two() {
 }
 
 #[test]
+fn capabilities_and_status_reject_extra_or_unknown_arguments() {
+    for (arguments, message) in [
+        (
+            &["capabilities", "extra"][..],
+            "capabilities does not accept positional arguments",
+        ),
+        (
+            &["capabilities", "--unknown"][..],
+            "unknown option: --unknown",
+        ),
+        (
+            &["status", "operation", "extra"][..],
+            "status accepts exactly one operation ID",
+        ),
+        (
+            &["status", "operation", "--unknown"][..],
+            "unknown option: --unknown",
+        ),
+        (
+            &["status", "operation", "--ledger"][..],
+            "--ledger requires a path",
+        ),
+        (
+            &["status", "operation", "--ledger", "one", "--ledger", "two"][..],
+            "--ledger may only be specified once",
+        ),
+        (
+            &["surfaces", "extra"][..],
+            "surfaces does not accept positional arguments",
+        ),
+        (
+            &["observe-surface"][..],
+            "observe-surface requires a surface ID",
+        ),
+        (
+            &["observe-surface", "one", "two"][..],
+            "observe-surface accepts exactly one surface ID",
+        ),
+    ] {
+        let output = run(arguments, "");
+        assert_eq!(output.status.code(), Some(2));
+        let value = error(&output);
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "usage");
+        assert_eq!(value["error"]["message"], message);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
 fn success_uses_the_stable_json_envelope() {
     let output = run(&["capabilities"], "");
     assert_eq!(output.status.code(), Some(0));
@@ -54,4 +104,36 @@ fn execute_requires_a_trusted_library_host() {
             .contains("host-injected trusted AuthorityVerifier")
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn observe_uses_a_stable_json_envelope() {
+    let output = run(&["observe"], "");
+    assert!(matches!(output.status.code(), Some(0 | 3)));
+    let value = error(&output);
+    assert!(value["ok"].is_boolean());
+    if output.status.code() == Some(3) {
+        assert_eq!(value["error"]["code"], "observation_error");
+    }
+}
+
+#[test]
+fn surface_commands_use_stable_json_envelopes() {
+    let output = run(&["surfaces"], "");
+    assert!(matches!(output.status.code(), Some(0 | 3)));
+    let value = error(&output);
+    assert!(value["ok"].is_boolean());
+    if output.status.code() == Some(0) {
+        assert!(value["data"].is_array());
+    } else {
+        assert_eq!(value["error"]["code"], "observation_error");
+    }
+
+    let output = run(&["observe-surface", "0"], "");
+    assert!(matches!(output.status.code(), Some(0 | 3)));
+    let value = error(&output);
+    assert!(value["ok"].is_boolean());
+    if output.status.code() == Some(3) {
+        assert_eq!(value["error"]["code"], "observation_error");
+    }
 }

@@ -2,7 +2,9 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use praefectus::{DenyAuthority, Engine, NativeExecutor, default_ledger_path};
+use praefectus::{
+    CancellationToken, DenyAuthority, Engine, NativeExecutor, SurfaceRef, default_ledger_path,
+};
 use serde::Serialize;
 
 const EXIT_USAGE: u8 = 2;
@@ -79,18 +81,21 @@ impl<'a> ErrorEnvelope<'a> {
 
 fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
     let Some(command) = arguments.first().map(String::as_str) else {
-        return Err(usage("usage: praefectus execute|status|capabilities"));
+        return Err(usage(
+            "usage: praefectus execute|status|capabilities|surfaces|observe|observe-surface",
+        ));
     };
-    let ledger = ledger_path(&arguments)?;
+    let (ledger, positional) = parse_arguments(&arguments)?;
     match command {
         "execute" => Err(usage(
             "execute is library-only and requires a host-injected trusted AuthorityVerifier",
         )),
         "status" => {
-            let operation_id = positional_arguments(&arguments)
-                .into_iter()
-                .next()
-                .ok_or_else(|| usage("status requires an operation ID"))?;
+            let operation_id = match positional.as_slice() {
+                [operation_id] => operation_id,
+                [] => return Err(usage("status requires an operation ID")),
+                _ => return Err(usage("status accepts exactly one operation ID")),
+            };
             let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
             Ok((
                 serialize(
@@ -102,6 +107,9 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
             ))
         }
         "capabilities" => {
+            if !positional.is_empty() {
+                return Err(usage("capabilities does not accept positional arguments"));
+            }
             let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
             Ok((
                 serialize(
@@ -112,43 +120,100 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
                 0,
             ))
         }
+        "observe" => {
+            if !positional.is_empty() {
+                return Err(usage("observe does not accept positional arguments"));
+            }
+            let executor = NativeExecutor::default();
+            Ok((
+                serialize(
+                    executor
+                        .observe_semantic(
+                            &CancellationToken::default(),
+                            now_ms().saturating_add(30_000),
+                        )
+                        .map_err(|error| protocol("observation_error", error))?,
+                )?,
+                0,
+            ))
+        }
+        "surfaces" => {
+            if !positional.is_empty() {
+                return Err(usage("surfaces does not accept positional arguments"));
+            }
+            let executor = NativeExecutor::default();
+            Ok((
+                serialize(
+                    executor
+                        .list_surfaces(
+                            &CancellationToken::default(),
+                            now_ms().saturating_add(30_000),
+                        )
+                        .map_err(|error| protocol("observation_error", error))?,
+                )?,
+                0,
+            ))
+        }
+        "observe-surface" => {
+            let surface_id = match positional.as_slice() {
+                [surface_id] => surface_id,
+                [] => return Err(usage("observe-surface requires a surface ID")),
+                _ => return Err(usage("observe-surface accepts exactly one surface ID")),
+            };
+            let executor = NativeExecutor::default();
+            Ok((
+                serialize(
+                    executor
+                        .observe_surface(
+                            &SurfaceRef {
+                                id: (*surface_id).to_string(),
+                            },
+                            &CancellationToken::default(),
+                            now_ms().saturating_add(30_000),
+                        )
+                        .map_err(|error| protocol("observation_error", error))?,
+                )?,
+                0,
+            ))
+        }
         _ => Err(usage(format!("unknown command: {command}"))),
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 fn serialize(value: impl Serialize) -> Result<serde_json::Value, CliError> {
     serde_json::to_value(value).map_err(|error| protocol("serialization_error", error))
 }
 
-fn positional_arguments(arguments: &[String]) -> Vec<&String> {
+fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliError> {
     let mut values = Vec::new();
+    let mut ledger = None;
     let mut index = 1;
     while index < arguments.len() {
         if arguments[index] == "--ledger" {
+            if ledger.is_some() {
+                return Err(usage("--ledger may only be specified once"));
+            }
+            let path = arguments
+                .get(index + 1)
+                .filter(|path| !path.starts_with('-'))
+                .ok_or_else(|| usage("--ledger requires a path"))?;
+            ledger = Some(PathBuf::from(path));
             index += 2;
+        } else if arguments[index].starts_with('-') {
+            return Err(usage(format!("unknown option: {}", arguments[index])));
         } else {
-            values.push(&arguments[index]);
+            values.push(arguments[index].as_str());
             index += 1;
         }
     }
-    values
-}
-
-fn option_value<'a>(arguments: &'a [String], option: &str) -> Option<&'a str> {
-    arguments
-        .iter()
-        .position(|argument| argument == option)
-        .and_then(|index| arguments.get(index + 1))
-        .map(String::as_str)
-}
-
-fn ledger_path(arguments: &[String]) -> Result<PathBuf, CliError> {
-    if arguments.iter().any(|argument| argument == "--ledger") {
-        return option_value(arguments, "--ledger")
-            .map(PathBuf::from)
-            .ok_or_else(|| usage("--ledger requires a path"));
-    }
-    Ok(default_ledger_path())
+    Ok((ledger.unwrap_or_else(default_ledger_path), values))
 }
 
 fn usage(message: impl Into<String>) -> CliError {

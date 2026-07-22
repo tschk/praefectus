@@ -1,17 +1,17 @@
-#![cfg(not(windows))]
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
 use ed25519_dalek::{Signer, SigningKey};
+use praefectus::semantic::SemanticTargetRef;
 use praefectus::{
-    AckState, Action, ActionRequest, AuthorityGrant, CancellationToken, Capabilities, Direction,
-    DispatchError, DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge, Engine,
-    Evidence, Executor, FailureCode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
-    NativePoint, Observation, PROTOCOL_VERSION, ProtocolError, Rect, ResolvedTarget, SafetyClass,
-    SignedAuthority, TargetRef, Terminal, VerificationPolicy, element_fingerprint_hash,
+    AckState, Action, ActionCapability, ActionRequest, AuthorityGrant, BackgroundSupport,
+    CancellationToken, Capabilities, ContextPreservation, DeliveryRoute, Direction, DispatchError,
+    DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge, Engine, Evidence, Executor,
+    FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
+    NativePoint, Observation, PROTOCOL_VERSION, ProtocolError, ResolvedTarget, SafetyClass,
+    SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
     normalized_action_hash,
 };
 
@@ -33,6 +33,10 @@ struct MockExecutor {
     frozen_observation: Arc<AtomicBool>,
     changed_fingerprint: Arc<AtomicBool>,
     wrong_fingerprint: Arc<AtomicBool>,
+    context_changed: Arc<AtomicBool>,
+    context_unavailable: Arc<AtomicBool>,
+    capabilities_unavailable: Arc<AtomicBool>,
+    session_isolation: Arc<Mutex<SessionIsolation>>,
 }
 
 impl MockExecutor {
@@ -45,19 +49,53 @@ impl MockExecutor {
             frozen_observation: Arc::new(AtomicBool::new(false)),
             changed_fingerprint: Arc::new(AtomicBool::new(false)),
             wrong_fingerprint: Arc::new(AtomicBool::new(false)),
+            context_changed: Arc::new(AtomicBool::new(false)),
+            context_unavailable: Arc::new(AtomicBool::new(false)),
+            capabilities_unavailable: Arc::new(AtomicBool::new(false)),
+            session_isolation: Arc::new(Mutex::new(SessionIsolation::SharedDesktop)),
         }
     }
 }
 
 impl Executor for MockExecutor {
+    fn session_isolation(&self) -> SessionIsolation {
+        *self.session_isolation.lock().expect("isolation lock")
+    }
+
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        if self.capabilities_unavailable.load(Ordering::SeqCst) {
+            return Err(ProtocolError::Executor(
+                "runtime capabilities are unavailable".to_string(),
+            ));
+        }
         Ok(Capabilities {
             platform: "test".to_string(),
             backend: "mock".to_string(),
             supported_actions: vec!["scroll".to_string()],
+            action_capabilities: vec![ActionCapability {
+                action: "scroll".to_string(),
+                delivery_route: DeliveryRoute::TargetAddressed,
+                background_support: BackgroundSupport::Guarded,
+            }],
             permissions: BTreeMap::new(),
             display_geometry_hash: "display".to_string(),
         })
+    }
+
+    fn shared_desktop_context_hash(&self) -> Result<String, ProtocolError> {
+        if self.context_unavailable.load(Ordering::SeqCst)
+            && self.dispatches.load(Ordering::SeqCst) > 0
+        {
+            return Err(ProtocolError::Executor(
+                "shared desktop context is unavailable".to_string(),
+            ));
+        }
+        if self.context_changed.load(Ordering::SeqCst) && self.dispatches.load(Ordering::SeqCst) > 0
+        {
+            Ok("changed-context".to_string())
+        } else {
+            Ok("preserved-context".to_string())
+        }
     }
 
     fn observe(&self, target: &TargetRef) -> Result<Observation, ProtocolError> {
@@ -71,10 +109,7 @@ impl Executor for MockExecutor {
             "wrong-fingerprint".to_string()
         } else {
             match target {
-                TargetRef::Element {
-                    element_fingerprint,
-                    ..
-                } => element_fingerprint_hash(element_fingerprint)?,
+                TargetRef::Element { target } => target.fingerprint_hash.clone(),
                 _ => String::new(),
             }
         };
@@ -147,6 +182,16 @@ impl Executor for MockExecutor {
     }
 }
 
+fn semantic_target() -> SemanticTargetRef {
+    SemanticTargetRef {
+        observation_id: "0".repeat(64),
+        generation: 1,
+        provenance_hash: "1".repeat(64),
+        element_id: "2".repeat(64),
+        fingerprint_hash: "3".repeat(64),
+    }
+}
+
 fn request(operation_id: &str) -> ActionRequest {
     let mut request = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
@@ -176,24 +221,9 @@ fn request(operation_id: &str) -> ActionRequest {
             amount: 1,
         },
         target: TargetRef::Element {
-            selector: "provider-selector".to_string(),
-            snapshot_id: "provider-snapshot-1".to_string(),
-            element_fingerprint: praefectus::ElementFingerprint {
-                backend: "provider".to_string(),
-                id: "element-1".to_string(),
-                app: "provider-app".to_string(),
-                process_id: 42,
-                window: "window-1".to_string(),
-                role: "button".to_string(),
-                label: "Submit".to_string(),
-                bounds: Some(Rect {
-                    x: 0,
-                    y: 0,
-                    width: 10,
-                    height: 10,
-                }),
-            },
+            target: semantic_target(),
         },
+        interaction_mode: InteractionMode::Interactive,
         deadline_at_ms: i64::MAX,
         verification: VerificationPolicy::TargetState {
             expected: serde_json::json!({ "count": 1 }),
@@ -308,6 +338,190 @@ fn same_id_with_changed_action_conflicts() {
     assert!(matches!(
         engine.execute(&changed, &CancellationToken::default()),
         Err(ProtocolError::Conflict)
+    ));
+}
+
+#[test]
+fn interaction_mode_is_authority_bound_and_conflicts_on_reuse() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let interactive = request("mode-conflict");
+    engine
+        .execute(&interactive, &CancellationToken::default())
+        .expect("interactive execution");
+
+    let mut background = request("mode-conflict");
+    background.interaction_mode = InteractionMode::BackgroundOnly;
+    sign_request(&mut background);
+    assert!(matches!(
+        engine.execute(&background, &CancellationToken::default()),
+        Err(ProtocolError::Conflict)
+    ));
+
+    let mut tampered = request("mode-tamper");
+    tampered.interaction_mode = InteractionMode::BackgroundOnly;
+    assert!(matches!(
+        engine.execute(&tampered, &CancellationToken::default()),
+        Err(ProtocolError::AuthorityDenied)
+    ));
+}
+
+#[test]
+fn durable_replay_and_conflict_do_not_depend_on_live_capabilities() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let engine = Engine::new(
+        executor.clone(),
+        directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let original = request("capability-replay");
+    engine
+        .execute(&original, &CancellationToken::default())
+        .expect("initial execution");
+    executor
+        .capabilities_unavailable
+        .store(true, Ordering::SeqCst);
+
+    let replay = engine
+        .execute(&original, &CancellationToken::default())
+        .expect("durable replay");
+    assert!(replay.acknowledgements[0].replayed);
+
+    let mut changed = request("capability-replay");
+    changed.action = Action::Scroll {
+        direction: Direction::Up,
+        amount: 1,
+    };
+    sign_request(&mut changed);
+    assert!(matches!(
+        engine.execute(&changed, &CancellationToken::default()),
+        Err(ProtocolError::Conflict)
+    ));
+
+    let unavailable = engine
+        .execute(
+            &request("capability-unavailable"),
+            &CancellationToken::default(),
+        )
+        .expect("durable capability failure");
+    assert!(matches!(
+        terminal(&unavailable),
+        Terminal::Failed {
+            code: FailureCode::DispatchFailed,
+            ..
+        }
+    ));
+    assert!(
+        engine
+            .status("capability-unavailable")
+            .expect("durable status")
+            .is_some()
+    );
+}
+
+#[test]
+fn unknown_executor_isolation_is_durably_rejected_before_effect() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    *executor.session_isolation.lock().expect("isolation lock") = SessionIsolation::Unknown;
+    let engine = Engine::new(
+        executor.clone(),
+        directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let report = engine
+        .execute(&request("unknown-isolation"), &CancellationToken::default())
+        .expect("durable rejection");
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        terminal(&report),
+        Terminal::Rejected {
+            code: FailureCode::Unsupported,
+            ..
+        }
+    ));
+    assert!(
+        engine
+            .status("unknown-isolation")
+            .expect("durable status")
+            .is_some()
+    );
+}
+
+#[test]
+fn shared_desktop_background_receipt_proves_context_preservation() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let mut request = request("background-preserved");
+    request.interaction_mode = InteractionMode::BackgroundOnly;
+    sign_request(&mut request);
+    let report = engine
+        .execute(&request, &CancellationToken::default())
+        .expect("background execution");
+
+    match terminal(&report) {
+        Terminal::Succeeded { receipt } => {
+            assert_eq!(receipt.delivery_route, DeliveryRoute::TargetAddressed);
+            assert_eq!(
+                receipt.context_preservation,
+                ContextPreservation::UnchangedAtBoundaries
+            );
+            assert_eq!(receipt.interaction_mode, InteractionMode::BackgroundOnly);
+        }
+        _ => panic!("expected successful background execution"),
+    }
+}
+
+#[test]
+fn changed_or_unavailable_shared_context_never_reports_success() {
+    let changed_directory = tempfile::tempdir().expect("temp directory");
+    let changed_executor = MockExecutor::new();
+    changed_executor
+        .context_changed
+        .store(true, Ordering::SeqCst);
+    let changed_engine = Engine::new(
+        changed_executor,
+        changed_directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let mut changed = request("background-changed");
+    changed.interaction_mode = InteractionMode::BackgroundOnly;
+    sign_request(&mut changed);
+    let changed_report = changed_engine
+        .execute(&changed, &CancellationToken::default())
+        .expect("changed context result");
+    assert!(matches!(
+        terminal(&changed_report),
+        Terminal::OutcomeUnknown { receipt, .. }
+            if receipt.effect == Effect::Unknown
+                && receipt.context_preservation == ContextPreservation::Changed
+    ));
+
+    let unavailable_directory = tempfile::tempdir().expect("temp directory");
+    let unavailable_executor = MockExecutor::new();
+    unavailable_executor
+        .context_unavailable
+        .store(true, Ordering::SeqCst);
+    let unavailable_engine = Engine::new(
+        unavailable_executor.clone(),
+        unavailable_directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let mut unavailable = request("background-unavailable");
+    unavailable.interaction_mode = InteractionMode::BackgroundOnly;
+    sign_request(&mut unavailable);
+    let unavailable_report = unavailable_engine
+        .execute(&unavailable, &CancellationToken::default())
+        .expect("unavailable context result");
+    assert_eq!(unavailable_executor.dispatches.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        terminal(&unavailable_report),
+        Terminal::OutcomeUnknown { receipt, .. }
+            if receipt.effect == Effect::Unknown
+                && receipt.context_preservation == ContextPreservation::Unavailable
     ));
 }
 
@@ -637,17 +851,51 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
         engine.execute(&coordinate, &CancellationToken::default()),
         Err(ProtocolError::InvalidRequest(_))
     ));
-    let mut oversized_fingerprint = request("oversized-fingerprint");
-    if let TargetRef::Element {
-        element_fingerprint,
-        ..
-    } = &mut oversized_fingerprint.target
-    {
-        element_fingerprint.label = "x".repeat(1025);
+    let mut unknown_mode = request("unknown-interaction-mode");
+    unknown_mode.interaction_mode = InteractionMode::Unknown;
+    sign_request(&mut unknown_mode);
+    assert!(matches!(
+        engine.execute(&unknown_mode, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+    let mut oversized_fingerprint = request("invalid-fingerprint");
+    if let TargetRef::Element { target } = &mut oversized_fingerprint.target {
+        target.fingerprint_hash = "x".repeat(65);
     }
     sign_request(&mut oversized_fingerprint);
     assert!(matches!(
         engine.execute(&oversized_fingerprint, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+    let mut mismatched_value_hash = request("mismatched-value-hash");
+    mismatched_value_hash.action = Action::SetValue {
+        value: "expected value".to_string(),
+    };
+    mismatched_value_hash.verification = VerificationPolicy::TargetValueHash {
+        sha256: "0".repeat(64),
+    };
+    sign_request(&mut mismatched_value_hash);
+    assert!(matches!(
+        engine.execute(&mismatched_value_hash, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+    let mut missing_value_hash = request("missing-value-hash");
+    missing_value_hash.action = Action::SetValue {
+        value: "expected value".to_string(),
+    };
+    missing_value_hash.verification = VerificationPolicy::None;
+    sign_request(&mut missing_value_hash);
+    assert!(matches!(
+        engine.execute(&missing_value_hash, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+    let mut unrelated_value_hash = request("unrelated-value-hash");
+    unrelated_value_hash.verification = VerificationPolicy::TargetValueHash {
+        sha256: "0".repeat(64),
+    };
+    sign_request(&mut unrelated_value_hash);
+    assert!(matches!(
+        engine.execute(&unrelated_value_hash, &CancellationToken::default()),
         Err(ProtocolError::InvalidRequest(_))
     ));
     assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
@@ -744,7 +992,7 @@ fn nested_protocol_versions_are_strict() {
 }
 
 #[test]
-fn provider_snapshot_ids_are_not_native_runtime_ids() {
+fn semantic_observation_ids_are_strict_opaque_hashes() {
     let directory = tempfile::tempdir().expect("temp directory");
     let engine = Engine::new(
         MockExecutor::new(),
@@ -752,32 +1000,15 @@ fn provider_snapshot_ids_are_not_native_runtime_ids() {
         authority(),
     );
     let mut custom = request("provider-snapshot");
-    custom.target = TargetRef::Element {
-        selector: "provider-selector".to_string(),
-        snapshot_id: "provider/session snapshot".to_string(),
-        element_fingerprint: praefectus::ElementFingerprint {
-            backend: "provider".to_string(),
-            id: "element-1".to_string(),
-            app: "provider-app".to_string(),
-            process_id: 42,
-            window: "window-1".to_string(),
-            role: "button".to_string(),
-            label: "Submit".to_string(),
-            bounds: Some(Rect {
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            }),
-        },
-    };
+    let mut target = semantic_target();
+    target.observation_id = "provider/session snapshot".to_string();
+    custom.target = TargetRef::Element { target };
     sign_request(&mut custom);
 
-    assert!(
-        engine
-            .execute(&custom, &CancellationToken::default())
-            .is_ok()
-    );
+    assert!(matches!(
+        engine.execute(&custom, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
 }
 
 #[cfg(unix)]
@@ -808,8 +1039,11 @@ fn incomplete_durable_claim_recovers_as_unknown_without_dispatch() {
     let ledger = directory.path().join("ledger.jsonl");
     let executor = MockExecutor::new();
     let engine = Engine::new(executor.clone(), &ledger, authority());
+    let mut background = request("recovery");
+    background.interaction_mode = InteractionMode::BackgroundOnly;
+    sign_request(&mut background);
     engine
-        .execute(&request("recovery"), &CancellationToken::default())
+        .execute(&background, &CancellationToken::default())
         .expect("initial execution");
     let contents = fs::read_to_string(&ledger).expect("ledger");
     let claim = contents.lines().next().expect("claim");
@@ -820,16 +1054,47 @@ fn incomplete_durable_claim_recovers_as_unknown_without_dispatch() {
         .expect("status recovery")
         .expect("recovered status");
     let replayed = engine
-        .execute(&request("recovery"), &CancellationToken::default())
+        .execute(&background, &CancellationToken::default())
         .expect("replay");
 
     assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
     assert!(matches!(
         recovered.state,
         AckState::Terminal { terminal }
-            if matches!(*terminal, Terminal::OutcomeUnknown { .. })
+            if matches!(&*terminal, Terminal::OutcomeUnknown { receipt, .. }
+                if receipt.delivery_route == DeliveryRoute::TargetAddressed
+                    && receipt.interaction_mode == InteractionMode::BackgroundOnly
+                    && receipt.context_preservation == ContextPreservation::Unavailable)
     ));
     assert!(replayed.acknowledgements[0].replayed);
+}
+
+#[test]
+fn legacy_claim_status_uses_explicit_unknown_receipt_facts() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let ledger = directory.path().join("ledger.jsonl");
+    fs::write(
+        &ledger,
+        format!(
+            "{{\"kind\":\"claim\",\"operation_id\":\"legacy\",\"action_hash\":\"{}\",\"claimed_at_ms\":1}}\n",
+            "0".repeat(64)
+        ),
+    )
+    .expect("legacy claim");
+    let engine = Engine::new(MockExecutor::new(), ledger, authority());
+    let recovered = engine
+        .status("legacy")
+        .expect("legacy status")
+        .expect("legacy receipt");
+    assert!(matches!(
+        recovered.state,
+        AckState::Terminal { terminal }
+            if matches!(&*terminal, Terminal::OutcomeUnknown { receipt, .. }
+                if receipt.delivery_route == DeliveryRoute::Unknown
+                    && receipt.session_isolation == praefectus::SessionIsolation::Unknown
+                    && receipt.interaction_mode == InteractionMode::Unknown
+                    && receipt.context_preservation == ContextPreservation::Unavailable)
+    ));
 }
 
 #[test]
