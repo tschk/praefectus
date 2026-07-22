@@ -6,6 +6,7 @@
   "scripts": {
     "build": "bun build index.ts --outdir dist --target node --external openclaw/plugin-sdk/plugin-entry",
     "format": "bunx prettier --check .",
+    "licenses": "bun run license-check.ts",
     "lint": "bunx tsc --noEmit",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test"

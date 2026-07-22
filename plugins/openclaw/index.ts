@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   runHostExecutor,
@@ -12,138 +14,86 @@ const Identifier = Type.String({
   maxLength: 256,
   pattern: "^[A-Za-z0-9_:-]+$",
 });
-const SnapshotId = Type.String({
-  minLength: 1,
-  maxLength: 256,
-  pattern: "^[^\\x00-\\x1F\\x7F-\\x9F]+$",
+const Hash = Type.String({
+  minLength: 64,
+  maxLength: 64,
+  pattern: "^[0-9a-f]{64}$",
 });
-const Key = Type.String({ minLength: 1, maxLength: 64 });
-const Timestamp = Type.Integer({ minimum: 1 });
+const Timestamp = Type.Integer({
+  minimum: 1,
+  maximum: Number.MAX_SAFE_INTEGER,
+});
 const Target = Type.Object(
   {
     kind: Type.Literal("element"),
-    selector: Type.String({ minLength: 1, maxLength: 1024 }),
-    snapshot_id: SnapshotId,
-    element_fingerprint: Type.Object(
+    target: Type.Object(
       {
-        backend: Type.String({ minLength: 1, maxLength: 128 }),
-        id: Type.String({ minLength: 1, maxLength: 512 }),
-        app: Type.String({ minLength: 1, maxLength: 256 }),
-        process_id: Type.Integer({ minimum: 1 }),
-        window: Type.String({ minLength: 1, maxLength: 512 }),
-        role: Type.String({ minLength: 1, maxLength: 128 }),
-        label: Type.String({ maxLength: 1024 }),
-        bounds: Type.Object(
-          {
-            x: Type.Integer(),
-            y: Type.Integer(),
-            width: Type.Integer({ minimum: 1 }),
-            height: Type.Integer({ minimum: 1 }),
-          },
-          { additionalProperties: false },
-        ),
+        observation_id: Hash,
+        generation: Type.Integer({
+          minimum: 1,
+          maximum: Number.MAX_SAFE_INTEGER,
+        }),
+        provenance_hash: Hash,
+        element_id: Hash,
+        fingerprint_hash: Hash,
       },
       { additionalProperties: false },
     ),
   },
   { additionalProperties: false },
 );
-const Delay = Type.Optional(Type.Integer({ minimum: 0, maximum: 1000 }));
-const Action = Type.Union([
-  Type.Object(
-    {
-      kind: Type.Literal("click"),
-      button: Type.Union([
-        Type.Literal("left"),
-        Type.Literal("right"),
-        Type.Literal("middle"),
-      ]),
-      count: Type.Integer({ minimum: 1, maximum: 3 }),
-      allow_coordinate_fallback: Type.Boolean(),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      kind: Type.Literal("type_text"),
-      text: Type.String({ minLength: 1, maxLength: 16384 }),
-      clear: Type.Boolean(),
-      press_return: Type.Boolean(),
-      delay_ms: Delay,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      kind: Type.Literal("press"),
-      key: Key,
-      count: Type.Integer({ minimum: 1, maximum: 100 }),
-      delay_ms: Delay,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      kind: Type.Literal("paste"),
-      text: Type.String({ minLength: 1, maxLength: 16384 }),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      kind: Type.Literal("hotkey"),
-      keys: Type.Array(Key, { minItems: 1, maxItems: 8 }),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      kind: Type.Literal("scroll"),
-      direction: Type.Union([
-        Type.Literal("up"),
-        Type.Literal("down"),
-        Type.Literal("left"),
-        Type.Literal("right"),
-      ]),
-      amount: Type.Integer({ minimum: 1, maximum: 100 }),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object({ kind: Type.Literal("move") }, { additionalProperties: false }),
-  Type.Object(
-    {
-      kind: Type.Literal("set_value"),
-      value: Type.String({ maxLength: 16384 }),
-    },
-    { additionalProperties: false },
-  ),
-]);
-const Verification = Type.Union([
-  Type.Object({ kind: Type.Literal("none") }, { additionalProperties: false }),
-  Type.Object(
-    { kind: Type.Literal("snapshot_changed") },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    { kind: Type.Literal("target_state"), expected: Type.Unknown() },
-    { additionalProperties: false },
-  ),
-]);
+const InvokeAction = Type.Object(
+  { kind: Type.Literal("invoke") },
+  { additionalProperties: false },
+);
+const SetValueAction = Type.Object(
+  {
+    kind: Type.Literal("set_value"),
+    value: Type.String({ maxLength: 16384 }),
+  },
+  { additionalProperties: false },
+);
+const NoVerification = Type.Object(
+  { kind: Type.Literal("none") },
+  { additionalProperties: false },
+);
+const ValueVerification = Type.Object(
+  {
+    kind: Type.Literal("target_value_hash"),
+    sha256: Hash,
+  },
+  { additionalProperties: false },
+);
 const Request = Type.Object(
   {
     operation_id: Identifier,
-    action: Action,
+    action: Type.Union([InvokeAction, SetValueAction]),
     target: Target,
+    interaction_mode: Type.Union([
+      Type.Literal("interactive"),
+      Type.Literal("background_only"),
+    ]),
     deadline_at_ms: Timestamp,
-    verification: Verification,
-    verification_version: Type.Literal(1),
+    verification: Type.Union([NoVerification, ValueVerification]),
+    verification_version: Type.Literal(2),
     safety: Type.Union([
       Type.Literal("reversible"),
       Type.Literal("external"),
       Type.Literal("destructive"),
     ]),
   },
-  { additionalProperties: false },
+  {
+    additionalProperties: false,
+    oneOf: [
+      { properties: { action: InvokeAction, verification: NoVerification } },
+      {
+        properties: {
+          action: SetValueAction,
+          verification: ValueVerification,
+        },
+      },
+    ],
+  },
 );
 
 const RedactedKeys = new Set([
@@ -154,13 +104,18 @@ const RedactedKeys = new Set([
   "credential",
   "error",
   "evidence",
+  "element_id",
   "expected",
   "fallback_chain",
+  "fingerprint_hash",
   "issuer",
   "key",
   "locator",
   "message",
+  "name",
+  "observation_id",
   "password",
+  "provenance_hash",
   "screenshot",
   "secret",
   "selector",
@@ -208,7 +163,7 @@ function hasOutcomeUnknown(value: unknown): boolean {
 }
 
 function isHash(value: unknown): value is string {
-  return typeof value === "string" && /^[0-9a-fA-F]{64}$/.test(value);
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 function isInteger(value: unknown): value is number {
@@ -230,22 +185,17 @@ function receipt(value: unknown): Record<string, unknown> | undefined {
       "finished_at_ms",
       "backend",
       "fallback_chain",
+      "delivery_route",
+      "session_isolation",
+      "interaction_mode",
+      "context_preservation",
       "effect",
       "before",
       "after",
       "warnings",
     ]) ||
-    value.protocol_version !== 1 ||
-    ![
-      "click",
-      "type_text",
-      "press",
-      "paste",
-      "hotkey",
-      "scroll",
-      "move",
-      "set_value",
-    ].includes(String(value.action_name)) ||
+    value.protocol_version !== 2 ||
+    !["invoke", "set_value", "unknown"].includes(String(value.action_name)) ||
     !isHash(value.action_hash) ||
     !isInteger(value.started_at_ms) ||
     value.started_at_ms < 0 ||
@@ -258,6 +208,20 @@ function receipt(value: unknown): Record<string, unknown> | undefined {
       (item) =>
         typeof item === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(item),
     ) ||
+    !["target_addressed", "unknown"].includes(String(value.delivery_route)) ||
+    !["shared_desktop", "host_isolated", "unknown"].includes(
+      String(value.session_isolation),
+    ) ||
+    !["interactive", "background_only", "unknown"].includes(
+      String(value.interaction_mode),
+    ) ||
+    ![
+      "not_applicable",
+      "unchanged_at_boundaries",
+      "changed",
+      "unavailable",
+      "host_isolated",
+    ].includes(String(value.context_preservation)) ||
     !["verified", "executed_unverified", "unknown"].includes(
       String(value.effect),
     ) ||
@@ -276,6 +240,10 @@ function receipt(value: unknown): Record<string, unknown> | undefined {
     started_at_ms: value.started_at_ms,
     finished_at_ms: value.finished_at_ms,
     backend: value.backend,
+    delivery_route: value.delivery_route,
+    session_isolation: value.session_isolation,
+    interaction_mode: value.interaction_mode,
+    context_preservation: value.context_preservation,
     effect: value.effect,
   };
 }
@@ -294,7 +262,7 @@ function acknowledgement(
       "replayed",
       "state",
     ]) ||
-    value.protocol_version !== 1 ||
+    value.protocol_version !== 2 ||
     typeof value.operation_id !== "string" ||
     !/^[A-Za-z0-9_:-]{1,256}$/.test(value.operation_id) ||
     (expectedOperationId !== undefined &&
@@ -371,7 +339,9 @@ function acknowledgement(
     if (!safeReceipt) return undefined;
     if (
       (terminal.kind === "succeeded" && safeReceipt.effect === "unknown") ||
-      (terminal.kind === "outcome_unknown" && safeReceipt.effect === "verified")
+      (terminal.kind === "outcome_unknown" &&
+        safeReceipt.effect !== "unknown") ||
+      !validReceiptContext(safeReceipt, terminal.kind)
     )
       return undefined;
     terminalResult.receipt = safeReceipt;
@@ -435,26 +405,126 @@ function redact(
       }
     );
   }
-  const capabilities = Object.fromEntries(
-    Object.entries(value).filter(([key, item]) => {
-      if (["platform", "backend", "display_geometry_hash"].includes(key))
-        return typeof item === "string";
-      if (key === "supported_actions")
-        return (
-          Array.isArray(item) &&
-          item.every((action) => typeof action === "string")
-        );
-      if (key === "permissions")
-        return (
-          isObject(item) &&
-          Object.values(item).every((allowed) => typeof allowed === "boolean")
-        );
-      return false;
-    }),
+  if (
+    !hasOnlyKeys(value, [
+      "platform",
+      "backend",
+      "supported_actions",
+      "action_capabilities",
+      "permissions",
+      "display_geometry_hash",
+    ]) ||
+    !["macos", "windows", "linux", "browser"].includes(
+      String(value.platform),
+    ) ||
+    ![
+      ["macos", "praefectus-macos-ax"],
+      ["windows", "praefectus-windows-uia"],
+      ["linux", "praefectus-atspi2"],
+      ["browser", "praefectus-chromium-cdp"],
+    ].some(
+      ([platform, backend]) =>
+        value.platform === platform && value.backend === backend,
+    ) ||
+    !isHash(value.display_geometry_hash) ||
+    !Array.isArray(value.supported_actions) ||
+    value.supported_actions.length > 4 ||
+    !value.supported_actions.every((action) =>
+      ["invoke", "scroll", "set_value"].includes(String(action)),
+    ) ||
+    new Set(value.supported_actions).size !== value.supported_actions.length ||
+    !Array.isArray(value.action_capabilities) ||
+    value.action_capabilities.length > 4 ||
+    !isObject(value.permissions) ||
+    Object.keys(value.permissions).length > 8
+  )
+    return { error: { code: "praefectus_error" } };
+  const supportedActions = value.supported_actions;
+  const actionCapabilities = value.action_capabilities;
+  const permissions = value.permissions;
+  const allowedPermissions =
+    value.platform === "browser"
+      ? ["cdp", "coordinates", "root_frame_only", "screenshots"]
+      : value.platform === "linux"
+        ? [
+            "accessibility",
+            "atspi2",
+            "coordinate_capture",
+            "display_geometry",
+            "private_state",
+            "screen_recording",
+            "wayland",
+            "x11",
+          ]
+        : [
+            "accessibility",
+            "coordinate_capture",
+            "private_state",
+            "screen_recording",
+          ];
+  const requiredPermissions =
+    value.platform === "browser"
+      ? allowedPermissions
+      : [
+          "accessibility",
+          "coordinate_capture",
+          "private_state",
+          "screen_recording",
+          ...(value.platform === "linux" ? ["atspi2", "display_geometry"] : []),
+        ];
+  const allowedActions =
+    value.platform === "browser"
+      ? ["invoke", "scroll", "set_value"]
+      : value.platform === "windows"
+        ? ["invoke", "scroll", "set_value"]
+        : ["invoke", "set_value"];
+  if (
+    !requiredPermissions.every((key) => key in permissions) ||
+    !Object.entries(permissions).every(
+      ([key, allowed]) =>
+        allowedPermissions.includes(key) && typeof allowed === "boolean",
+    ) ||
+    !supportedActions.every((action) =>
+      allowedActions.includes(String(action)),
+    ) ||
+    !actionCapabilities.every(
+      (capability) =>
+        isObject(capability) &&
+        hasOnlyKeys(capability, [
+          "action",
+          "delivery_route",
+          "background_support",
+        ]) &&
+        ["invoke", "scroll", "set_value"].includes(String(capability.action)) &&
+        capability.delivery_route === "target_addressed" &&
+        capability.background_support ===
+          (value.platform === "browser" ? "host_isolated_only" : "guarded"),
+    )
+  )
+    return { error: { code: "praefectus_error" } };
+  const facts = actionCapabilities.map(
+    (capability) => (capability as Record<string, unknown>).action,
   );
-  return Object.keys(capabilities).length
-    ? capabilities
-    : { error: { code: "praefectus_error" } };
+  if (
+    new Set(facts).size !== facts.length ||
+    supportedActions.length !== facts.length ||
+    supportedActions.some((action) => !facts.includes(action))
+  )
+    return { error: { code: "praefectus_error" } };
+  return {
+    platform: value.platform,
+    backend: value.backend,
+    supported_actions: supportedActions.filter(
+      (action) => action === "invoke" || action === "set_value",
+    ),
+    action_capabilities: actionCapabilities.filter(
+      (capability) =>
+        isObject(capability) &&
+        ["invoke", "set_value"].includes(String(capability.action)),
+    ),
+    permissions,
+    display_geometry_hash: value.display_geometry_hash,
+  };
 }
 
 function result(
@@ -489,7 +559,10 @@ function validExecution(
   if (
     !isObject(request) ||
     !isObject(request.action) ||
-    !isObject(request.verification)
+    !isObject(request.verification) ||
+    !["interactive", "background_only"].includes(
+      String(request.interaction_mode),
+    )
   )
     return false;
   const acknowledgements = data.acknowledgements;
@@ -520,14 +593,78 @@ function validExecution(
   if (
     !isObject(terminal.receipt) ||
     terminal.receipt.action_hash !== actionHash ||
-    terminal.receipt.action_name !== request.action.kind
+    (!isRecoveryReceipt(terminal.receipt, terminal.kind) &&
+      (terminal.receipt.action_name !== request.action.kind ||
+        terminal.receipt.delivery_route !== "target_addressed" ||
+        terminal.receipt.interaction_mode !== request.interaction_mode)) ||
+    !validReceiptContext(terminal.receipt, terminal.kind)
   )
     return false;
   if (terminal.kind !== "succeeded") return true;
-  return request.verification.kind === "none"
-    ? terminal.receipt.effect === "executed_unverified"
-    : request.verification.kind === "target_state" &&
+  return request.action.kind === "invoke"
+    ? request.verification.kind === "none" &&
+        terminal.receipt.effect === "executed_unverified"
+    : request.action.kind === "set_value" &&
+        request.verification.kind === "target_value_hash" &&
         terminal.receipt.effect === "verified";
+}
+
+function validReceiptContext(
+  receipt: Record<string, unknown>,
+  terminalKind: unknown,
+): boolean {
+  if (isRecoveryReceipt(receipt, terminalKind)) return true;
+  if (
+    receipt.action_name === "unknown" ||
+    receipt.delivery_route === "unknown" ||
+    receipt.session_isolation === "unknown" ||
+    receipt.interaction_mode === "unknown"
+  )
+    return false;
+  if (receipt.interaction_mode === "interactive")
+    return receipt.context_preservation === "not_applicable";
+  if (receipt.session_isolation === "host_isolated")
+    return receipt.context_preservation === "host_isolated";
+  return (
+    receipt.session_isolation === "shared_desktop" &&
+    (terminalKind === "succeeded"
+      ? receipt.context_preservation === "unchanged_at_boundaries"
+      : [
+          "not_applicable",
+          "unchanged_at_boundaries",
+          "changed",
+          "unavailable",
+        ].includes(String(receipt.context_preservation)))
+  );
+}
+
+function isRecoveryReceipt(
+  receipt: Record<string, unknown>,
+  terminalKind: unknown,
+): boolean {
+  return (
+    terminalKind === "outcome_unknown" &&
+    receipt.effect === "unknown" &&
+    receipt.context_preservation === "unavailable" &&
+    (receipt.action_name === "unknown" ||
+      receipt.delivery_route === "unknown" ||
+      receipt.session_isolation === "unknown" ||
+      receipt.interaction_mode === "unknown")
+  );
+}
+
+function validRequest(value: unknown): boolean {
+  if (!Value.Check(Request, value) || !isObject(value)) return false;
+  const action = value.action as Record<string, unknown>;
+  const verification = value.verification as Record<string, unknown>;
+  const actionValue = String(action.value);
+  return (
+    action.kind === "invoke" ||
+    (Buffer.from(actionValue, "utf8").toString("utf8") === actionValue &&
+      Buffer.byteLength(actionValue, "utf8") <= 16384 &&
+      createHash("sha256").update(actionValue, "utf8").digest("hex") ===
+        verification.sha256)
+  );
 }
 
 function requestForHost(value: unknown): unknown {
@@ -538,6 +675,7 @@ function requestForHost(value: unknown): unknown {
         "operation_id",
         "action",
         "target",
+        "interaction_mode",
         "deadline_at_ms",
         "verification",
         "verification_version",
@@ -590,12 +728,18 @@ export function tools(
       name: "praefectus_execute",
       label: "Execute approved desktop action",
       description:
-        "Submit one action to the host approval bridge; the model cannot supply authority",
+        "Submit one interactive or background-only semantic action to the host approval bridge; the model cannot supply authority or isolation",
       parameters: Request,
       async execute(_id: string, params: unknown) {
         const operationId = isObject(params)
           ? String(params.operation_id)
           : undefined;
+        if (!validRequest(params))
+          return result(
+            { error: { code: "invalid_request" }, retry_safe: false },
+            operationId,
+            params,
+          );
         try {
           return result(
             await hostExecutor(requestForHost(params)),
