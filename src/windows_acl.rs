@@ -7,6 +7,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
+use fs2::FileExt;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL, LocalFree, WIN32_ERROR,
 };
@@ -49,6 +50,11 @@ impl Drop for OwnedHandle {
 
 pub(crate) struct PathGuard {
     _handles: Vec<OwnedHandle>,
+}
+
+pub(crate) struct InitializationGuard {
+    _path: PathGuard,
+    _file: File,
 }
 
 impl PathGuard {
@@ -170,6 +176,7 @@ pub(crate) fn available() -> bool {
 }
 
 fn initialize_managed_state() -> io::Result<()> {
+    let _initialization = initialization_lock()?;
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(permission_error)?;
@@ -182,6 +189,27 @@ fn initialize_managed_state() -> io::Result<()> {
         Err(error) => return Err(error),
     }
     restrict_directory(&managed)
+}
+
+pub(crate) fn initialization_lock() -> io::Result<InitializationGuard> {
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(permission_error)?;
+    let path = PathGuard::lock(&local)?;
+    validate_directory(&local, false)?;
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0);
+    let file = options.open(local.join(".praefectus-initialization.lock"))?;
+    file.lock_exclusive()?;
+    restrict_file(&file)?;
+    Ok(InitializationGuard {
+        _path: path,
+        _file: file,
+    })
 }
 
 pub(crate) fn restrict_file(file: &File) -> io::Result<()> {

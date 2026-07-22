@@ -5366,6 +5366,8 @@ fn load_element_observation(
 
 fn ensure_directory(path: &Path, restrict_existing: bool) -> Result<(), ProtocolError> {
     require_private_storage()?;
+    #[cfg(windows)]
+    let _initialization = windows_acl::initialization_lock()?;
     let directory = if path.as_os_str().is_empty() {
         std::env::current_dir()?
     } else {
