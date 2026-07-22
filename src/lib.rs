@@ -17,6 +17,8 @@ use thiserror::Error;
 pub mod cdp;
 #[cfg(target_os = "linux")]
 mod linux_atspi;
+#[cfg(target_os = "linux")]
+mod linux_input;
 pub mod semantic;
 #[cfg(target_os = "windows")]
 mod windows_acl;
@@ -623,6 +625,128 @@ impl std::error::Error for NativeError {}
 
 struct NativeRuntime;
 
+#[cfg(target_os = "macos")]
+fn mac_key_code(ch: char) -> Option<u16> {
+    match ch {
+        'a' => Some(0x00),
+        's' => Some(0x01),
+        'd' => Some(0x02),
+        'f' => Some(0x03),
+        'h' => Some(0x04),
+        'g' => Some(0x05),
+        'z' => Some(0x06),
+        'x' => Some(0x07),
+        'c' => Some(0x08),
+        'v' => Some(0x09),
+        'b' => Some(0x0B),
+        'q' => Some(0x0C),
+        'w' => Some(0x0D),
+        'e' => Some(0x0E),
+        'r' => Some(0x0F),
+        'y' => Some(0x10),
+        't' => Some(0x11),
+        '1' => Some(0x12),
+        '2' => Some(0x13),
+        '3' => Some(0x14),
+        '4' => Some(0x15),
+        '6' => Some(0x16),
+        '5' => Some(0x17),
+        '=' => Some(0x18),
+        '9' => Some(0x19),
+        '7' => Some(0x1A),
+        '-' => Some(0x1B),
+        '8' => Some(0x1C),
+        '0' => Some(0x1D),
+        ']' => Some(0x1E),
+        'o' => Some(0x1F),
+        'u' => Some(0x20),
+        '[' => Some(0x21),
+        'i' => Some(0x22),
+        'p' => Some(0x23),
+        'l' => Some(0x25),
+        'j' => Some(0x26),
+        '\'' => Some(0x27),
+        'k' => Some(0x28),
+        ';' => Some(0x29),
+        '\\' => Some(0x2A),
+        ',' => Some(0x2B),
+        '/' => Some(0x2C),
+        'n' => Some(0x2D),
+        'm' => Some(0x2E),
+        '.' => Some(0x2F),
+        '\t' => Some(0x30),
+        ' ' => Some(0x31),
+        '`' => Some(0x32),
+        '\x7F' => Some(0x33),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_key_name_code(name: &str) -> Option<u16> {
+    match name {
+        "return" | "enter" => Some(0x24),
+        "tab" => Some(0x30),
+        "escape" | "esc" => Some(0x35),
+        "delete" | "del" => Some(0x75),
+        "backspace" => Some(0x33),
+        "space" => Some(0x31),
+        "up" => Some(0x7E),
+        "down" => Some(0x7D),
+        "left" => Some(0x7B),
+        "right" => Some(0x7C),
+        "home" => Some(0x73),
+        "end" => Some(0x77),
+        "pageup" => Some(0x74),
+        "pagedown" => Some(0x79),
+        "f1" => Some(0x7A),
+        "f2" => Some(0x78),
+        "f3" => Some(0x63),
+        "f4" => Some(0x76),
+        "f5" => Some(0x60),
+        "f6" => Some(0x61),
+        "f7" => Some(0x62),
+        "f8" => Some(0x64),
+        "f9" => Some(0x65),
+        "f10" => Some(0x6D),
+        "f11" => Some(0x67),
+        "f12" => Some(0x6F),
+        "insert" => Some(0x72),
+        "printscreen" => Some(0x69),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MAC_FLAG_SHIFT: u64 = 1 << 17;
+#[cfg(target_os = "macos")]
+const MAC_FLAG_CONTROL: u64 = 1 << 18;
+#[cfg(target_os = "macos")]
+const MAC_FLAG_ALTERNATE: u64 = 1 << 19;
+#[cfg(target_os = "macos")]
+const MAC_FLAG_COMMAND: u64 = 1 << 20;
+
+#[cfg(target_os = "macos")]
+fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
+    let event = CGEvent::new_keyboard_event(source.clone(), code, true).map_err(|_| NativeError)?;
+    event.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
+        flags,
+    ));
+    event.post(CGEventTapLocation::HID);
+    let source_up =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
+    let event_up = CGEvent::new_keyboard_event(source_up, code, false).map_err(|_| NativeError)?;
+    event_up.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
+        flags,
+    ));
+    event_up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
 impl NativeRuntime {
     fn new() -> Self {
         Self
@@ -702,7 +826,13 @@ impl NativeRuntime {
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 }
             };
@@ -721,13 +851,25 @@ impl NativeRuntime {
                 let down = INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: code_unit, dwFlags: KEYEVENTF_UNICODE, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: code_unit,
+                            dwFlags: KEYEVENTF_UNICODE,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 };
                 let up = INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: code_unit, dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: code_unit,
+                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 };
                 let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
@@ -745,7 +887,40 @@ impl NativeRuntime {
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            if _clear {
+                let _ = mac_post_key(0x00, MAC_FLAG_COMMAND);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = mac_post_key(0x33, 0);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            for ch in _text.chars() {
+                if let Some(code) = mac_key_code(ch.to_ascii_lowercase()) {
+                    let needs_shift =
+                        ch.is_ascii_uppercase() || "~!@#$%^&*()_+{}|:\"<>?".contains(ch);
+                    let flags = if needs_shift { MAC_FLAG_SHIFT } else { 0 };
+                    let _ = mac_post_key(code, flags);
+                }
+                if let Some(delay) = _delay_ms {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(12));
+                }
+            }
+            if _press_return {
+                let _ = mac_post_key(0x24, 0);
+            }
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
     }
 
@@ -805,20 +980,58 @@ impl NativeRuntime {
                 let down = INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: KEYBD_EVENT_FLAGS::default(), time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: KEYBD_EVENT_FLAGS::default(),
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 };
                 let up = INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 };
                 let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            let code = mac_key_name_code(_key)
+                .or_else(|| {
+                    _key.chars()
+                        .next()
+                        .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+                })
+                .ok_or(NativeError)?;
+            for i in 0.._count {
+                if i > 0 {
+                    if let Some(delay) = _delay_ms {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                }
+                let _ = mac_post_key(code, 0);
+            }
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
     }
 
@@ -840,13 +1053,16 @@ impl NativeRuntime {
             struct ClipboardGuard;
             impl Drop for ClipboardGuard {
                 fn drop(&mut self) {
-                    unsafe { let _ = CloseClipboard(); }
+                    unsafe {
+                        let _ = CloseClipboard();
+                    }
                 }
             }
             let _guard = ClipboardGuard;
             unsafe { EmptyClipboard() }.map_err(|_| NativeError)?;
 
-            let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_size) }.map_err(|_| NativeError)?;
+            let hglobal =
+                unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_size) }.map_err(|_| NativeError)?;
             let ptr = unsafe { GlobalLock(hglobal) };
             if ptr.is_null() {
                 return Err(NativeError);
@@ -855,8 +1071,12 @@ impl NativeRuntime {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
                 let _ = GlobalUnlock(hglobal);
             }
-            if unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hglobal.0))) }.is_err() {
-                unsafe { let _ = GlobalFree(hglobal); }
+            if unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hglobal.0))) }
+                .is_err()
+            {
+                unsafe {
+                    let _ = GlobalFree(hglobal);
+                }
                 return Err(NativeError);
             }
             drop(_guard);
@@ -865,7 +1085,13 @@ impl NativeRuntime {
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 }
             };
@@ -878,7 +1104,34 @@ impl NativeRuntime {
             let _ = unsafe { SendInput(&ctrl_v, std::mem::size_of::<INPUT>() as i32) };
             return Ok(());
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            use std::process::Command;
+            let status = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    if let Some(ref mut stdin) = child.stdin {
+                        let _ = stdin.write_all(_text.as_bytes());
+                    }
+                    child.wait()
+                })
+                .map_err(|_| NativeError)?;
+            if !status.success() {
+                return Err(NativeError);
+            }
+            let _ = mac_post_key(0x09, MAC_FLAG_COMMAND);
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
     }
 
@@ -918,35 +1171,86 @@ impl NativeRuntime {
                 }
                 _ => return Err(NativeError),
             };
-            let modifier_vks: Vec<VIRTUAL_KEY> = modifiers.iter().map(|m| match *m {
-                "ctrl" => Ok(VK_CONTROL),
-                "alt" => Ok(VK_MENU),
-                "shift" => Ok(VK_SHIFT),
-                "win" => Ok(VK_LWIN),
-                _ => Err(NativeError),
-            }).collect::<Result<_, _>>()?;
+            let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
+                .iter()
+                .map(|m| match *m {
+                    "ctrl" => Ok(VK_CONTROL),
+                    "alt" => Ok(VK_MENU),
+                    "shift" => Ok(VK_SHIFT),
+                    "win" => Ok(VK_LWIN),
+                    _ => Err(NativeError),
+                })
+                .collect::<Result<_, _>>()?;
 
             let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 }
             };
 
             for vk in &modifier_vks {
-                let _ = unsafe { SendInput(&[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())], std::mem::size_of::<INPUT>() as i32) };
+                let _ = unsafe {
+                    SendInput(
+                        &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                };
             }
             let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
             let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
             let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
             for vk in modifier_vks.iter().rev() {
-                let _ = unsafe { SendInput(&[make_keybd(*vk, KEYEVENTF_KEYUP)], std::mem::size_of::<INPUT>() as i32) };
+                let _ = unsafe {
+                    SendInput(
+                        &[make_keybd(*vk, KEYEVENTF_KEYUP)],
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                };
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            let code = _keys
+                .last()
+                .and_then(|k| {
+                    mac_key_name_code(k).or_else(|| {
+                        k.chars()
+                            .next()
+                            .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+                    })
+                })
+                .ok_or(NativeError)?;
+            let mut flags: u64 = 0;
+            for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
+                match mod_key {
+                    "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
+                    "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
+                    "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
+                    "shift" => flags |= MAC_FLAG_SHIFT,
+                    _ => return Err(NativeError),
+                }
+            }
+            let _ = mac_post_key(code, flags);
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
     }
 
@@ -969,14 +1273,63 @@ impl NativeRuntime {
                 let input = INPUT {
                     r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: delta, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+                        mi: MOUSEINPUT {
+                            dx: 0,
+                            dy: 0,
+                            mouseData: delta,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
                 };
                 let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            use core_graphics::event::CGEventTapLocation;
+            use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+            unsafe extern "C" {
+                fn CGEventCreateScrollWheelEvent(
+                    source: *const std::ffi::c_void,
+                    units: u32,
+                    wheel_count: u32,
+                    wheel1: i32,
+                    wheel2: i32,
+                ) -> *mut std::ffi::c_void;
+            }
+            const K_CGSCROLL_EVENT_UNIT_LINE: u32 = 1;
+            for _ in 0.._amount {
+                let (w1, w2) = match _direction {
+                    Direction::Up => (1i32, 0i32),
+                    Direction::Down => (-1i32, 0i32),
+                    Direction::Left => (0i32, -1i32),
+                    Direction::Right => (0i32, 1i32),
+                };
+                let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+                    .map_err(|_| NativeError)?;
+                let source_ptr: *mut core_graphics::sys::CGEventSource =
+                    unsafe { std::mem::transmute_copy(&source) };
+                let raw = unsafe {
+                    CGEventCreateScrollWheelEvent(
+                        source_ptr.cast(),
+                        K_CGSCROLL_EVENT_UNIT_LINE,
+                        2,
+                        w1,
+                        w2,
+                    )
+                };
+                if raw.is_null() {
+                    return Err(NativeError);
+                }
+                let event: core_graphics::event::CGEvent = unsafe { std::mem::transmute(raw) };
+                event.post(CGEventTapLocation::HID);
+            }
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
     }
 
@@ -1005,7 +1358,7 @@ fn native_backend() -> &'static str {
     {
         match std::env::consts::OS {
             "macos" => "praefectus-macos-ax",
-            "linux" => "praefectus-unavailable-linux",
+            "linux" => "praefectus-linux",
             _ => "praefectus-unavailable",
         }
     }
@@ -1072,7 +1425,11 @@ fn native_screens() -> Result<Value, NativeError> {
     {
         windows_uia::screens()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        return linux_input::native_screens();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     Ok(Value::Array(Vec::new()))
 }
 
@@ -1122,7 +1479,9 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
         }
         let mem_dc = unsafe { CreateCompatibleDC(Some(screen_dc)) };
         if mem_dc.0.is_null() {
-            unsafe { let _ = ReleaseDC(None, screen_dc); }
+            unsafe {
+                let _ = ReleaseDC(None, screen_dc);
+            }
             return Err(NativeError);
         }
         let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, cx, cy) };
@@ -1134,8 +1493,11 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
             return Err(NativeError);
         }
         let old_bmp = unsafe { SelectObject(mem_dc, bitmap) };
-        let blt_ok = unsafe { BitBlt(mem_dc, 0, 0, cx, cy, Some(screen_dc), ox, oy, SRCCOPY) }.as_bool();
-        unsafe { let _ = SelectObject(mem_dc, old_bmp); }
+        let blt_ok =
+            unsafe { BitBlt(mem_dc, 0, 0, cx, cy, Some(screen_dc), ox, oy, SRCCOPY) }.as_bool();
+        unsafe {
+            let _ = SelectObject(mem_dc, old_bmp);
+        }
         if !blt_ok {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -1153,7 +1515,17 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
         bmi.bmiHeader.biCompression = 0;
         let buf_len = (cx as usize) * (cy as usize) * 4;
         let mut pixels = vec![0u8; buf_len];
-        let n = unsafe { GetDIBits(mem_dc, bitmap, 0, cy as u32, Some(pixels.as_mut_ptr().cast()), &mut bmi, DIB_RGB_COLORS) };
+        let n = unsafe {
+            GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                cy as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            )
+        };
         unsafe {
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
             let _ = DeleteDC(mem_dc);
@@ -1315,18 +1687,46 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
         };
         let down = INPUT {
             r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: down_flags, time: 0, dwExtraInfo: 0 } },
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: down_flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
         };
         let up = INPUT {
             r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: up_flags, time: 0, dwExtraInfo: 0 } },
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: up_flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
         };
         if unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) } != 2 {
             return Err(NativeError);
         }
         return Ok(());
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        let native_button = match button {
+            "left" => MouseButton::Left,
+            "right" => MouseButton::Right,
+            "middle" => MouseButton::Middle,
+            _ => return Err(NativeError),
+        };
+        return linux_input::native_click(point, native_button);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (point, button);
         Err(NativeError)
@@ -1368,7 +1768,11 @@ fn native_move(point: &NativePoint) -> Result<(), NativeError> {
         }
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        return linux_input::native_move(point);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = point;
         Err(NativeError)
@@ -4189,7 +4593,10 @@ impl Executor for NativeExecutor {
                     ])
                 });
             let has_accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let has_display_geometry = permissions.get("display_geometry").copied().unwrap_or(false);
+            let has_display_geometry = permissions
+                .get("display_geometry")
+                .copied()
+                .unwrap_or(false);
             let has_private_state = permissions.get("private_state").copied().unwrap_or(false);
             let mut supported_actions = Vec::new();
             let mut action_capabilities = Vec::new();
@@ -4252,16 +4659,31 @@ impl Executor for NativeExecutor {
             let private_state = permissions.get("private_state").copied().unwrap_or(false);
             let mut supported_actions = Vec::new();
             if accessibility && private_state {
-                supported_actions.extend(["invoke", "set_value"]);
-                #[cfg(target_os = "windows")]
-                supported_actions.push("scroll");
+                supported_actions.extend([
+                    "invoke",
+                    "set_value",
+                    "click",
+                    "type_text",
+                    "press",
+                    "paste",
+                    "hotkey",
+                    "move",
+                    "scroll",
+                ]);
             }
             let action_capabilities = supported_actions
                 .iter()
                 .map(|action| ActionCapability {
                     action: (*action).to_string(),
-                    delivery_route: DeliveryRoute::TargetAddressed,
-                    background_support: BackgroundSupport::Guarded,
+                    delivery_route: match *action {
+                        "invoke" | "set_value" => DeliveryRoute::TargetAddressed,
+                        "scroll" => DeliveryRoute::TargetAddressed,
+                        _ => DeliveryRoute::Pointer,
+                    },
+                    background_support: match *action {
+                        "invoke" | "set_value" | "scroll" => BackgroundSupport::Guarded,
+                        _ => BackgroundSupport::Unavailable,
+                    },
                 })
                 .collect();
             Ok(Capabilities {

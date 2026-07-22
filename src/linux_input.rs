@@ -9,7 +9,7 @@ use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xtest::XTestExtension;
 use x11rb::rust_connection::RustConnection;
 
-use crate::{Direction, NativeError, NativePoint, MouseButton};
+use crate::{Direction, MouseButton, NativeError, NativePoint};
 
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -84,9 +84,7 @@ fn portal_connection() -> Result<zbus::blocking::Connection, NativeError> {
     zbus::blocking::Connection::session().map_err(|_| NativeError)
 }
 
-fn portal_create_session(
-    connection: &zbus::blocking::Connection,
-) -> Result<String, NativeError> {
+fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<String, NativeError> {
     let options = zbus::zvariant::Dict::new(
         zbus::zvariant::Signature::Str,
         zbus::zvariant::Signature::Variant,
@@ -123,9 +121,7 @@ fn portal_authorize(
         zbus::zvariant::Signature::Variant,
     );
     let types = zbus::zvariant::Value::U32(1 | 2);
-    options
-        .insert("types", types)
-        .map_err(|_| NativeError)?;
+    options.insert("types", types).map_err(|_| NativeError)?;
     let reply = connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -270,10 +266,7 @@ fn portal_notify_keyboard_keysym(
 
 // ── public API ──────────────────────────────────────────────────────────────
 
-pub(crate) fn native_click(
-    point: &NativePoint,
-    button: MouseButton,
-) -> Result<(), NativeError> {
+pub(crate) fn native_click(point: &NativePoint, button: MouseButton) -> Result<(), NativeError> {
     match session_type() {
         "x11" => x11_click(point, button),
         "wayland" => portal_click(button),
@@ -290,7 +283,16 @@ fn x11_click(point: &NativePoint, button: MouseButton) -> Result<(), NativeError
         MouseButton::Right => 3,
     };
     connection
-        .warp_pointer(root, 0, 0, 0, 0, point.x as i16, point.y as i16)
+        .warp_pointer(
+            0u32,
+            root,
+            0i16,
+            0i16,
+            0u16,
+            0u16,
+            point.x as i16,
+            point.y as i16,
+        )
         .map_err(|_| NativeError)?;
     connection
         .xtest_fake_input(4, detail, 0, root, point.x as i16, point.y as i16, 0)
@@ -326,7 +328,16 @@ fn x11_move(point: &NativePoint) -> Result<(), NativeError> {
     let (connection, screen) = connect_x11()?;
     let root = connection.setup().roots[screen].root;
     connection
-        .warp_pointer(root, 0, 0, 0, 0, point.x as i16, point.y as i16)
+        .warp_pointer(
+            0u32,
+            root,
+            0i16,
+            0i16,
+            0u16,
+            0u16,
+            point.x as i16,
+            point.y as i16,
+        )
         .map_err(|_| NativeError)?;
     connection.flush().map_err(|_| NativeError)?;
     Ok(())
@@ -334,12 +345,7 @@ fn x11_move(point: &NativePoint) -> Result<(), NativeError> {
 
 fn portal_move(point: &NativePoint) -> Result<(), NativeError> {
     let (session_handle, connection) = ensure_portal_session()?;
-    portal_notify_pointer_motion(
-        &connection,
-        &session_handle,
-        point.x as f64,
-        point.y as f64,
-    )?;
+    portal_notify_pointer_motion(&connection, &session_handle, point.x as f64, point.y as f64)?;
     Ok(())
 }
 
@@ -464,12 +470,8 @@ pub(crate) fn native_press(
 fn x11_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
     let (connection, screen) = connect_x11()?;
     let root = connection.setup().roots[screen].root;
-    let keysym = keysym_for_name(key).unwrap_or_else(|| {
-        key.chars()
-            .next()
-            .map(character_to_keysym)
-            .unwrap_or(0)
-    });
+    let keysym = keysym_for_name(key)
+        .unwrap_or_else(|| key.chars().next().map(character_to_keysym).unwrap_or(0));
     if keysym == 0 {
         return Err(NativeError);
     }
@@ -495,12 +497,8 @@ fn x11_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeE
 }
 
 fn portal_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
-    let keysym = keysym_for_name(key).unwrap_or_else(|| {
-        key.chars()
-            .next()
-            .map(character_to_keysym)
-            .unwrap_or(0)
-    });
+    let keysym = keysym_for_name(key)
+        .unwrap_or_else(|| key.chars().next().map(character_to_keysym).unwrap_or(0));
     if keysym == 0 {
         return Err(NativeError);
     }
@@ -618,10 +616,7 @@ fn portal_hotkey(keys: &[&str]) -> Result<(), NativeError> {
     Ok(())
 }
 
-pub(crate) fn native_scroll(
-    direction: Direction,
-    amount: u32,
-) -> Result<(), NativeError> {
+pub(crate) fn native_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> {
     if amount == 0 {
         return Err(NativeError);
     }
@@ -831,8 +826,14 @@ fn parse_swaymsg_outputs(stdout: &[u8]) -> Result<Value, NativeError> {
             .unwrap_or("unknown")
             .to_string();
         let rect = output.get("rect");
-        let x = rect.and_then(|r| r.get("x")).and_then(Value::as_i64).unwrap_or(0);
-        let y = rect.and_then(|r| r.get("y")).and_then(Value::as_i64).unwrap_or(0);
+        let x = rect
+            .and_then(|r| r.get("x"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let y = rect
+            .and_then(|r| r.get("y"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let width = rect
             .and_then(|r| r.get("width"))
             .and_then(Value::as_i64)
@@ -860,8 +861,8 @@ fn parse_swaymsg_outputs(stdout: &[u8]) -> Result<Value, NativeError> {
 // ── keysym table ────────────────────────────────────────────────────────────
 
 const NEEDS_SHIFT: &[char] = &[
-    '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '{', '}', '|',
-    ':', '"', '<', '>', '?', '~',
+    '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '{', '}', '|', ':', '"', '<', '>',
+    '?', '~',
 ];
 
 const XK_BACKSPACE: u32 = 0xff08;

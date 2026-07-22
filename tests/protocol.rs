@@ -1010,7 +1010,7 @@ fn native_executor_rejects_coordinate_effects() {
     let executor = NativeExecutor::default();
     let capabilities = executor.capabilities().expect("capabilities");
     assert!(
-        !capabilities
+        capabilities
             .supported_actions
             .iter()
             .any(|action| action == "move")
