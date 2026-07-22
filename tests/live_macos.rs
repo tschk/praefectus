@@ -75,8 +75,21 @@ fn mac_capabilities_reports_all_actions() {
     let actions = data["supported_actions"].as_array().unwrap();
     let action_names: Vec<&str> = actions.iter().map(|a| a.as_str().unwrap()).collect();
     eprintln!("supported actions: {action_names:?}");
-    for expected in &["invoke", "set_value", "click", "type_text", "press", "paste", "hotkey", "move", "scroll"] {
-        assert!(action_names.contains(expected), "missing action: {expected}");
+    for expected in &[
+        "invoke",
+        "set_value",
+        "click",
+        "type_text",
+        "press",
+        "paste",
+        "hotkey",
+        "move",
+        "scroll",
+    ] {
+        assert!(
+            action_names.contains(expected),
+            "missing action: {expected}"
+        );
     }
 
     let perms = data["permissions"].as_object().unwrap();

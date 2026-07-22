@@ -19,6 +19,17 @@ const PORTAL_APP_ID: &str = "praefectus";
 
 static PORTAL_SESSION: Mutex<Option<(String, zbus::blocking::Connection)>> = Mutex::new(None);
 
+fn secure_command(name: &str) -> Result<Command, NativeError> {
+    let safe_paths = ["/usr/bin", "/bin", "/usr/local/bin"];
+    for dir in safe_paths {
+        let full_path = std::path::PathBuf::from(dir).join(name);
+        if full_path.is_file() {
+            return Ok(Command::new(full_path));
+        }
+    }
+    Err(NativeError)
+}
+
 pub(crate) fn session_type() -> &'static str {
     match std::env::var("XDG_SESSION_TYPE") {
         Ok(v) if v.eq_ignore_ascii_case("wayland") => "wayland",
@@ -523,7 +534,7 @@ pub(crate) fn native_paste(text: &str) -> Result<(), NativeError> {
     }
     match session_type() {
         "x11" => {
-            let status = Command::new("xclip")
+            let status = secure_command("xclip")?
                 .args(["-selection", "clipboard"])
                 .stdin(std::process::Stdio::piped())
                 .spawn()
@@ -541,7 +552,7 @@ pub(crate) fn native_paste(text: &str) -> Result<(), NativeError> {
             x11_hotkey(&["ctrl", "v"])
         }
         "wayland" => {
-            let status = Command::new("wl-copy")
+            let status = secure_command("wl-copy")?
                 .stdin(std::process::Stdio::piped())
                 .spawn()
                 .and_then(|mut child| {
@@ -671,7 +682,7 @@ pub(crate) fn native_screenshot() -> Result<Vec<u8>, NativeError> {
 }
 
 fn x11_screenshot() -> Result<Vec<u8>, NativeError> {
-    let output = Command::new("scrot")
+    let output = secure_command("scrot")?
         .args(["-o", "/dev/stdout"])
         .output()
         .map_err(|_| NativeError)?;
@@ -684,7 +695,7 @@ fn x11_screenshot() -> Result<Vec<u8>, NativeError> {
 fn wayland_screenshot() -> Result<Vec<u8>, NativeError> {
     // portal Screenshot returns fd; fall back to grim for simplicity
     // ponytail: grim subprocess, portal FD handling if grim unavailable
-    let output = Command::new("grim")
+    let output = secure_command("grim")?
         .args(["-"])
         .output()
         .map_err(|_| NativeError)?;
@@ -752,17 +763,18 @@ fn x11_screens() -> Result<Value, NativeError> {
 fn wayland_screens() -> Result<Value, NativeError> {
     // Use wlr-randr or swaymsg if available, fall back to single screen guess
     // ponytail: portal Settings or wlr-output-management for proper multi-monitor
-    if let Ok(output) = Command::new("wlr-randr").output() {
-        if output.status.success() {
-            return parse_wlr_randr(&output.stdout);
+    if let Ok(mut cmd) = secure_command("wlr-randr") {
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                return parse_wlr_randr(&output.stdout);
+            }
         }
     }
-    if let Ok(output) = Command::new("swaymsg")
-        .args(["-t", "get_outputs", "-r"])
-        .output()
-    {
-        if output.status.success() {
-            return parse_swaymsg_outputs(&output.stdout);
+    if let Ok(mut cmd) = secure_command("swaymsg") {
+        if let Ok(output) = cmd.args(["-t", "get_outputs", "-r"]).output() {
+            if output.status.success() {
+                return parse_swaymsg_outputs(&output.stdout);
+            }
         }
     }
     Ok(Value::Array(vec![serde_json::json!({
