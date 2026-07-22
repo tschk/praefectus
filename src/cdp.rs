@@ -470,11 +470,14 @@ impl<C: CdpChannel> CdpExecutor<C> {
         parameters: Value,
     ) -> Result<Value, CdpError> {
         boundary(cancellation, deadline_at_ms)?;
-        self.channel
+        let result = self
+            .channel
             .lock()
             .map_err(|_| CdpError::Protocol)?
             .command(method, parameters, deadline_at_ms)
-            .map_err(|_| CdpError::Protocol)
+            .map_err(|_| CdpError::Protocol);
+        boundary(cancellation, deadline_at_ms)?;
+        result
     }
 
     fn stored_node<T>(&self, target: &SemanticTargetRef, now_ms: i64) -> Result<T, CdpError>
@@ -546,12 +549,13 @@ impl<C: CdpChannel> CdpExecutor<C> {
         &self,
         target: &SemanticTargetRef,
         deadline_at_ms: i64,
-    ) -> Result<Value, ProtocolError> {
+    ) -> Result<LiveProbe, ProtocolError> {
         verify_process(&self.config).map_err(|_| backend_error())?;
         let node: NodeIdentity = self
             .stored_node(target, now_ms())
             .map_err(map_cdp_protocol_error)?;
-        if self.current_document_id(deadline_at_ms)? != node.document_id {
+        let document_id = self.current_document_id(deadline_at_ms)?;
+        if document_id != node.document_id {
             return Err(ProtocolError::StaleTarget(
                 "browser document changed".to_string(),
             ));
@@ -594,17 +598,104 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "browser target changed".to_string(),
             ));
         }
-        Ok(redacted_probe(value, node.protected))
+        let layout = self
+            .channel
+            .lock()
+            .map_err(|_| backend_error())?
+            .command("Page.getLayoutMetrics", json!({}), deadline_at_ms)
+            .map_err(|_| backend_error())?;
+        let viewport = layout
+            .get("cssVisualViewport")
+            .or_else(|| layout.get("visualViewport"))
+            .ok_or_else(backend_error)?;
+        let display_geometry_hash = semantic_fingerprint(viewport).map_err(|_| backend_error())?;
+        let tree = self
+            .channel
+            .lock()
+            .map_err(|_| backend_error())?
+            .command(
+                "Accessibility.getPartialAXTree",
+                json!({
+                    "backendNodeId": node.backend_node_id,
+                    "fetchRelatives": false,
+                }),
+                deadline_at_ms,
+            )
+            .map_err(|_| backend_error())?;
+        let semantics = live_ax_semantics(&tree, node.backend_node_id)
+            .map_err(|_| ProtocolError::StaleTarget("browser target changed".to_string()))?;
+        let fingerprint_hash = semantic_fingerprint(&(
+            document_id.as_str(),
+            node.backend_node_id,
+            semantics.role.as_str(),
+            semantics.name.as_deref(),
+        ))
+        .map_err(|_| backend_error())?;
+        verify_process(&self.config).map_err(|_| backend_error())?;
+        if display_geometry_hash != node.display_geometry_hash
+            || fingerprint_hash != node.fingerprint_hash
+        {
+            return Err(ProtocolError::StaleTarget(
+                "browser target changed".to_string(),
+            ));
+        }
+        Ok(LiveProbe {
+            state: redacted_probe(value, node.protected),
+            fingerprint_hash,
+            display_geometry_hash,
+        })
+    }
+
+    fn verify_process_for_effect(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<(), DispatchError> {
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        let result = verify_process(&self.config);
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        result.map_err(|_| no_effect("browser process changed"))
+    }
+
+    fn current_document_id_for_effect(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<String, DispatchError> {
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        let result = self.current_document_id(deadline_at_ms);
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        result.map_err(|_| no_effect("browser document is unavailable"))
+    }
+
+    fn resolve_object_for_effect(
+        &self,
+        backend_node_id: u64,
+        execution_context_id: u64,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<String, DispatchError> {
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        let result = self.resolve_object(backend_node_id, execution_context_id, deadline_at_ms);
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        result.map_err(|_| no_effect("browser target changed"))
     }
 
     fn effect_command(
         &self,
         method: &str,
         parameters: Value,
+        cancellation: &CancellationToken,
         deadline_at_ms: i64,
         effect_started: bool,
     ) -> Result<Value, DispatchError> {
-        self.channel
+        if effect_started {
+            check_after_effect_boundary(cancellation, deadline_at_ms)?;
+        } else {
+            check_effect_boundary(cancellation, deadline_at_ms)?;
+        }
+        let result = self
+            .channel
             .lock()
             .map_err(|_| {
                 if effect_started {
@@ -613,43 +704,48 @@ impl<C: CdpChannel> CdpExecutor<C> {
                     no_effect("browser channel is unavailable")
                 }
             })?
-            .command(method, parameters, deadline_at_ms)
-            .map_err(|error| {
-                if effect_started || error == CdpChannelError::AfterSend {
-                    unknown("browser effect outcome is unknown")
-                } else {
-                    no_effect("browser effect was not dispatched")
-                }
-            })
+            .command(method, parameters, deadline_at_ms);
+        match result {
+            Ok(value) => Ok(value),
+            Err(_) if effect_started => Err(unknown("browser effect outcome is unknown")),
+            Err(CdpChannelError::AfterSend) => Err(unknown("browser effect outcome is unknown")),
+            Err(CdpChannelError::BeforeSend) => {
+                check_effect_boundary(cancellation, deadline_at_ms)?;
+                Err(no_effect("browser effect was not dispatched"))
+            }
+        }
     }
 
     fn query_for_effect(
         &self,
         method: &str,
         parameters: Value,
+        cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<Value, DispatchError> {
-        self.channel
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        let result = self
+            .channel
             .lock()
             .map_err(|_| no_effect("browser channel is unavailable"))?
-            .command(method, parameters, deadline_at_ms)
-            .map_err(|_| no_effect("browser target is unavailable"))
+            .command(method, parameters, deadline_at_ms);
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        result.map_err(|_| no_effect("browser target is unavailable"))
     }
 
     fn probe_object_for_effect(
         &self,
         object_id: &str,
-        protected: bool,
-        reveal_value: bool,
+        options: EffectProbe,
+        cancellation: &CancellationToken,
         deadline_at_ms: i64,
-        effect_started: bool,
     ) -> Result<Value, DispatchError> {
-        let function = if protected && !reveal_value {
+        let function = if options.protected && !options.reveal_value {
             PROTECTED_PROBE_FUNCTION
         } else {
             PROBE_FUNCTION
         };
-        let response = if effect_started {
+        let response = if options.effect_started {
             self.effect_command(
                 "Runtime.callFunctionOn",
                 json!({
@@ -658,6 +754,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                     "awaitPromise": true,
                     "returnByValue": true,
                 }),
+                cancellation,
                 deadline_at_ms,
                 true,
             )?
@@ -670,18 +767,19 @@ impl<C: CdpChannel> CdpExecutor<C> {
                     "awaitPromise": true,
                     "returnByValue": true,
                 }),
+                cancellation,
                 deadline_at_ms,
             )?
         };
         if response.get("exceptionDetails").is_some() {
-            return Err(if effect_started {
+            return Err(if options.effect_started {
                 unknown("browser effect outcome is unknown")
             } else {
                 no_effect("browser target changed")
             });
         }
         response.pointer("/result/value").cloned().ok_or_else(|| {
-            if effect_started {
+            if options.effect_started {
                 unknown("browser effect outcome is unknown")
             } else {
                 no_effect("browser target changed")
@@ -691,47 +789,49 @@ impl<C: CdpChannel> CdpExecutor<C> {
 
     fn verify_live_target_for_effect(
         &self,
-        backend_node_id: u64,
-        expected_fingerprint_hash: &str,
-        expected_display_geometry_hash: &str,
-        requires_invokable: bool,
-        requires_editable: bool,
+        target: &NodeIdentity,
+        requirements: LiveTargetRequirements,
+        cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<(), DispatchError> {
-        let layout = self.query_for_effect("Page.getLayoutMetrics", json!({}), deadline_at_ms)?;
+        let layout = self.query_for_effect(
+            "Page.getLayoutMetrics",
+            json!({}),
+            cancellation,
+            deadline_at_ms,
+        )?;
         let viewport = layout
             .get("cssVisualViewport")
             .or_else(|| layout.get("visualViewport"))
             .ok_or_else(|| no_effect("browser viewport is unavailable"))?;
         let display_geometry_hash =
             semantic_fingerprint(viewport).map_err(|_| no_effect("browser viewport changed"))?;
-        if display_geometry_hash != expected_display_geometry_hash {
+        if display_geometry_hash != target.display_geometry_hash {
             return Err(no_effect("browser viewport changed"));
         }
-        let document_id = self
-            .current_document_id(deadline_at_ms)
-            .map_err(|_| no_effect("browser document is unavailable"))?;
+        let document_id = self.current_document_id_for_effect(cancellation, deadline_at_ms)?;
         let tree = self.query_for_effect(
             "Accessibility.getPartialAXTree",
             json!({
-                "backendNodeId": backend_node_id,
+                "backendNodeId": target.backend_node_id,
                 "fetchRelatives": false,
             }),
+            cancellation,
             deadline_at_ms,
         )?;
-        let semantics = live_ax_semantics(&tree, backend_node_id)?;
+        let semantics = live_ax_semantics(&tree, target.backend_node_id)?;
         let fingerprint_hash = semantic_fingerprint(&(
             document_id.as_str(),
-            backend_node_id,
+            target.backend_node_id,
             semantics.role.as_str(),
             semantics.name.as_deref(),
         ))
         .map_err(|_| no_effect("browser target changed"))?;
-        if fingerprint_hash != expected_fingerprint_hash
+        if fingerprint_hash != target.fingerprint_hash
             || !semantics.visible
             || !semantics.enabled
-            || (requires_invokable && !semantics.invokable)
-            || (requires_editable && !semantics.editable)
+            || (requirements.invokable && !semantics.invokable)
+            || (requirements.editable && !semantics.editable)
         {
             return Err(no_effect("browser target changed"));
         }
@@ -745,20 +845,22 @@ impl<C: CdpChannel> CdpExecutor<C> {
         deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError> {
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
-        let object_id = self
-            .resolve_object(
-                target.backend_node_id,
-                target.execution_context_id,
-                deadline_at_ms,
-            )
-            .map_err(|_| no_effect("browser target changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
+        let object_id = self.resolve_object_for_effect(
+            target.backend_node_id,
+            target.execution_context_id,
+            cancellation,
+            deadline_at_ms,
+        )?;
         let probe = self.probe_object_for_effect(
             &object_id,
-            target.protected,
-            false,
+            EffectProbe {
+                protected: target.protected,
+                reveal_value: false,
+                effect_started: false,
+            },
+            cancellation,
             deadline_at_ms,
-            false,
         )?;
         if probe.get("connected").and_then(Value::as_bool) != Some(true)
             || probe.get("visible").and_then(Value::as_bool) != Some(true)
@@ -767,17 +869,18 @@ impl<C: CdpChannel> CdpExecutor<C> {
             return Err(no_effect("browser target is not actionable"));
         }
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
         self.verify_live_target_for_effect(
-            target.backend_node_id,
-            &target.fingerprint_hash,
-            &target.display_geometry_hash,
-            true,
-            false,
+            target,
+            LiveTargetRequirements {
+                invokable: true,
+                editable: false,
+            },
+            cancellation,
             deadline_at_ms,
         )?;
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
         let response = self.effect_command(
             "Runtime.callFunctionOn",
             json!({
@@ -785,6 +888,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "functionDeclaration": INVOKE_EFFECT_FUNCTION,
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
             false,
         )?;
@@ -810,14 +914,13 @@ impl<C: CdpChannel> CdpExecutor<C> {
         deadline_at_ms: i64,
     ) -> Result<DispatchReceipt, DispatchError> {
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
-        let object_id = self
-            .resolve_object(
-                target.backend_node_id,
-                target.execution_context_id,
-                deadline_at_ms,
-            )
-            .map_err(|_| no_effect("browser target changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
+        let object_id = self.resolve_object_for_effect(
+            target.backend_node_id,
+            target.execution_context_id,
+            cancellation,
+            deadline_at_ms,
+        )?;
         let probe = self.query_for_effect(
             "Runtime.callFunctionOn",
             json!({
@@ -825,6 +928,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "functionDeclaration": SCROLL_PROBE_FUNCTION,
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
         )?;
         let probe = probe
@@ -844,6 +948,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
         let first_box = self.query_for_effect(
             "DOM.getBoxModel",
             json!({"backendNodeId": target.backend_node_id}),
+            cancellation,
             deadline_at_ms,
         )?;
         self.query_for_effect(
@@ -853,12 +958,14 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "awaitPromise": true,
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
         )?;
         check_effect_boundary(cancellation, deadline_at_ms)?;
         let second_box = self.query_for_effect(
             "DOM.getBoxModel",
             json!({"backendNodeId": target.backend_node_id}),
+            cancellation,
             deadline_at_ms,
         )?;
         let first_quad = border_quad(&first_box)?;
@@ -870,7 +977,12 @@ impl<C: CdpChannel> CdpExecutor<C> {
         {
             return Err(no_effect("browser target is not stable"));
         }
-        let layout = self.query_for_effect("Page.getLayoutMetrics", json!({}), deadline_at_ms)?;
+        let layout = self.query_for_effect(
+            "Page.getLayoutMetrics",
+            json!({}),
+            cancellation,
+            deadline_at_ms,
+        )?;
         let (x, y) = viewport_point(&second_quad, &layout)?;
         let hit = self.query_for_effect(
             "DOM.getNodeForLocation",
@@ -880,6 +992,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "includeUserAgentShadowDOM": true,
                 "ignorePointerEventsNone": false,
             }),
+            cancellation,
             deadline_at_ms,
         )?;
         let hit_backend_node_id = hit
@@ -890,13 +1003,14 @@ impl<C: CdpChannel> CdpExecutor<C> {
             return Err(no_effect("browser target does not receive events"));
         }
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
         self.verify_live_target_for_effect(
-            target.backend_node_id,
-            &target.fingerprint_hash,
-            &target.display_geometry_hash,
-            false,
-            false,
+            target,
+            LiveTargetRequirements {
+                invokable: false,
+                editable: false,
+            },
+            cancellation,
             deadline_at_ms,
         )?;
         let probe = self.query_for_effect(
@@ -906,6 +1020,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "functionDeclaration": SCROLL_PROBE_FUNCTION,
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
         )?;
         if probe
@@ -917,7 +1032,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
             return Err(no_effect("browser target is not scrollable"));
         }
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
         let (axis, delta) = scroll_axis_delta(direction);
         let response = self.effect_command(
             "Runtime.callFunctionOn",
@@ -927,6 +1042,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "arguments": [{"value": axis}, {"value": delta}],
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
             false,
         )?;
@@ -978,20 +1094,22 @@ impl<C: CdpChannel> CdpExecutor<C> {
         if value.len() > MAX_EDIT_BYTES {
             return Err(no_effect("browser value is too large"));
         }
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
-        let object_id = self
-            .resolve_object(
-                target.backend_node_id,
-                target.execution_context_id,
-                deadline_at_ms,
-            )
-            .map_err(|_| no_effect("browser target changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
+        let object_id = self.resolve_object_for_effect(
+            target.backend_node_id,
+            target.execution_context_id,
+            cancellation,
+            deadline_at_ms,
+        )?;
         let probe = self.probe_object_for_effect(
             &object_id,
-            target.protected,
-            false,
+            EffectProbe {
+                protected: target.protected,
+                reveal_value: false,
+                effect_started: false,
+            },
+            cancellation,
             deadline_at_ms,
-            false,
         )?;
         if probe.get("connected").and_then(Value::as_bool) != Some(true)
             || probe.get("visible").and_then(Value::as_bool) != Some(true)
@@ -1001,15 +1119,16 @@ impl<C: CdpChannel> CdpExecutor<C> {
             return Err(no_effect("browser target is not actionable"));
         }
         self.verify_live_target_for_effect(
-            target.backend_node_id,
-            &target.fingerprint_hash,
-            &target.display_geometry_hash,
-            false,
-            true,
+            target,
+            LiveTargetRequirements {
+                invokable: false,
+                editable: true,
+            },
+            cancellation,
             deadline_at_ms,
         )?;
         check_effect_boundary(cancellation, deadline_at_ms)?;
-        verify_process(&self.config).map_err(|_| no_effect("browser process changed"))?;
+        self.verify_process_for_effect(cancellation, deadline_at_ms)?;
         let response = self.effect_command(
             "Runtime.callFunctionOn",
             json!({
@@ -1018,6 +1137,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 "arguments": [{"value": value}],
                 "returnByValue": true,
             }),
+            cancellation,
             deadline_at_ms,
             false,
         )?;
@@ -1034,8 +1154,16 @@ impl<C: CdpChannel> CdpExecutor<C> {
             None => return Err(unknown("browser value outcome is unknown")),
         }
         verify_process(&self.config).map_err(|_| unknown("browser effect outcome is unknown"))?;
-        let after =
-            self.probe_object_for_effect(&object_id, target.protected, true, deadline_at_ms, true)?;
+        let after = self.probe_object_for_effect(
+            &object_id,
+            EffectProbe {
+                protected: target.protected,
+                reveal_value: true,
+                effect_started: true,
+            },
+            cancellation,
+            deadline_at_ms,
+        )?;
         let expected_hash = hex::encode(Sha256::digest(value.as_bytes()));
         if after.get("valueHash").and_then(Value::as_str) != Some(expected_hash.as_str())
             || after.get("valueLength").and_then(Value::as_u64) != u64::try_from(value.len()).ok()
@@ -1058,6 +1186,23 @@ struct NodeIdentity {
     protected: bool,
     fingerprint_hash: String,
     display_geometry_hash: String,
+}
+
+struct LiveProbe {
+    state: Value,
+    fingerprint_hash: String,
+    display_geometry_hash: String,
+}
+
+struct EffectProbe {
+    protected: bool,
+    reveal_value: bool,
+    effect_started: bool,
+}
+
+struct LiveTargetRequirements {
+    invokable: bool,
+    editable: bool,
 }
 
 impl FromStoredNode for NodeIdentity {
@@ -1161,29 +1306,52 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
     }
 
     fn observe(&self, target: &TargetRef) -> Result<Observation, ProtocolError> {
+        self.observe_with_boundary(target, &CancellationToken::default(), i64::MAX)
+    }
+
+    fn observe_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Observation, ProtocolError> {
+        boundary(cancellation, deadline_at_ms).map_err(map_cdp_protocol_error)?;
         let TargetRef::Element { target } = target else {
             return Err(ProtocolError::TargetNotFound(
                 "browser semantic target required".to_string(),
             ));
         };
-        let probe = self.live_probe(target, i64::MAX)?;
+        let probe = self.live_probe(target, deadline_at_ms);
+        boundary(cancellation, deadline_at_ms).map_err(map_cdp_protocol_error)?;
+        let probe = probe?;
         let latest = self.latest.read().map_err(|_| backend_error())?;
-        let stored = latest.as_ref().ok_or_else(backend_error)?;
+        latest.as_ref().ok_or_else(backend_error)?;
         let observation_hash =
-            semantic_fingerprint(&(target, &probe)).map_err(|_| backend_error())?;
+            semantic_fingerprint(&(target, &probe.state)).map_err(|_| backend_error())?;
+        boundary(cancellation, deadline_at_ms).map_err(map_cdp_protocol_error)?;
         Ok(Observation {
             evidence: Evidence {
                 observation_hash,
-                target_fingerprint_hash: Some(target.fingerprint_hash.clone()),
-                display_geometry_hash: stored.observation.provenance.display_geometry_hash.clone(),
+                target_fingerprint_hash: Some(probe.fingerprint_hash),
+                display_geometry_hash: probe.display_geometry_hash,
                 observed_at_ms: now_ms(),
             },
             element: None,
-            state: probe,
+            state: probe.state,
         })
     }
 
     fn resolve(&self, target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
+        self.resolve_with_boundary(target, &CancellationToken::default(), i64::MAX)
+    }
+
+    fn resolve_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<ResolvedTarget, ProtocolError> {
+        boundary(cancellation, deadline_at_ms).map_err(map_cdp_protocol_error)?;
         let TargetRef::Element { target } = target else {
             return Err(ProtocolError::TargetNotFound(
                 "browser semantic target required".to_string(),
@@ -1235,9 +1403,7 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
         let visible = node.element.actionability.visible;
         let enabled = node.element.actionability.enabled;
         drop(latest);
-        if self
-            .current_document_id(deadline_at_ms)
-            .map_err(|_| no_effect("browser document is unavailable"))?
+        if self.current_document_id_for_effect(cancellation, deadline_at_ms)?
             != identity.document_id
         {
             return Err(no_effect("browser document changed"));
@@ -1711,6 +1877,16 @@ fn endpoint_owner_process_ids(_port: u16, _process_id: u32) -> Result<BTreeSet<u
 
 #[cfg(target_os = "linux")]
 fn live_process_generation(process_id: u32) -> Result<String, CdpError> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|_| CdpError::StaleTarget)?;
+    let boot_id = boot_id.trim();
+    if boot_id.len() != 36
+        || !boot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err(CdpError::StaleTarget);
+    }
     let stat = std::fs::read_to_string(format!("/proc/{process_id}/stat"))
         .map_err(|_| CdpError::StaleTarget)?;
     let fields = stat
@@ -1722,7 +1898,9 @@ fn live_process_generation(process_id: u32) -> Result<String, CdpError> {
         .nth(19)
         .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
         .ok_or(CdpError::StaleTarget)?;
-    Ok(format!("linux-{start_ticks}"))
+    let generation =
+        semantic_fingerprint(&(boot_id, start_ticks)).map_err(|_| CdpError::Protocol)?;
+    Ok(format!("linux-{generation}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -2097,6 +2275,8 @@ fn map_semantic_error(error: SemanticError) -> CdpError {
 
 fn map_cdp_protocol_error(error: CdpError) -> ProtocolError {
     match error {
+        CdpError::Cancelled => ProtocolError::ObservationCancelled,
+        CdpError::Expired => ProtocolError::ObservationExpired,
         CdpError::StaleTarget => ProtocolError::StaleTarget("browser target changed".to_string()),
         CdpError::TargetNotFound => {
             ProtocolError::TargetNotFound("browser target was not found".to_string())
@@ -2172,6 +2352,8 @@ mod tests {
         methods: Vec<String>,
         parameters: Vec<Value>,
         responses: VecDeque<Result<Value, CdpChannelError>>,
+        delay_ms: u64,
+        cancellation: Option<CancellationToken>,
     }
 
     impl CdpChannel for FakeChannel {
@@ -2191,6 +2373,12 @@ mod tests {
         ) -> Result<Value, CdpChannelError> {
             self.methods.push(method.to_string());
             self.parameters.push(parameters);
+            if self.delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.delay_ms));
+            }
+            if let Some(cancellation) = &self.cancellation {
+                cancellation.cancel();
+            }
             self.responses
                 .pop_front()
                 .unwrap_or(Err(CdpChannelError::BeforeSend))
@@ -2214,6 +2402,8 @@ mod tests {
             target_id: "page-1".to_string(),
             methods: Vec::new(),
             parameters: Vec::new(),
+            delay_ms: 0,
+            cancellation: None,
             responses: VecDeque::from(
                 [
                     json!({"targetInfo":{"targetId":"page-1","type":"page"}}),
@@ -2247,6 +2437,8 @@ mod tests {
             target_id: "page-1".to_string(),
             methods: Vec::new(),
             parameters: Vec::new(),
+            delay_ms: 0,
+            cancellation: None,
             responses: VecDeque::from(
                 [
                     json!({"targetInfo":{"targetId":"page-1","type":"page"}}),
@@ -2620,6 +2812,8 @@ mod tests {
             methods: Vec::new(),
             parameters: Vec::new(),
             responses: VecDeque::new(),
+            delay_ms: 0,
+            cancellation: None,
         };
         let executor = CdpExecutor::new(isolated, channel).expect("isolated executor");
         assert_eq!(executor.session_isolation(), SessionIsolation::HostIsolated);
@@ -2894,6 +3088,13 @@ mod tests {
             Ok(json!({"frameTree":{"frame":{"id":"frame-1","loaderId":"loader-1"}}})),
             Ok(json!({"object":{"objectId":"object-1"}})),
             Ok(probe(false, &"9".repeat(64), 12)),
+            Ok(viewport()),
+            Ok(live_ax(
+                "textbox",
+                "secret",
+                true,
+                json!({"name":"editable","value":{"value":"plaintext"}}),
+            )),
         ]);
         let observed = executor
             .observe(&TargetRef::Element { target })
@@ -2901,6 +3102,77 @@ mod tests {
         assert!(observed.state.get("value_hash").is_none());
         assert!(observed.state.get("value_length").is_none());
         assert!(observed.state.get("value_too_large").is_none());
+    }
+
+    #[test]
+    fn target_observation_rejects_changed_live_accessibility_fingerprint() {
+        let executor = CdpExecutor::new(config(), channel()).expect("executor");
+        let observation = executor
+            .semantic_observation(&CancellationToken::default(), i64::MAX)
+            .expect("observation");
+        let target = observation.target("e0").expect("target");
+        executor.channel.lock().expect("channel").responses.extend([
+            Ok(json!({"frameTree":{"frame":{"id":"frame-1","loaderId":"loader-1"}}})),
+            Ok(json!({"object":{"objectId":"object-1"}})),
+            Ok(probe(false, &"9".repeat(64), 12)),
+            Ok(viewport()),
+            Ok(live_ax(
+                "button",
+                "Changed",
+                false,
+                json!({"name":"focusable","value":{"value":true}}),
+            )),
+        ]);
+
+        assert!(matches!(
+            executor.observe(&TargetRef::Element { target }),
+            Err(ProtocolError::StaleTarget(_))
+        ));
+    }
+
+    #[test]
+    fn target_observation_preserves_cancelled_and_expired_boundaries() {
+        let executor = CdpExecutor::new(config(), channel()).expect("executor");
+        let observation = executor
+            .semantic_observation(&CancellationToken::default(), i64::MAX)
+            .expect("observation");
+        let target = observation.target("e0").expect("target");
+        let cancellation = CancellationToken::default();
+        {
+            let mut channel = executor.channel.lock().expect("channel");
+            channel.cancellation = Some(cancellation.clone());
+            channel
+                .responses
+                .push_back(Err(CdpChannelError::BeforeSend));
+        }
+        assert!(matches!(
+            executor.observe_with_boundary(
+                &TargetRef::Element {
+                    target: target.clone(),
+                },
+                &cancellation,
+                i64::MAX,
+            ),
+            Err(ProtocolError::ObservationCancelled)
+        ));
+
+        let active = CancellationToken::default();
+        {
+            let mut channel = executor.channel.lock().expect("channel");
+            channel.cancellation = None;
+            channel.delay_ms = 5;
+            channel
+                .responses
+                .push_back(Err(CdpChannelError::BeforeSend));
+        }
+        assert!(matches!(
+            executor.observe_with_boundary(
+                &TargetRef::Element { target },
+                &active,
+                now_ms().saturating_add(1),
+            ),
+            Err(ProtocolError::ObservationExpired)
+        ));
     }
 
     #[test]
@@ -3382,6 +3654,13 @@ mod tests {
             Ok(frame.clone()),
             Ok(object.clone()),
             Ok(probe(false, &empty_hash, 0)),
+            Ok(viewport()),
+            Ok(live_ax(
+                "textbox",
+                "secret",
+                false,
+                json!({"name":"editable","value":{"value":"plaintext"}}),
+            )),
             Ok(frame.clone()),
             Ok(object.clone()),
             Ok(probe(false, &empty_hash, 0)),
@@ -3398,6 +3677,13 @@ mod tests {
             Ok(frame),
             Ok(object),
             Ok(probe(true, &value_hash, value.len())),
+            Ok(viewport()),
+            Ok(live_ax(
+                "textbox",
+                "secret",
+                false,
+                json!({"name":"editable","value":{"value":"plaintext"}}),
+            )),
         ]);
         drop(channel);
         let request = ActionRequest {

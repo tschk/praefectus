@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use windows::Win32::Foundation::{FILETIME, HANDLE, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
 };
@@ -185,6 +186,7 @@ struct MappingEntry {
     runtime_id: Vec<i32>,
     runtime_path: Vec<Vec<i32>>,
     fingerprint_hash: String,
+    unambiguous: bool,
     stable: bool,
 }
 
@@ -292,6 +294,7 @@ struct FocusIdentity {
     process_id: u32,
     process_generation: String,
     runtime_id: Vec<i32>,
+    fingerprint_hash: String,
 }
 
 pub(crate) fn available() -> bool {
@@ -361,36 +364,48 @@ pub(crate) fn list_surfaces(
         .collect())
 }
 
-pub(crate) fn shared_desktop_context_hash() -> Result<String, ProtocolError> {
+pub(crate) fn shared_desktop_context_hash(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<String, ProtocolError> {
+    check_observation_boundary(cancellation, deadline_at_ms)?;
     let window = unsafe { GetForegroundWindow() };
     if window.is_invalid() || !unsafe { IsWindow(Some(window)) }.as_bool() {
-        return Err(ProtocolError::Executor(
-            "shared desktop context is unavailable".to_string(),
-        ));
+        return Err(shared_context_error(cancellation, deadline_at_ms));
     }
-    let process_id = window_process_id(window)?;
-    let foreground_process_generation = process_generation(process_id).map_err(|_| {
-        ProtocolError::Executor("shared desktop context is unavailable".to_string())
-    })?;
-    let automation = Automation::new(MAX_PROVIDER_TIMEOUT_MS).map_err(|_| {
-        ProtocolError::Executor("shared desktop context is unavailable".to_string())
-    })?;
-    let focused = focused_identity(&automation.client).map_err(|_| {
-        ProtocolError::Executor("shared desktop context is unavailable".to_string())
-    })?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    let process_id = window_process_id(window)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    let foreground_process_generation = process_generation(process_id)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    let automation = Automation::new(provider_timeout(deadline_at_ms))
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    let focused = focused_identity(&automation.client, cancellation, deadline_at_ms)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    if !focus_matches_foreground(window, process_id, &foreground_process_generation, &focused) {
+        return Err(shared_context_error(cancellation, deadline_at_ms));
+    }
     let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor) }.map_err(|_| {
-        ProtocolError::Executor("shared desktop context is unavailable".to_string())
-    })?;
-    if unsafe { GetForegroundWindow() } != window
-        || window_process_id(window).ok() != Some(process_id)
-        || process_generation(process_id).ok().as_deref()
-            != Some(foreground_process_generation.as_str())
-        || focused_identity(&automation.client).ok().as_ref() != Some(&focused)
+    unsafe { GetCursorPos(&mut cursor) }
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    let focused_after = focused_identity(&automation.client, cancellation, deadline_at_ms)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    let window_after = unsafe { GetForegroundWindow() };
+    let process_id_after = window_process_id(window)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    let process_generation_after = process_generation(process_id)
+        .map_err(|_| shared_context_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    if window_after != window
+        || process_id_after != process_id
+        || process_generation_after != foreground_process_generation
+        || focused_after != focused
     {
-        return Err(ProtocolError::Executor(
-            "shared desktop context is unavailable".to_string(),
-        ));
+        return Err(shared_context_error(cancellation, deadline_at_ms));
     }
     shared_context_identity_hash(
         (
@@ -404,6 +419,7 @@ pub(crate) fn shared_desktop_context_hash() -> Result<String, ProtocolError> {
             focused.process_id,
             &focused.process_generation,
             &focused.runtime_id,
+            &focused.fingerprint_hash,
         ),
     )
 }
@@ -411,9 +427,17 @@ pub(crate) fn shared_desktop_context_hash() -> Result<String, ProtocolError> {
 fn shared_context_identity_hash(
     foreground: (usize, u32, &str),
     cursor: (i32, i32),
-    focused: (usize, u32, &str, &[i32]),
+    focused: (usize, u32, &str, &[i32], &str),
 ) -> Result<String, ProtocolError> {
     hash_serializable(&(BACKEND, foreground, cursor, focused))
+}
+
+fn shared_context_error(cancellation: &CancellationToken, deadline_at_ms: i64) -> ProtocolError {
+    observation_boundary_error(
+        cancellation,
+        deadline_at_ms,
+        ProtocolError::Executor("shared desktop context is unavailable".to_string()),
+    )
 }
 
 pub(crate) fn snapshot_surface(
@@ -539,7 +563,7 @@ fn snapshot_window(
     runtime_path_budget.charge(&[])?;
     let mut seen = BTreeMap::<Vec<i32>, usize>::new();
     let mut elements = Vec::<SemanticElement>::new();
-    let mut entries = Vec::new();
+    let mut entries = Vec::<MappingEntry>::new();
     let mut truncated = false;
     let mut visited_nodes = 0usize;
 
@@ -550,7 +574,7 @@ fn snapshot_window(
             break;
         }
         visited_nodes += 1;
-        let state = match describe(&automation.client, &element) {
+        let state = match describe(&automation.client, &element, cancellation, deadline_at_ms) {
             Ok(state) => state,
             Err(_) => {
                 check_observation_boundary(cancellation, deadline_at_ms)?;
@@ -585,6 +609,7 @@ fn snapshot_window(
         }
         if let Some(index) = seen.get(&state.runtime_id).copied() {
             elements[index].actionability.unambiguous = false;
+            entries[index].unambiguous = false;
             truncated |= enqueue_children(
                 &walker,
                 &element,
@@ -597,7 +622,7 @@ fn snapshot_window(
             continue;
         }
         let state_fingerprint = fingerprint(&state).ok();
-        let stable = match describe(&automation.client, &element) {
+        let stable = match describe(&automation.client, &element, cancellation, deadline_at_ms) {
             Ok(repeated) => state_fingerprint.as_ref().is_some_and(|state| {
                 fingerprint(&repeated).is_ok_and(|repeated| state == &repeated)
             }),
@@ -647,6 +672,7 @@ fn snapshot_window(
             runtime_id: state.runtime_id,
             runtime_path: entry_path.clone(),
             fingerprint_hash,
+            unambiguous: true,
             stable,
         });
         truncated |= enqueue_children(
@@ -796,6 +822,7 @@ fn surface_descriptor(
         || !unsafe { IsWindow(Some(window)) }.as_bool()
         || !unsafe { IsWindowVisible(window) }.as_bool()
         || unsafe { IsIconic(window) }.as_bool()
+        || !window_is_uncloaked(window).unwrap_or(false)
         || unsafe { GetAncestor(window, GA_ROOT) } != window
     {
         return Ok(None);
@@ -876,8 +903,14 @@ pub(crate) fn observe_target(
 ) -> Result<(SemanticElement, Option<String>), ProtocolError> {
     let (automation, element, state, index) = resolve(target, cancellation, deadline_at_ms)
         .map_err(|_| ProtocolError::StaleTarget("semantic target is unavailable".to_string()))?;
-    let repeated = describe(&automation.client, &element)
-        .map_err(|_| ProtocolError::StaleTarget("semantic target is unavailable".to_string()))?;
+    let repeated =
+        describe(&automation.client, &element, cancellation, deadline_at_ms).map_err(|_| {
+            observation_boundary_error(
+                cancellation,
+                deadline_at_ms,
+                ProtocolError::StaleTarget("semantic target is unavailable".to_string()),
+            )
+        })?;
     let stable = fingerprint(&state)? == fingerprint(&repeated)?;
     let value_hash = unsafe {
         element
@@ -1095,6 +1128,7 @@ fn resolve(
     {
         return Err(no_effect("semantic target is stale"));
     }
+    ensure_entry_unambiguous(entry)?;
     if !entry.stable {
         return Err(no_effect("semantic target was unstable when observed"));
     }
@@ -1164,13 +1198,14 @@ fn resolve(
         deadline_at_ms,
     )?;
     check_effect_boundary(cancellation, deadline_at_ms)?;
-    let state = describe(&automation.client, &element).map_err(|_| {
-        before_effect_error(
-            cancellation,
-            deadline_at_ms,
-            "semantic target is unavailable",
-        )
-    })?;
+    let state =
+        describe(&automation.client, &element, cancellation, deadline_at_ms).map_err(|_| {
+            before_effect_error(
+                cancellation,
+                deadline_at_ms,
+                "semantic target is unavailable",
+            )
+        })?;
     check_effect_boundary(cancellation, deadline_at_ms)?;
     if state.runtime_id != entry.runtime_id
         || state.process_id != mapping.process_id
@@ -1183,13 +1218,14 @@ fn resolve(
     {
         return Err(no_effect("semantic target changed"));
     }
-    let repeated = describe(&automation.client, &element).map_err(|_| {
-        before_effect_error(
-            cancellation,
-            deadline_at_ms,
-            "semantic target stability is unavailable",
-        )
-    })?;
+    let repeated =
+        describe(&automation.client, &element, cancellation, deadline_at_ms).map_err(|_| {
+            before_effect_error(
+                cancellation,
+                deadline_at_ms,
+                "semantic target stability is unavailable",
+            )
+        })?;
     check_effect_boundary(cancellation, deadline_at_ms)?;
     if fingerprint(&repeated).map_err(|_| no_effect("semantic target is unavailable"))?
         != entry.fingerprint_hash
@@ -1204,6 +1240,13 @@ fn resolve(
     Ok((automation, element, repeated, index))
 }
 
+fn ensure_entry_unambiguous(entry: &MappingEntry) -> Result<(), DispatchError> {
+    if !entry.unambiguous {
+        return Err(no_effect("semantic target was ambiguous when observed"));
+    }
+    Ok(())
+}
+
 fn ensure_live_state(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
@@ -1212,18 +1255,30 @@ fn ensure_live_state(
     deadline_at_ms: i64,
 ) -> Result<(), DispatchError> {
     check_effect_boundary(cancellation, deadline_at_ms)?;
-    let current = describe(automation, element).map_err(|_| {
-        before_effect_error(
-            cancellation,
-            deadline_at_ms,
-            "semantic target is unavailable",
-        )
-    })?;
+    let (current, window) = describe_with_window(automation, element, cancellation, deadline_at_ms)
+        .map_err(|_| {
+            before_effect_error(
+                cancellation,
+                deadline_at_ms,
+                "semantic target is unavailable",
+            )
+        })?;
     check_effect_boundary(cancellation, deadline_at_ms)?;
     if fingerprint(&current).map_err(|_| no_effect("semantic target is unavailable"))?
         != fingerprint(expected).map_err(|_| no_effect("semantic target is unavailable"))?
     {
         return Err(no_effect("semantic target changed before effect"));
+    }
+    let uncloaked = window_is_uncloaked(window).map_err(|_| {
+        before_effect_error(
+            cancellation,
+            deadline_at_ms,
+            "semantic surface visibility is unavailable",
+        )
+    })?;
+    check_effect_boundary(cancellation, deadline_at_ms)?;
+    if !uncloaked {
+        return Err(no_effect("semantic surface became cloaked before effect"));
     }
     Ok(())
 }
@@ -1231,17 +1286,37 @@ fn ensure_live_state(
 fn describe(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
 ) -> Result<ElementState, NativeError> {
+    describe_with_window(automation, element, cancellation, deadline_at_ms).map(|(state, _)| state)
+}
+
+fn describe_with_window(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(ElementState, HWND), NativeError> {
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
     let runtime_id = runtime_values(element)?;
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
     let process_id = u32::try_from(unsafe { element.CurrentProcessId() }.map_err(|_| NativeError)?)
         .ok()
         .filter(|value| *value > 0)
         .ok_or(NativeError)?;
     let generation = process_generation(process_id)?;
-    let window = element_window(automation, element)?;
+    let window = element_window(automation, element, cancellation, deadline_at_ms)?;
     let window_id = window_identity(window, &generation)?;
     let rectangle = unsafe { element.CurrentBoundingRectangle() }.map_err(|_| NativeError)?;
     let bounds = native_bounds(rectangle)?;
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
     let enabled = unsafe { element.CurrentIsEnabled() }
         .map_err(|_| NativeError)?
         .as_bool();
@@ -1255,6 +1330,9 @@ fn describe(
             .0
     );
     let name = bounded_bstr(unsafe { element.CurrentName() }.ok());
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
     let invokable =
         unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
             .is_ok();
@@ -1274,21 +1352,27 @@ fn describe(
         .as_ref()
         .and_then(|pattern| unsafe { pattern.CurrentVerticallyScrollable() }.ok())
         .is_some_and(|value| value.as_bool());
-    Ok(ElementState {
-        runtime_id,
-        process_id,
-        process_generation: generation,
-        window_id,
-        role,
-        name,
-        bounds,
-        visible,
-        enabled,
-        invokable,
-        editable,
-        horizontally_scrollable,
-        vertically_scrollable,
-    })
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
+    Ok((
+        ElementState {
+            runtime_id,
+            process_id,
+            process_generation: generation,
+            window_id,
+            role,
+            name,
+            bounds,
+            visible,
+            enabled,
+            invokable,
+            editable,
+            horizontally_scrollable,
+            vertically_scrollable,
+        },
+        window,
+    ))
 }
 
 fn enqueue_children(
@@ -1477,10 +1561,15 @@ fn resolve_runtime_path(
 fn element_window(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
 ) -> Result<HWND, NativeError> {
     let walker = unsafe { automation.ControlViewWalker() }.map_err(|_| NativeError)?;
     let mut current = element.clone();
     for _ in 0..64 {
+        if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+            return Err(NativeError);
+        }
         if let Ok(window) = unsafe { current.CurrentNativeWindowHandle() } {
             if !window.is_invalid() {
                 let root = unsafe { GetAncestor(window, GA_ROOT) };
@@ -1496,15 +1585,26 @@ fn runtime_values(element: &IUIAutomationElement) -> Result<Vec<i32>, NativeErro
     RuntimeId::from_element(element)?.values()
 }
 
-fn focused_identity(automation: &IUIAutomation) -> Result<FocusIdentity, NativeError> {
+fn focused_identity(
+    automation: &IUIAutomation,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<FocusIdentity, NativeError> {
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
     let focused = unsafe { automation.GetFocusedElement() }.map_err(|_| NativeError)?;
-    let runtime_id = runtime_values(&focused)?;
-    let process_id = u32::try_from(unsafe { focused.CurrentProcessId() }.map_err(|_| NativeError)?)
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or(NativeError)?;
-    let generation = process_generation(process_id)?;
-    let window = element_window(automation, &focused)?;
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
+    let (state, window) = describe_with_window(automation, &focused, cancellation, deadline_at_ms)?;
+    if check_observation_boundary(cancellation, deadline_at_ms).is_err() {
+        return Err(NativeError);
+    }
+    let fingerprint_hash = fingerprint(&state).map_err(|_| NativeError)?;
+    let runtime_id = state.runtime_id;
+    let process_id = state.process_id;
+    let generation = state.process_generation;
     if window_process_id(window).ok() != Some(process_id)
         || process_generation(process_id).ok().as_deref() != Some(generation.as_str())
     {
@@ -1515,7 +1615,19 @@ fn focused_identity(automation: &IUIAutomation) -> Result<FocusIdentity, NativeE
         process_id,
         process_generation: generation,
         runtime_id,
+        fingerprint_hash,
     })
+}
+
+fn focus_matches_foreground(
+    window: HWND,
+    process_id: u32,
+    process_generation: &str,
+    focused: &FocusIdentity,
+) -> bool {
+    focused.window == window
+        && focused.process_id == process_id
+        && focused.process_generation == process_generation
 }
 
 fn runtime_id_text(values: &[i32]) -> String {
@@ -1555,6 +1667,24 @@ fn provider_timeout(deadline_at_ms: i64) -> u32 {
     u32::try_from(deadline_at_ms.saturating_sub(now_ms()))
         .unwrap_or(MAX_PROVIDER_TIMEOUT_MS)
         .clamp(1, MAX_PROVIDER_TIMEOUT_MS)
+}
+
+fn window_is_uncloaked(window: HWND) -> Result<bool, NativeError> {
+    let mut cloaked = 0u32;
+    unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_CLOAKED,
+            std::ptr::from_mut(&mut cloaked).cast(),
+            u32::try_from(std::mem::size_of_val(&cloaked)).map_err(|_| NativeError)?,
+        )
+    }
+    .map_err(|_| NativeError)?;
+    Ok(cloak_state_is_uncloaked(cloaked))
+}
+
+fn cloak_state_is_uncloaked(cloaked: u32) -> bool {
+    cloaked == 0
 }
 
 fn process_generation(process_id: u32) -> Result<String, NativeError> {
@@ -1735,16 +1865,41 @@ mod tests {
         let original = shared_context_identity_hash(
             (1, 2, "foreground-generation"),
             (3, 4),
-            (1, 2, "focused-generation", &[5, 6]),
+            (1, 2, "focused-generation", &[5, 6], "fingerprint-a"),
         )
         .expect("context identity must hash");
         let changed = shared_context_identity_hash(
             (1, 2, "foreground-generation"),
             (3, 4),
-            (1, 2, "focused-generation", &[5, 7]),
+            (1, 2, "focused-generation", &[5, 7], "fingerprint-a"),
+        )
+        .expect("context identity must hash");
+        let replaced = shared_context_identity_hash(
+            (1, 2, "foreground-generation"),
+            (3, 4),
+            (1, 2, "focused-generation", &[5, 6], "fingerprint-b"),
         )
         .expect("context identity must hash");
         assert_ne!(original, changed);
+        assert_ne!(original, replaced);
+    }
+
+    #[test]
+    fn shared_context_errors_preserve_boundary_classification() {
+        let cancellation = CancellationToken::default();
+        assert!(matches!(
+            shared_context_error(&cancellation, 0),
+            ProtocolError::ObservationExpired
+        ));
+        assert!(matches!(
+            shared_context_error(&cancellation, i64::MAX),
+            ProtocolError::Executor(_)
+        ));
+        cancellation.cancel();
+        assert!(matches!(
+            shared_context_error(&cancellation, i64::MAX),
+            ProtocolError::ObservationCancelled
+        ));
     }
 
     #[test]
@@ -1774,9 +1929,16 @@ mod tests {
             runtime_id: vec![1, 2],
             runtime_path: vec![vec![1], vec![1, 2]],
             fingerprint_hash: "b".repeat(64),
+            unambiguous: false,
             stable: true,
         };
         let entries = [entry.clone(), entry];
+        assert!(entries.iter().all(|entry| !entry.unambiguous));
+        let persisted: MappingEntry = serde_json::from_slice(
+            &serde_json::to_vec(&entries[0]).expect("mapping entry must serialize"),
+        )
+        .expect("mapping entry must deserialize");
+        assert!(ensure_entry_unambiguous(&persisted).is_err());
         assert_eq!(
             entries
                 .iter()
@@ -1784,6 +1946,40 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn focus_must_belong_to_exact_foreground_identity() {
+        let mut foreground_storage = 0u8;
+        let foreground = HWND(std::ptr::from_mut(&mut foreground_storage).cast());
+        let mut other_storage = 0u8;
+        let other = HWND(std::ptr::from_mut(&mut other_storage).cast());
+        let focused = FocusIdentity {
+            window: foreground,
+            process_id: 2,
+            process_generation: "generation".to_string(),
+            runtime_id: vec![3],
+            fingerprint_hash: "fingerprint".to_string(),
+        };
+        assert!(focus_matches_foreground(
+            foreground,
+            2,
+            "generation",
+            &focused
+        ));
+        assert!(!focus_matches_foreground(other, 2, "generation", &focused));
+        assert!(!focus_matches_foreground(
+            foreground,
+            5,
+            "generation",
+            &focused
+        ));
+        assert!(!focus_matches_foreground(
+            foreground,
+            2,
+            "changed-generation",
+            &focused
+        ));
     }
 
     #[test]
@@ -1799,6 +1995,15 @@ mod tests {
     fn provider_timeouts_are_bounded() {
         assert_eq!(provider_timeout(i64::MAX), MAX_PROVIDER_TIMEOUT_MS);
         assert!((1..=MAX_PROVIDER_TIMEOUT_MS).contains(&provider_timeout(now_ms())));
+    }
+
+    #[test]
+    fn only_zero_dwm_cloak_state_is_uncloaked() {
+        assert!(cloak_state_is_uncloaked(0));
+        assert!(!cloak_state_is_uncloaked(1));
+        assert!(!cloak_state_is_uncloaked(2));
+        assert!(!cloak_state_is_uncloaked(4));
+        assert!(!cloak_state_is_uncloaked(7));
     }
 
     #[test]

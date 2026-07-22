@@ -25,10 +25,17 @@ mod windows_uia;
 
 pub const PROTOCOL_VERSION: u16 = 2;
 const MAX_COORDINATE_OBSERVATION_AGE_MS: i64 = 30_000;
+const MAX_VERIFICATION_JSON_BYTES: usize = 64 * 1024;
+const MAX_VERIFICATION_JSON_DEPTH: usize = 32;
+const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
 #[cfg(target_os = "macos")]
 const MAX_MAC_SEMANTIC_ELEMENTS: usize = 512;
 #[cfg(target_os = "macos")]
 const MAX_MAC_AX_COLLECTION_ITEMS: usize = 2_048;
+#[cfg(target_os = "macos")]
+const MAX_MAC_AX_HIDDEN_WALK_MS: i64 = 500;
+#[cfg(target_os = "macos")]
+const MAX_MAC_AX_RESOLUTION_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
 const MAX_MAC_AX_STRING_CHARACTERS: usize = 1_024;
 #[cfg(target_os = "macos")]
@@ -298,9 +305,8 @@ impl Action {
 
 pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
     match action {
-        Action::Invoke | Action::Scroll { .. } | Action::SetValue { .. } => {
-            DeliveryRoute::TargetAddressed
-        }
+        Action::Invoke | Action::SetValue { .. } => DeliveryRoute::TargetAddressed,
+        Action::Scroll { .. } => DeliveryRoute::Unknown,
         _ => DeliveryRoute::Pointer,
     }
 }
@@ -312,6 +318,14 @@ fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute 
             TargetRef::Element { .. },
         ) => DeliveryRoute::TargetAddressed,
         _ => DeliveryRoute::Pointer,
+    }
+}
+
+fn claim_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute {
+    if matches!(action, Action::Scroll { .. }) {
+        DeliveryRoute::Unknown
+    } else {
+        request_delivery_route(action, target)
     }
 }
 
@@ -694,9 +708,17 @@ impl NativeRuntime {
         Err(NativeError)
     }
 
-    fn set_value(&self, target: Target, value: &str) -> Result<(), DispatchError> {
+    fn set_value(
+        &self,
+        target: Target,
+        value: &str,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<(), DispatchError> {
         match target {
-            Target::Element(element) => native_element_set_value(&element, value),
+            Target::Element(element) => {
+                native_element_set_value(&element, value, cancellation, deadline_at_ms)
+            }
             Target::Point(_) => Err(unsupported("set_value requires an element target")),
         }
     }
@@ -1056,8 +1078,15 @@ impl AxElement {
         unsafe { CFEqual(self.0.cast(), other.0.cast()) != 0 }
     }
 
-    fn attribute(&self, name: &str) -> Result<core_foundation::base::CFType, NativeError> {
-        use accessibility_sys::{AXUIElementCopyAttributeValue, kAXErrorSuccess};
+    fn optional_attribute(
+        &self,
+        name: &str,
+    ) -> Result<Option<core_foundation::base::CFType>, NativeError> {
+        use accessibility_sys::{
+            AXUIElementCopyAttributeValue,
+            kAXErrorAttributeUnsupported as K_AX_ERROR_ATTRIBUTE_UNSUPPORTED,
+            kAXErrorNoValue as K_AX_ERROR_NO_VALUE, kAXErrorSuccess as K_AX_ERROR_SUCCESS,
+        };
         use core_foundation::base::{CFType, TCFType};
         use core_foundation::string::CFString;
         use std::ptr;
@@ -1065,13 +1094,18 @@ impl AxElement {
         self.prepare()?;
         let key = CFString::new(name);
         let mut raw: core_foundation::base::CFTypeRef = ptr::null();
-        if unsafe { AXUIElementCopyAttributeValue(self.0, key.as_concrete_TypeRef(), &mut raw) }
-            != kAXErrorSuccess
-            || raw.is_null()
+        match unsafe { AXUIElementCopyAttributeValue(self.0, key.as_concrete_TypeRef(), &mut raw) }
         {
-            return Err(NativeError);
+            K_AX_ERROR_SUCCESS if !raw.is_null() => {
+                Ok(Some(unsafe { CFType::wrap_under_create_rule(raw) }))
+            }
+            K_AX_ERROR_ATTRIBUTE_UNSUPPORTED | K_AX_ERROR_NO_VALUE if raw.is_null() => Ok(None),
+            _ => Err(NativeError),
         }
-        Ok(unsafe { CFType::wrap_under_create_rule(raw) })
+    }
+
+    fn attribute(&self, name: &str) -> Result<core_foundation::base::CFType, NativeError> {
+        self.optional_attribute(name)?.ok_or(NativeError)
     }
 
     fn string(&self, name: &str) -> Option<String> {
@@ -1099,25 +1133,39 @@ impl AxElement {
     }
 
     fn boolean(&self, name: &str) -> Option<bool> {
+        self.optional_boolean(name).ok().flatten()
+    }
+
+    fn optional_boolean(&self, name: &str) -> Result<Option<bool>, NativeError> {
         use core_foundation::boolean::CFBoolean;
 
-        self.attribute(name)
-            .ok()?
-            .downcast::<CFBoolean>()
-            .map(bool::from)
+        self.optional_attribute(name)?
+            .map(|value| {
+                value
+                    .downcast::<CFBoolean>()
+                    .map(bool::from)
+                    .ok_or(NativeError)
+            })
+            .transpose()
     }
 
     fn element(&self, name: &str) -> Result<Self, NativeError> {
+        self.optional_element(name)?.ok_or(NativeError)
+    }
+
+    fn optional_element(&self, name: &str) -> Result<Option<Self>, NativeError> {
         use accessibility_sys::AXUIElementGetTypeID;
         use core_foundation::base::{CFGetTypeID, CFRetain, TCFType};
 
-        let value = self.attribute(name)?;
+        let Some(value) = self.optional_attribute(name)? else {
+            return Ok(None);
+        };
         let raw = value.as_CFTypeRef();
         if unsafe { CFGetTypeID(raw) } != unsafe { AXUIElementGetTypeID() } {
             return Err(NativeError);
         }
         unsafe { CFRetain(raw) };
-        Self::created(raw.cast_mut().cast())
+        Self::created(raw.cast_mut().cast()).map(Some)
     }
 
     fn elements(&self, name: &str, maximum: usize) -> Result<Vec<Self>, NativeError> {
@@ -1196,6 +1244,53 @@ impl AxElement {
 }
 
 #[cfg(target_os = "macos")]
+fn mac_native_boundary(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), NativeError> {
+    if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+        return Err(NativeError);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_observation_error(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+    fallback: ProtocolError,
+) -> ProtocolError {
+    if cancellation.is_cancelled() {
+        ProtocolError::ObservationCancelled
+    } else if now_ms() >= deadline_at_ms {
+        ProtocolError::ObservationExpired
+    } else {
+        fallback
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_ax_hidden(
+    element: &AxElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<bool, NativeError> {
+    let mut candidate = element.retained()?;
+    for _ in 0..64 {
+        mac_native_boundary(cancellation, deadline_at_ms)?;
+        if candidate.optional_boolean("AXHidden")? == Some(true) {
+            return Ok(true);
+        }
+        mac_native_boundary(cancellation, deadline_at_ms)?;
+        let Some(parent) = candidate.optional_element("AXParent")? else {
+            return Ok(false);
+        };
+        candidate = parent;
+    }
+    Err(NativeError)
+}
+
+#[cfg(target_os = "macos")]
 impl Drop for AxElement {
     fn drop(&mut self) {
         use core_foundation::base::CFRelease;
@@ -1266,9 +1361,14 @@ fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_native_element(element: &AxElement) -> Result<NativeElement, NativeError> {
+fn mac_native_element(
+    element: &AxElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<NativeElement, NativeError> {
     use accessibility_sys::{AXUIElementCreateApplication, AXUIElementGetPid, kAXErrorSuccess};
 
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let mut process_id = 0;
     element.prepare()?;
     if unsafe { AXUIElementGetPid(element.0, &mut process_id) } != kAXErrorSuccess
@@ -1276,7 +1376,9 @@ fn mac_native_element(element: &AxElement) -> Result<NativeElement, NativeError>
     {
         return Err(NativeError);
     }
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let bounds = mac_ax_bounds(element)?;
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let role = element.string("AXRole").ok_or(NativeError)?;
     let title = element.string("AXTitle");
     let label = element
@@ -1285,11 +1387,13 @@ fn mac_native_element(element: &AxElement) -> Result<NativeElement, NativeError>
         .or_else(|| title.clone());
     let enabled = element.boolean("AXEnabled");
     let focused = element.boolean("AXFocused");
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let window = element
         .element("AXWindow")
         .or_else(|_| element.element("AXTopLevelUIElement"))?;
     let minimized = window.boolean("AXMinimized").unwrap_or(false);
     let window_identity = mac_window_identity(&window, process_id)?;
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let identifier = element
         .string("AXIdentifier")
         .filter(|value| !value.is_empty())
@@ -1302,10 +1406,14 @@ fn mac_native_element(element: &AxElement) -> Result<NativeElement, NativeError>
         .string("AXTitle")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("pid-{process_id}"));
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let value_hash = element
         .value_string()
         .map(|value| hash_bytes(value.as_bytes()));
-    let visible = !minimized
+    let hidden_deadline_at_ms =
+        deadline_at_ms.min(now_ms().saturating_add(MAX_MAC_AX_HIDDEN_WALK_MS));
+    let visible = !mac_ax_hidden(element, cancellation, hidden_deadline_at_ms)?
+        && !minimized
         && native_screens()?.as_array().is_some_and(|screens| {
             screens.iter().any(|screen| {
                 let screen_x = screen.get("x").and_then(Value::as_i64);
@@ -1350,10 +1458,13 @@ fn mac_native_element(element: &AxElement) -> Result<NativeElement, NativeError>
 fn mac_ax_element_matching_hash(
     point: &NativePoint,
     expected_hash: &str,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
 ) -> Result<(AxElement, NativeElement), NativeError> {
     let mut element = mac_ax_element_at(point)?;
     for _ in 0..64 {
-        if let Ok(candidate) = mac_native_element(&element) {
+        mac_native_boundary(cancellation, deadline_at_ms)?;
+        if let Ok(candidate) = mac_native_element(&element, cancellation, deadline_at_ms) {
             let fingerprint = ElementFingerprint::from(&candidate);
             if element_fingerprint_hash(&fingerprint).ok().as_deref() == Some(expected_hash) {
                 return Ok((element, candidate));
@@ -1412,14 +1523,54 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
 }
 
 #[cfg(target_os = "macos")]
-fn mac_validate_stable_element(
+fn mac_live_actionability(
     element: &AxElement,
     expected: &NativeElement,
-) -> Result<(), NativeError> {
-    let first = mac_native_element(element)?;
-    validate_matching_live_element(&first, expected)?;
-    let second = mac_native_element(element)?;
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<semantic::Actionability, ProtocolError> {
+    let stale = || ProtocolError::StaleTarget("semantic target changed".to_string());
+    let first = mac_native_element(element, cancellation, deadline_at_ms)
+        .map_err(|_| mac_observation_error(cancellation, deadline_at_ms, stale()))?;
+    validate_matching_live_element(&first, expected)
+        .map_err(|_| mac_observation_error(cancellation, deadline_at_ms, stale()))?;
+    let second = mac_native_element(element, cancellation, deadline_at_ms)
+        .map_err(|_| mac_observation_error(cancellation, deadline_at_ms, stale()))?;
     validate_matching_live_element(&second, &first)
+        .map_err(|_| mac_observation_error(cancellation, deadline_at_ms, stale()))?;
+    let bounds = second.bounds.as_ref().ok_or_else(stale)?;
+    let point = NativePoint {
+        x: bounds.x.saturating_add(bounds.width / 2),
+        y: bounds.y.saturating_add(bounds.height / 2),
+    };
+    let visible = second.state.get("visible").and_then(Value::as_bool) == Some(true)
+        && second.state.get("hidden").and_then(Value::as_bool) != Some(true);
+    let invokable = element
+        .actions()
+        .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"));
+    let editable = element.is_settable("AXValue");
+    let receives_events = visible
+        && invokable
+        && mac_element_receives_events(element, &point, cancellation, deadline_at_ms)?;
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
+    Ok(semantic::Actionability {
+        visible,
+        enabled: second.enabled == Some(true),
+        unambiguous: true,
+        stable: true,
+        receives_events,
+        invokable,
+        editable,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mac_actionability_matches_observation(
+    action: &Action,
+    observed: &semantic::Actionability,
+    live: &semantic::Actionability,
+) -> bool {
+    observed == live && mac_actionability_allows(action, live)
 }
 
 #[cfg(target_os = "macos")]
@@ -1473,7 +1624,18 @@ fn mac_process_generation(process_id: i32) -> Result<String, NativeError> {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_observation_window(observation: &ElementObservation) -> Result<AxElement, ProtocolError> {
+fn mac_observation_window(
+    observation: &ElementObservation,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+    resolution_deadline_at_ms: i64,
+) -> Result<AxElement, ProtocolError> {
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
+    if now_ms() >= resolution_deadline_at_ms {
+        return Err(ProtocolError::StaleTarget(
+            "semantic target resolution timed out".to_string(),
+        ));
+    }
     let process_id = i32::try_from(observation.process_id)
         .map_err(|_| ProtocolError::StaleTarget("focused process changed".to_string()))?;
     if !matches!(
@@ -1487,14 +1649,28 @@ fn mac_observation_window(observation: &ElementObservation) -> Result<AxElement,
     let application =
         AxElement::created(unsafe { accessibility_sys::AXUIElementCreateApplication(process_id) })
             .map_err(|_| ProtocolError::StaleTarget("focused process changed".to_string()))?;
-    let mut matches = application
-        .elements("AXWindows", 256)
-        .map_err(|_| ProtocolError::StaleTarget("focused window changed".to_string()))?
-        .into_iter()
-        .filter(|window| {
-            mac_window_identity(window, process_id)
-                .is_ok_and(|identity| identity == observation.window_id)
-        });
+    let windows = application.elements("AXWindows", 256).map_err(|_| {
+        mac_observation_error(
+            cancellation,
+            deadline_at_ms,
+            ProtocolError::StaleTarget("focused window changed".to_string()),
+        )
+    })?;
+    let mut matches = Vec::new();
+    for window in windows {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        if now_ms() >= resolution_deadline_at_ms {
+            return Err(ProtocolError::StaleTarget(
+                "semantic target resolution timed out".to_string(),
+            ));
+        }
+        if mac_window_identity(&window, process_id)
+            .is_ok_and(|identity| identity == observation.window_id)
+        {
+            matches.push(window);
+        }
+    }
+    let mut matches = matches.into_iter();
     let window = matches
         .next()
         .ok_or_else(|| ProtocolError::StaleTarget("focused window changed".to_string()))?;
@@ -1507,7 +1683,13 @@ fn mac_observation_window(observation: &ElementObservation) -> Result<AxElement,
 }
 
 #[cfg(target_os = "macos")]
-fn mac_element_at_path(mut element: AxElement, path: &[usize]) -> Result<AxElement, ProtocolError> {
+fn mac_element_at_path(
+    mut element: AxElement,
+    path: &[usize],
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+    resolution_deadline_at_ms: i64,
+) -> Result<AxElement, ProtocolError> {
     if path.len() > 256
         || path
             .iter()
@@ -1518,6 +1700,12 @@ fn mac_element_at_path(mut element: AxElement, path: &[usize]) -> Result<AxEleme
         ));
     }
     for index in path {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        if now_ms() >= resolution_deadline_at_ms {
+            return Err(ProtocolError::StaleTarget(
+                "semantic target resolution timed out".to_string(),
+            ));
+        }
         element = element
             .elements("AXChildren", MAX_MAC_AX_COLLECTION_ITEMS)
             .map_err(|_| ProtocolError::StaleTarget("semantic target path changed".to_string()))?
@@ -1526,12 +1714,13 @@ fn mac_element_at_path(mut element: AxElement, path: &[usize]) -> Result<AxEleme
             .ok_or_else(|| {
                 ProtocolError::StaleTarget("semantic target path changed".to_string())
             })?;
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
     }
     Ok(element)
 }
 
 #[cfg(target_os = "macos")]
-fn mac_resolve_observed_element(
+fn mac_resolve_observed_element_inner(
     observation: &ElementObservation,
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
@@ -1544,15 +1733,31 @@ fn mac_resolve_observed_element(
     if now_ms() >= deadline_at_ms {
         return Err(ProtocolError::ObservationExpired);
     }
-    let window = mac_observation_window(observation)?;
+    let resolution_deadline_at_ms =
+        deadline_at_ms.min(now_ms().saturating_add(MAX_MAC_AX_RESOLUTION_MS));
+    let window = mac_observation_window(
+        observation,
+        cancellation,
+        deadline_at_ms,
+        resolution_deadline_at_ms,
+    )?;
     let target = mac_element_at_path(
         window
             .retained()
             .map_err(|_| ProtocolError::StaleTarget("semantic target path changed".to_string()))?,
         &observation.path,
+        cancellation,
+        deadline_at_ms,
+        resolution_deadline_at_ms,
     )?;
-    let target_native = mac_native_element(&target)
-        .map_err(|_| ProtocolError::StaleTarget("semantic target changed".to_string()))?;
+    let target_native = mac_native_element(&target, cancellation, resolution_deadline_at_ms)
+        .map_err(|_| {
+            mac_observation_error(
+                cancellation,
+                deadline_at_ms,
+                ProtocolError::StaleTarget("semantic target changed".to_string()),
+            )
+        })?;
     let target_fingerprint = ElementFingerprint::from(&target_native);
     if hash_bytes(target_native.id.as_bytes()) != observation.backend_id_hash
         || element_fingerprint_hash(&target_fingerprint)? != observation.element_fingerprint_hash
@@ -1574,6 +1779,11 @@ fn mac_resolve_observed_element(
         if now_ms() >= deadline_at_ms {
             return Err(ProtocolError::ObservationExpired);
         }
+        if now_ms() >= resolution_deadline_at_ms {
+            return Err(ProtocolError::StaleTarget(
+                "semantic target resolution timed out".to_string(),
+            ));
+        }
         visited = visited.saturating_add(1);
         if visited > MAX_MAC_AX_COLLECTION_ITEMS {
             return Err(ProtocolError::StaleTarget(
@@ -1592,7 +1802,8 @@ fn mac_resolve_observed_element(
                 ProtocolError::StaleTarget("semantic target tree changed".to_string())
             })?,
         );
-        if let Ok(candidate) = mac_native_element(&element) {
+        if let Ok(candidate) = mac_native_element(&element, cancellation, resolution_deadline_at_ms)
+        {
             let fingerprint = ElementFingerprint::from(&candidate);
             if hash_bytes(candidate.id.as_bytes()) == observation.backend_id_hash
                 && element_fingerprint_hash(&fingerprint)? == observation.element_fingerprint_hash
@@ -1620,6 +1831,11 @@ fn mac_resolve_observed_element(
             }
         }
     }
+    if now_ms() >= resolution_deadline_at_ms {
+        return Err(ProtocolError::StaleTarget(
+            "semantic target resolution timed out".to_string(),
+        ));
+    }
     if matches != 1 || !matched_target {
         return Err(ProtocolError::StaleTarget(
             "semantic target is ambiguous".to_string(),
@@ -1629,8 +1845,23 @@ fn mac_resolve_observed_element(
 }
 
 #[cfg(target_os = "macos")]
-fn mac_frontmost_window() -> Result<AxElement, NativeError> {
-    mac_surface_windows(&CancellationToken::default(), i64::MAX)
+fn mac_resolve_observed_element(
+    observation: &ElementObservation,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(AxElement, NativeElement), ProtocolError> {
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
+    let result = mac_resolve_observed_element_inner(observation, cancellation, deadline_at_ms);
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn mac_frontmost_window(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<AxElement, NativeError> {
+    mac_surface_windows(cancellation, deadline_at_ms)
         .map_err(|_| NativeError)?
         .into_iter()
         .next()
@@ -1639,18 +1870,23 @@ fn mac_frontmost_window() -> Result<AxElement, NativeError> {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_shared_desktop_context_hash() -> Result<String, NativeError> {
+fn mac_shared_desktop_context_hash(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<String, NativeError> {
     use accessibility_sys::{AXUIElementCreateApplication, AXUIElementGetPid, kAXErrorSuccess};
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    let window = mac_frontmost_window()?;
+    mac_native_boundary(cancellation, deadline_at_ms)?;
+    let window = mac_frontmost_window(cancellation, deadline_at_ms)?;
     let mut process_id = 0;
     window.prepare()?;
     if unsafe { AXUIElementGetPid(window.0, &mut process_id) } != kAXErrorSuccess || process_id <= 0
     {
         return Err(NativeError);
     }
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     let process_generation = mac_process_generation(process_id)?;
     let window_id = mac_window_identity(&window, process_id)?;
     let application = AxElement::created(unsafe { AXUIElementCreateApplication(process_id) })?;
@@ -1659,6 +1895,7 @@ fn mac_shared_desktop_context_hash() -> Result<String, NativeError> {
     let mut ancestry = Vec::new();
     let mut belongs_to_window = false;
     for _ in 0..64 {
+        mac_native_boundary(cancellation, deadline_at_ms)?;
         ancestry.push((
             candidate.identity_hash(),
             candidate.string("AXRole").ok_or(NativeError)?,
@@ -1778,11 +2015,18 @@ fn mac_surface_windows(
         if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.1) } != kAXErrorSuccess {
             continue;
         }
-        let mut matches = application
-            .elements("AXWindows", 256)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|window| mac_ax_bounds(window).is_ok_and(|bounds| bounds == cg_bounds));
+        let Ok(windows) = application.elements("AXWindows", 256) else {
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            continue;
+        };
+        let mut matches = Vec::new();
+        for window in windows {
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            if mac_ax_bounds(&window).is_ok_and(|bounds| bounds == cg_bounds) {
+                matches.push(window);
+            }
+        }
+        let mut matches = matches.into_iter();
         let Some(window) = matches.next() else {
             continue;
         };
@@ -1804,15 +2048,21 @@ fn mac_list_surfaces(
     let mut seen = std::collections::BTreeSet::new();
     for (process_id, cg_window_number, window) in mac_surface_windows(cancellation, deadline_at_ms)?
     {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         let Ok(process_generation) = mac_process_generation(process_id) else {
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
             continue;
         };
         let Ok(window_id) = mac_window_identity(&window, process_id) else {
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
             continue;
         };
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         let Ok(bounds) = mac_ax_bounds(&window) else {
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
             continue;
         };
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         if bounds.width <= 0 || bounds.height <= 0 {
             continue;
         }
@@ -1843,16 +2093,19 @@ fn mac_list_surfaces(
                 height: bounds.height,
             }),
         };
-        persist_private_observation(
+        let persisted = persist_private_observation(
             &id,
             &MacSurfaceRecord {
                 protocol_version: PROTOCOL_VERSION,
                 descriptor: descriptor.clone(),
                 cg_window_number,
             },
-        )?;
+        );
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        persisted?;
         descriptors.push(descriptor);
     }
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
     Ok(descriptors)
 }
 
@@ -1945,20 +2198,30 @@ fn mac_semantic_snapshot(
     let window = if let Some(window) = selected_window {
         window
     } else {
-        mac_frontmost_window()
-            .or_else(|_| {
+        match mac_frontmost_window(cancellation, deadline_at_ms) {
+            Ok(window) => window,
+            Err(_) => {
+                check_protocol_boundary(cancellation, deadline_at_ms)?;
                 system
                     .element("AXFocusedApplication")
                     .and_then(|application| application.element("AXFocusedWindow"))
-            })
-            .or_else(|_| {
-                system.element("AXFocusedUIElement").and_then(|element| {
-                    element
-                        .element("AXWindow")
-                        .or_else(|_| element.element("AXTopLevelUIElement"))
-                })
-            })
-            .map_err(|_| ProtocolError::TargetNotFound("focused window not found".to_string()))?
+                    .or_else(|_| {
+                        mac_native_boundary(cancellation, deadline_at_ms)?;
+                        system.element("AXFocusedUIElement").and_then(|element| {
+                            element
+                                .element("AXWindow")
+                                .or_else(|_| element.element("AXTopLevelUIElement"))
+                        })
+                    })
+                    .map_err(|_| {
+                        mac_observation_error(
+                            cancellation,
+                            deadline_at_ms,
+                            ProtocolError::TargetNotFound("focused window not found".to_string()),
+                        )
+                    })?
+            }
+        }
     };
     let mut process_id = 0;
     window
@@ -2055,7 +2318,8 @@ fn mac_semantic_snapshot(
         };
         let mut child_parent = parent_id.clone();
         if elements.len() < MAX_MAC_SEMANTIC_ELEMENTS {
-            if let Ok(first) = mac_native_element(&element) {
+            if let Ok(first) = mac_native_element(&element, cancellation, traversal_deadline_at_ms)
+            {
                 let fingerprint = ElementFingerprint::from(&first);
                 if let Some(bounds) = fingerprint
                     .bounds
@@ -2070,10 +2334,12 @@ fn mac_semantic_snapshot(
                     let element_id = semantic::opaque_element_id(&observation_id, &backend_id)
                         .map_err(semantic_protocol_error)?;
                     let fingerprint_hash = element_fingerprint_hash(&fingerprint)?;
-                    let second = mac_native_element(&element).ok();
-                    let stable = second
-                        .as_ref()
-                        .is_some_and(|second| ElementFingerprint::from(second) == fingerprint);
+                    let second =
+                        mac_native_element(&element, cancellation, traversal_deadline_at_ms).ok();
+                    let stable = second.as_ref().is_some_and(|second| {
+                        ElementFingerprint::from(second) == fingerprint
+                            && validate_matching_live_element(second, &first).is_ok()
+                    });
                     let visible = first.state.get("visible").and_then(Value::as_bool) == Some(true)
                         && first.state.get("hidden").and_then(Value::as_bool) != Some(true);
                     let invokable = element
@@ -2131,6 +2397,7 @@ fn mac_semantic_snapshot(
             queue.push_back((child, child_path, child_parent.clone()));
         }
     }
+    check_protocol_boundary(cancellation, deadline_at_ms)?;
     let mut overlap_counts = BTreeMap::new();
     for (_, fingerprint_hash, point, _, _) in &pending {
         *overlap_counts
@@ -2214,7 +2481,12 @@ fn bounded_semantic_text(value: &str, maximum: usize) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(), DispatchError> {
+fn native_element_set_value(
+    expected: &NativeElement,
+    value: &str,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
     #[cfg(target_os = "macos")]
     {
         use accessibility_sys::{AXUIElementSetAttributeValue, kAXErrorSuccess};
@@ -2233,8 +2505,23 @@ fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(),
         };
         let expected_hash = element_fingerprint_hash(&ElementFingerprint::from(expected))
             .map_err(|_| no_effect("semantic target is unavailable"))?;
-        let (element, current) = mac_ax_element_matching_hash(&point, &expected_hash)
-            .map_err(|_| no_effect("semantic target is unavailable"))?;
+        let resolution_deadline_at_ms =
+            deadline_at_ms.min(now_ms().saturating_add(MAX_MAC_AX_RESOLUTION_MS));
+        let (element, current) = mac_ax_element_matching_hash(
+            &point,
+            &expected_hash,
+            cancellation,
+            resolution_deadline_at_ms,
+        )
+        .map_err(|_| {
+            if cancellation.is_cancelled() {
+                interrupted(EffectKnowledge::CancelledBeforeEffect)
+            } else if now_ms() >= deadline_at_ms {
+                interrupted(EffectKnowledge::ExpiredBeforeEffect)
+            } else {
+                no_effect("semantic target is unavailable")
+            }
+        })?;
         validate_matching_live_element(&current, expected)
             .map_err(|_| no_effect("semantic target changed"))?;
         if !element.is_settable("AXValue") {
@@ -2243,6 +2530,12 @@ fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(),
         element
             .prepare()
             .map_err(|_| no_effect("semantic target is unavailable"))?;
+        if cancellation.is_cancelled() {
+            return Err(interrupted(EffectKnowledge::CancelledBeforeEffect));
+        }
+        if now_ms() >= deadline_at_ms {
+            return Err(interrupted(EffectKnowledge::ExpiredBeforeEffect));
+        }
         if unsafe {
             AXUIElementSetAttributeValue(
                 element.0,
@@ -2260,7 +2553,7 @@ fn native_element_set_value(expected: &NativeElement, value: &str) -> Result<(),
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (expected, value);
+        let _ = (expected, value, cancellation, deadline_at_ms);
         Err(unsupported("accessibility actions are unavailable"))
     }
 }
@@ -2297,8 +2590,40 @@ pub trait Executor: Send + Sync {
             "shared desktop context is unavailable".to_string(),
         ))
     }
+    fn shared_desktop_context_hash_with_boundary(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<String, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        let result = self.shared_desktop_context_hash();
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        result
+    }
     fn observe(&self, target: &TargetRef) -> Result<Observation, ProtocolError>;
+    fn observe_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Observation, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        let result = self.observe(target);
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        result
+    }
     fn resolve(&self, target: &TargetRef) -> Result<ResolvedTarget, ProtocolError>;
+    fn resolve_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<ResolvedTarget, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        let result = self.resolve(target);
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        result
+    }
     fn dispatch(
         &self,
         action: &Action,
@@ -2327,15 +2652,24 @@ pub struct Ed25519AuthorityVerifier {
 }
 
 impl Ed25519AuthorityVerifier {
-    pub fn new(keys: impl IntoIterator<Item = (String, String, String, VerifyingKey)>) -> Self {
-        Self {
-            issuers: keys
-                .into_iter()
-                .map(|(issuer, key_id, policy_generation, key)| {
-                    ((issuer, key_id), (policy_generation, key))
-                })
-                .collect(),
+    pub fn new(
+        keys: impl IntoIterator<Item = (String, String, String, VerifyingKey)>,
+    ) -> Result<Self, ProtocolError> {
+        let mut issuers = BTreeMap::new();
+        for (issuer, key_id, policy_generation, key) in keys {
+            if !valid_identifier(&issuer)
+                || !valid_identifier(&key_id)
+                || !valid_identifier(&policy_generation)
+                || issuers
+                    .insert((issuer, key_id), (policy_generation, key))
+                    .is_some()
+            {
+                return Err(ProtocolError::InvalidRequest(
+                    "invalid authority keyring".to_string(),
+                ));
+            }
         }
+        Ok(Self { issuers })
     }
 }
 
@@ -2405,6 +2739,19 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+}
+
+fn check_protocol_boundary(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), ProtocolError> {
+    if cancellation.is_cancelled() {
+        return Err(ProtocolError::ObservationCancelled);
+    }
+    if now_ms() >= deadline_at_ms {
+        return Err(ProtocolError::ObservationExpired);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -2518,7 +2865,14 @@ impl<E: Executor> Engine<E> {
                 },
             );
         }
-        let capabilities = match self.executor.capabilities() {
+        let capabilities = self.executor.capabilities();
+        if cancellation.is_cancelled() {
+            return self.finish_early(request, &action_hash, Terminal::CancelledBeforeEffect);
+        }
+        if now_ms() >= effect_deadline_at_ms {
+            return self.finish_early(request, &action_hash, Terminal::ExpiredBeforeEffect);
+        }
+        let capabilities = match capabilities {
             Ok(capabilities) => capabilities,
             Err(error) => {
                 return self.finish_early(request, &action_hash, protocol_failure(error));
@@ -2551,14 +2905,22 @@ impl<E: Executor> Engine<E> {
             );
         }
 
-        let before = match self.executor.observe(&request.target) {
+        let before = match self.executor.observe_with_boundary(
+            &request.target,
+            cancellation,
+            effect_deadline_at_ms,
+        ) {
             Ok(observation) => observation,
             Err(error) => {
                 let terminal = protocol_failure(error);
                 return self.finish_early(request, &action_hash, terminal);
             }
         };
-        let resolved = match self.executor.resolve(&request.target) {
+        let resolved = match self.executor.resolve_with_boundary(
+            &request.target,
+            cancellation,
+            effect_deadline_at_ms,
+        ) {
             Ok(target) => target,
             Err(error) => {
                 let terminal = protocol_failure(error);
@@ -2577,8 +2939,21 @@ impl<E: Executor> Engine<E> {
         let context_before = if request.interaction_mode == InteractionMode::BackgroundOnly
             && session_isolation == SessionIsolation::SharedDesktop
         {
-            match self.executor.shared_desktop_context_hash() {
+            match self
+                .executor
+                .shared_desktop_context_hash_with_boundary(cancellation, effect_deadline_at_ms)
+            {
                 Ok(context) => Some(context),
+                Err(ProtocolError::ObservationCancelled) => {
+                    return self.finish_early(
+                        request,
+                        &action_hash,
+                        Terminal::CancelledBeforeEffect,
+                    );
+                }
+                Err(ProtocolError::ObservationExpired) => {
+                    return self.finish_early(request, &action_hash, Terminal::ExpiredBeforeEffect);
+                }
                 Err(_) => {
                     return self.finish_early(
                         request,
@@ -2615,6 +2990,8 @@ impl<E: Executor> Engine<E> {
                     request.interaction_mode,
                     session_isolation,
                     context_before.as_deref(),
+                    cancellation,
+                    effect_deadline_at_ms,
                 );
                 (
                     Terminal::OutcomeUnknown {
@@ -2630,8 +3007,14 @@ impl<E: Executor> Engine<E> {
                     request.interaction_mode,
                     session_isolation,
                     context_before.as_deref(),
+                    cancellation,
+                    effect_deadline_at_ms,
                 );
-                let after = self.executor.observe(&request.target);
+                let after = self.executor.observe_with_boundary(
+                    &request.target,
+                    cancellation,
+                    effect_deadline_at_ms,
+                );
                 let expected_target_fingerprint_hash = match &request.target {
                     TargetRef::Element { target } => Some(target.fingerprint_hash.clone()),
                     _ => None,
@@ -2642,6 +3025,18 @@ impl<E: Executor> Engine<E> {
                     after.as_ref().ok(),
                     expected_target_fingerprint_hash.as_deref(),
                 );
+                let post_dispatch_boundary_unknown = cancellation.is_cancelled()
+                    || now_ms() >= effect_deadline_at_ms
+                    || matches!(
+                        &after,
+                        Err(ProtocolError::ObservationCancelled | ProtocolError::ObservationExpired)
+                    );
+                if post_dispatch_boundary_unknown {
+                    effect = Effect::Unknown;
+                    warnings.push(
+                        "action completed at the cancellation or deadline boundary".to_string(),
+                    );
+                }
                 if matches!(
                     context_preservation,
                     ContextPreservation::Changed | ContextPreservation::Unavailable
@@ -2672,7 +3067,9 @@ impl<E: Executor> Engine<E> {
                 {
                     (Terminal::Succeeded { receipt }, true)
                 } else {
-                    let message = if matches!(
+                    let message = if post_dispatch_boundary_unknown {
+                        "action completed at the cancellation or deadline boundary".to_string()
+                    } else if matches!(
                         receipt.context_preservation,
                         ContextPreservation::Changed | ContextPreservation::Unavailable
                     ) {
@@ -2694,6 +3091,8 @@ impl<E: Executor> Engine<E> {
                     request.interaction_mode,
                     session_isolation,
                     context_before.as_deref(),
+                    cancellation,
+                    effect_deadline_at_ms,
                 );
                 (
                     Terminal::OutcomeUnknown {
@@ -2709,6 +3108,8 @@ impl<E: Executor> Engine<E> {
             Err(error) if error.effect == EffectKnowledge::ExpiredBeforeEffect => {
                 (Terminal::ExpiredBeforeEffect, false)
             }
+            Err(_) if cancellation.is_cancelled() => (Terminal::CancelledBeforeEffect, false),
+            Err(_) if now_ms() >= effect_deadline_at_ms => (Terminal::ExpiredBeforeEffect, false),
             Err(error) => (
                 Terminal::Rejected {
                     code: error.code,
@@ -2760,6 +3161,8 @@ impl<E: Executor> Engine<E> {
         interaction_mode: InteractionMode,
         session_isolation: SessionIsolation,
         before: Option<&str>,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
     ) -> ContextPreservation {
         if interaction_mode != InteractionMode::BackgroundOnly {
             return ContextPreservation::NotApplicable;
@@ -2770,7 +3173,10 @@ impl<E: Executor> Engine<E> {
         let Some(before) = before else {
             return ContextPreservation::Unavailable;
         };
-        match self.executor.shared_desktop_context_hash() {
+        match self
+            .executor
+            .shared_desktop_context_hash_with_boundary(cancellation, deadline_at_ms)
+        {
             Ok(after) if after == before => ContextPreservation::UnchangedAtBoundaries,
             Ok(_) => ContextPreservation::Changed,
             Err(_) => ContextPreservation::Unavailable,
@@ -3004,14 +3410,27 @@ impl NativeExecutor {
             if !mac_actionability_allows(action, &actionability) {
                 return Err(no_effect("semantic target is not actionable"));
             }
+            let live_actionability =
+                mac_live_actionability(&element, &native, cancellation, deadline_at_ms).map_err(
+                    |error| match error {
+                        ProtocolError::ObservationCancelled => {
+                            interrupted(EffectKnowledge::CancelledBeforeEffect)
+                        }
+                        ProtocolError::ObservationExpired => {
+                            interrupted(EffectKnowledge::ExpiredBeforeEffect)
+                        }
+                        _ => no_effect("semantic target actionability changed"),
+                    },
+                )?;
+            if !mac_actionability_matches_observation(action, &actionability, &live_actionability) {
+                return Err(no_effect("semantic target actionability changed"));
+            }
             match action {
                 Action::Invoke => {
                     Self::check_before_effect(cancellation, deadline_at_ms)?;
                     element
                         .prepare()
                         .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    mac_validate_stable_element(&element, &native)
-                        .map_err(|_| no_effect("semantic target changed"))?;
                     if !element
                         .actions()
                         .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"))
@@ -3031,8 +3450,6 @@ impl NativeExecutor {
                     element
                         .prepare()
                         .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    mac_validate_stable_element(&element, &native)
-                        .map_err(|_| no_effect("semantic target changed"))?;
                     if !element.is_settable("AXValue") {
                         return Err(no_effect("semantic target is not editable"));
                     }
@@ -3305,6 +3722,15 @@ impl Executor for NativeExecutor {
     }
 
     fn shared_desktop_context_hash(&self) -> Result<String, ProtocolError> {
+        self.shared_desktop_context_hash_with_boundary(&CancellationToken::default(), i64::MAX)
+    }
+
+    fn shared_desktop_context_hash_with_boundary(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<String, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         if self.session_isolation != SessionIsolation::SharedDesktop {
             return Err(ProtocolError::Executor(
                 "shared desktop context is unavailable".to_string(),
@@ -3312,8 +3738,16 @@ impl Executor for NativeExecutor {
         }
         #[cfg(target_os = "macos")]
         {
-            return mac_shared_desktop_context_hash()
-                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()));
+            let result =
+                mac_shared_desktop_context_hash(cancellation, deadline_at_ms).map_err(|_| {
+                    mac_observation_error(
+                        cancellation,
+                        deadline_at_ms,
+                        ProtocolError::Executor("desktop backend error".to_string()),
+                    )
+                });
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            return result;
         }
         #[cfg(target_os = "linux")]
         {
@@ -3324,14 +3758,16 @@ impl Executor for NativeExecutor {
             if backend.is_none() {
                 *backend = Some(linux_atspi::LinuxAtspiBackend::connect()?);
             }
-            return backend
+            let result = backend
                 .as_ref()
                 .ok_or_else(|| ProtocolError::Executor("desktop backend error".to_string()))?
                 .shared_desktop_context_hash();
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            return result;
         }
         #[cfg(target_os = "windows")]
         {
-            return windows_uia::shared_desktop_context_hash();
+            return windows_uia::shared_desktop_context_hash(cancellation, deadline_at_ms);
         }
         #[allow(unreachable_code)]
         Err(ProtocolError::Executor(
@@ -3441,6 +3877,16 @@ impl Executor for NativeExecutor {
     }
 
     fn observe(&self, target: &TargetRef) -> Result<Observation, ProtocolError> {
+        self.observe_with_boundary(target, &CancellationToken::default(), i64::MAX)
+    }
+
+    fn observe_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Observation, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         #[cfg(target_os = "linux")]
         if let TargetRef::Element { target } = target {
             let mut backend = self
@@ -3453,12 +3899,12 @@ impl Executor for NativeExecutor {
             return backend
                 .as_ref()
                 .ok_or_else(|| ProtocolError::Executor("desktop backend error".to_string()))?
-                .observe_target(target, &CancellationToken::default(), i64::MAX);
+                .observe_target(target, cancellation, deadline_at_ms);
         }
         #[cfg(target_os = "windows")]
         if let TargetRef::Element { target } = target {
             let (element, value_hash) =
-                windows_uia::observe_target(target, &CancellationToken::default(), i64::MAX)?;
+                windows_uia::observe_target(target, cancellation, deadline_at_ms)?;
             let capabilities = self.capabilities()?;
             return semantic_target_observation(
                 target,
@@ -3471,7 +3917,7 @@ impl Executor for NativeExecutor {
         #[cfg(target_os = "macos")]
         let element = match target {
             TargetRef::Element { target } => Some(
-                self.resolve_recorded_element(target, &CancellationToken::default(), i64::MAX)?
+                self.resolve_recorded_element(target, cancellation, deadline_at_ms)?
                     .1,
             ),
             _ => None,
@@ -3500,6 +3946,7 @@ impl Executor for NativeExecutor {
             &target_fingerprint_hash,
             &state,
         ))?;
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         Ok(Observation {
             evidence: Evidence {
                 observation_hash,
@@ -3513,6 +3960,16 @@ impl Executor for NativeExecutor {
     }
 
     fn resolve(&self, target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
+        self.resolve_with_boundary(target, &CancellationToken::default(), i64::MAX)
+    }
+
+    fn resolve_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<ResolvedTarget, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
         match target {
             TargetRef::Coordinates {
                 x,
@@ -3586,7 +4043,7 @@ impl Executor for NativeExecutor {
                 }
                 #[cfg(target_os = "macos")]
                 {
-                    self.resolve_recorded_element(target, &CancellationToken::default(), i64::MAX)?;
+                    self.resolve_recorded_element(target, cancellation, deadline_at_ms)?;
                     Ok(ResolvedTarget::Semantic(target.clone()))
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -3797,7 +4254,8 @@ impl Executor for NativeExecutor {
                     return Err(no_effect("set_value requires an element with bounds"));
                 }
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
-                self.runtime.set_value(native_target()?, value)?;
+                self.runtime
+                    .set_value(native_target()?, value, cancellation, deadline_at_ms)?;
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
                     DispatchReceipt {
                         backend: self.runtime.resolve_backend().to_string(),
@@ -3995,7 +4453,7 @@ impl OperationLedger {
             action_hash: action_hash.to_string(),
             claimed_at_ms: now_ms(),
             action_name: Some(request.action.name().to_string()),
-            delivery_route: Some(request_delivery_route(&request.action, &request.target)),
+            delivery_route: Some(claim_delivery_route(&request.action, &request.target)),
             session_isolation: Some(session_isolation),
             interaction_mode: Some(request.interaction_mode),
         })?;
@@ -4331,6 +4789,7 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         ));
     }
     validate_action(&request.action)?;
+    validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
             if semantic_hash(sha256) && hash_bytes(value.as_bytes()) == *sha256 => {}
@@ -4433,6 +4892,43 @@ fn validate_action(action: &Action) -> Result<(), ProtocolError> {
     }
 }
 
+fn validate_verification(verification: &VerificationPolicy) -> Result<(), ProtocolError> {
+    let VerificationPolicy::TargetState { expected } = verification else {
+        return Ok(());
+    };
+    let mut stack = vec![(expected, 0_usize)];
+    let mut nodes = 0_usize;
+    let mut bytes = 0_usize;
+    while let Some((value, depth)) = stack.pop() {
+        nodes = nodes.saturating_add(1);
+        if nodes > MAX_VERIFICATION_JSON_NODES || depth > MAX_VERIFICATION_JSON_DEPTH {
+            return Err(ProtocolError::InvalidRequest(
+                "verification state is too large".to_string(),
+            ));
+        }
+        match value {
+            Value::Null | Value::Bool(_) => {}
+            Value::Number(value) => bytes = bytes.saturating_add(value.to_string().len()),
+            Value::String(value) => bytes = bytes.saturating_add(value.len()),
+            Value::Array(values) => {
+                stack.extend(values.iter().map(|value| (value, depth.saturating_add(1))));
+            }
+            Value::Object(values) => {
+                for (key, value) in values {
+                    bytes = bytes.saturating_add(key.len());
+                    stack.push((value, depth.saturating_add(1)));
+                }
+            }
+        }
+        if bytes > MAX_VERIFICATION_JSON_BYTES {
+            return Err(ProtocolError::InvalidRequest(
+                "verification state is too large".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -4446,6 +4942,7 @@ fn is_hash(value: &str) -> bool {
 }
 
 pub fn normalized_action_hash(request: &ActionRequest) -> Result<String, ProtocolError> {
+    validate_verification(&request.verification)?;
     hash_serializable(&(
         request.protocol_version,
         request.action_version,
@@ -5504,6 +6001,18 @@ mod tests {
             editable: true,
         };
         assert!(super::mac_actionability_allows(&action, &actionability));
+        assert!(super::mac_actionability_matches_observation(
+            &action,
+            &actionability,
+            &actionability
+        ));
+        let mut changed = actionability;
+        changed.receives_events = true;
+        assert!(!super::mac_actionability_matches_observation(
+            &action,
+            &actionability,
+            &changed
+        ));
         actionability.invokable = false;
         assert!(!super::mac_actionability_allows(&action, &actionability));
         actionability.invokable = true;
@@ -5513,6 +6022,40 @@ mod tests {
                 value: "value".to_string()
             },
             &actionability
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_observation_errors_preserve_request_boundary() {
+        let active = CancellationToken::default();
+        assert!(matches!(
+            super::mac_observation_error(
+                &active,
+                super::now_ms().saturating_add(1_000),
+                super::ProtocolError::StaleTarget("changed".to_string())
+            ),
+            super::ProtocolError::StaleTarget(_)
+        ));
+
+        let cancelled = CancellationToken::default();
+        cancelled.cancel();
+        assert!(matches!(
+            super::mac_observation_error(
+                &cancelled,
+                super::now_ms(),
+                super::ProtocolError::StaleTarget("changed".to_string())
+            ),
+            super::ProtocolError::ObservationCancelled
+        ));
+
+        assert!(matches!(
+            super::mac_observation_error(
+                &active,
+                super::now_ms(),
+                super::ProtocolError::StaleTarget("changed".to_string())
+            ),
+            super::ProtocolError::ObservationExpired
         ));
     }
 

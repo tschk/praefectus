@@ -25,11 +25,11 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
-    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileRenameInfo, GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, FileRenameInfo, GetFileInformationByHandle,
+    OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -58,13 +58,14 @@ impl PathGuard {
             if candidate.as_os_str().is_empty() {
                 continue;
             }
+            let final_target = index + 1 == candidates.len();
             match open_path(
                 candidate,
                 FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0,
-                (index + 1 < candidates.len()).then_some(true),
+                (!final_target).then_some(true),
             ) {
                 Ok(handle) => {
-                    validate_handle(handle.0, &user, false)?;
+                    validate_handle(handle.0, &user, false, final_target)?;
                     handles.push(handle);
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => break,
@@ -198,11 +199,11 @@ pub(crate) fn restrict_file(file: &File) -> io::Result<()> {
     if status != ERROR_SUCCESS {
         return Err(permission_error());
     }
-    validate_handle(handle, &user, true)
+    validate_handle(handle, &user, true, true)
 }
 
 pub(crate) fn restrict_directory(path: &Path) -> io::Result<()> {
-    let _guard = PathGuard::lock(path)?;
+    let _guard = PathGuard::lock(path.parent().ok_or_else(permission_error)?)?;
     let user = CurrentUser::load()?;
     let acl = owner_acl(&user, true)?;
     let handle = open_path(
@@ -224,14 +225,14 @@ pub(crate) fn restrict_directory(path: &Path) -> io::Result<()> {
     if status != ERROR_SUCCESS {
         return Err(permission_error());
     }
-    validate_handle(handle.0, &user, true)
+    validate_handle(handle.0, &user, true, true)
 }
 
 pub(crate) fn validate_directory(path: &Path, strict: bool) -> io::Result<()> {
     let _guard = PathGuard::lock(path)?;
     let user = CurrentUser::load()?;
     let handle = open_path(path, FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0, Some(true))?;
-    validate_handle(handle.0, &user, strict)
+    validate_handle(handle.0, &user, strict, true)
 }
 
 pub(crate) fn lock_path(path: &Path) -> io::Result<PathGuard> {
@@ -288,7 +289,12 @@ fn owner_acl(user: &CurrentUser, directory: bool) -> io::Result<LocalAllocation>
     Ok(LocalAllocation(acl.cast()))
 }
 
-fn validate_handle(handle: HANDLE, user: &CurrentUser, strict: bool) -> io::Result<()> {
+fn validate_handle(
+    handle: HANDLE,
+    user: &CurrentUser,
+    strict: bool,
+    final_target: bool,
+) -> io::Result<()> {
     let mut owner = PSID::default();
     let mut acl = ptr::null_mut::<ACL>();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -308,7 +314,7 @@ fn validate_handle(handle: HANDLE, user: &CurrentUser, strict: bool) -> io::Resu
         return Err(permission_error());
     }
     let allocation = LocalAllocation(descriptor.0);
-    let result = validate_descriptor(owner, acl, allocation.0, user, strict);
+    let result = validate_descriptor(owner, acl, allocation.0, user, strict, final_target);
     drop(allocation);
     result
 }
@@ -319,6 +325,7 @@ fn validate_descriptor(
     descriptor: *mut c_void,
     user: &CurrentUser,
     strict: bool,
+    final_target: bool,
 ) -> io::Result<()> {
     if descriptor.is_null()
         || !unsafe { IsValidSecurityDescriptor(PSECURITY_DESCRIPTOR(descriptor)) }.as_bool()
@@ -340,7 +347,14 @@ fn validate_descriptor(
         return Err(permission_error());
     }
     if !strict {
-        return validate_ancestor_acl(acl, descriptor.cast(), descriptor_len, user, owner_is_user);
+        return validate_ancestor_acl(
+            acl,
+            descriptor.cast(),
+            descriptor_len,
+            user,
+            owner_is_user,
+            final_target,
+        );
     }
     let mut control = 0u16;
     let mut revision = 0u32;
@@ -415,6 +429,7 @@ fn validate_ancestor_acl(
     descriptor_len: usize,
     user: &CurrentUser,
     owner_is_user: bool,
+    final_target: bool,
 ) -> io::Result<()> {
     let mut acl_info = ACL_SIZE_INFORMATION::default();
     unsafe {
@@ -442,7 +457,7 @@ fn validate_ancestor_acl(
         }
         if ace_type == ACCESS_ALLOWED_ACE_TYPE
             && u32::from(header.AceFlags) & INHERIT_ONLY_ACE.0 == 0
-            && ancestor_access_can_replace(mask, owner_is_user)
+            && ancestor_access_can_replace(mask, owner_is_user, final_target)
             && !trusted_principal(sid, user)
         {
             return Err(permission_error());
@@ -480,10 +495,13 @@ fn bounded_ace(
     Ok((header, ace.Mask, sid))
 }
 
-fn ancestor_access_can_replace(mask: u32, owner_is_user: bool) -> bool {
+fn ancestor_access_can_replace(mask: u32, owner_is_user: bool, final_target: bool) -> bool {
     let destructive = DELETE.0 | FILE_DELETE_CHILD.0 | WRITE_DAC.0 | WRITE_OWNER.0 | GENERIC_ALL.0;
     let create = FILE_ADD_FILE.0 | FILE_ADD_SUBDIRECTORY.0 | GENERIC_WRITE.0;
-    mask & destructive != 0 || owner_is_user && mask & create != 0
+    let write = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | GENERIC_WRITE.0;
+    mask & destructive != 0
+        || owner_is_user && mask & create != 0
+        || final_target && mask & write != 0
 }
 
 fn trusted_principal(sid: PSID, user: &CurrentUser) -> bool {
@@ -675,6 +693,7 @@ mod tests {
             HANDLE(file.as_raw_handle()),
             &CurrentUser::load().expect("current user"),
             true,
+            true,
         )
         .expect("validate file");
     }
@@ -757,14 +776,29 @@ mod tests {
 
     #[test]
     fn ancestor_access_rejects_replacement_rights() {
-        assert!(ancestor_access_can_replace(FILE_DELETE_CHILD.0, false));
-        assert!(ancestor_access_can_replace(WRITE_DAC.0, false));
-        assert!(ancestor_access_can_replace(FILE_ADD_SUBDIRECTORY.0, true));
-        assert!(!ancestor_access_can_replace(FILE_ADD_SUBDIRECTORY.0, false));
+        assert!(ancestor_access_can_replace(
+            FILE_DELETE_CHILD.0,
+            false,
+            false
+        ));
+        assert!(ancestor_access_can_replace(WRITE_DAC.0, false, false));
+        assert!(ancestor_access_can_replace(
+            FILE_ADD_SUBDIRECTORY.0,
+            true,
+            false
+        ));
+        assert!(!ancestor_access_can_replace(
+            FILE_ADD_SUBDIRECTORY.0,
+            false,
+            false
+        ));
+        assert!(ancestor_access_can_replace(FILE_WRITE_DATA.0, false, true));
+        assert!(ancestor_access_can_replace(FILE_APPEND_DATA.0, false, true));
+        assert!(ancestor_access_can_replace(GENERIC_WRITE.0, false, true));
     }
 
     #[test]
-    fn synthetic_ancestor_acl_rejects_untrusted_delete_child() {
+    fn synthetic_ancestor_acl_rejects_untrusted_modification() {
         let user = CurrentUser::load().expect("current user");
         let mut sid = PSID::default();
         unsafe {
@@ -794,7 +828,8 @@ mod tests {
                 storage.as_ptr().cast(),
                 storage.len() * std::mem::size_of::<usize>(),
                 &user,
-                true,
+                false,
+                false,
             )
             .expect_err("reject untrusted replacement grant")
             .kind(),
@@ -803,6 +838,63 @@ mod tests {
         let mut raw_ace = ptr::null_mut();
         unsafe {
             GetAce(acl, 0, &mut raw_ace).expect("get synthetic ace");
+            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_WRITE_DATA.0;
+        }
+        validate_ancestor_acl(
+            acl,
+            storage.as_ptr().cast(),
+            storage.len() * std::mem::size_of::<usize>(),
+            &user,
+            false,
+            false,
+        )
+        .expect("allow untrusted create-only grant on trusted ancestor");
+        assert_eq!(
+            validate_ancestor_acl(
+                acl,
+                storage.as_ptr().cast(),
+                storage.len() * std::mem::size_of::<usize>(),
+                &user,
+                false,
+                true,
+            )
+            .expect_err("reject untrusted final write grant")
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        unsafe {
+            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_APPEND_DATA.0;
+        }
+        assert_eq!(
+            validate_ancestor_acl(
+                acl,
+                storage.as_ptr().cast(),
+                storage.len() * std::mem::size_of::<usize>(),
+                &user,
+                false,
+                true,
+            )
+            .expect_err("reject untrusted final append grant")
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        unsafe {
+            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = GENERIC_WRITE.0;
+        }
+        assert_eq!(
+            validate_ancestor_acl(
+                acl,
+                storage.as_ptr().cast(),
+                storage.len() * std::mem::size_of::<usize>(),
+                &user,
+                false,
+                true,
+            )
+            .expect_err("reject untrusted final generic write grant")
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        unsafe {
             (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = READ_CONTROL.0;
         }
         validate_ancestor_acl(
@@ -810,6 +902,7 @@ mod tests {
             storage.as_ptr().cast(),
             storage.len() * std::mem::size_of::<usize>(),
             &user,
+            false,
             true,
         )
         .expect("allow untrusted read-only ace");
@@ -820,6 +913,7 @@ mod tests {
                 storage.as_ptr().cast(),
                 storage.len() * std::mem::size_of::<usize>(),
                 &user,
+                false,
                 true,
             )
             .expect_err("reject unknown ace")

@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -77,6 +80,13 @@ pub struct LinuxAtspiBackend {
 
 struct X11TopologyWorker {
     requests: SyncSender<X11Request>,
+}
+
+struct X11ServerIdentity {
+    process_id: u32,
+    process_generation: String,
+    executable: PathBuf,
+    user_id: u32,
 }
 
 enum X11Request {
@@ -260,26 +270,24 @@ impl X11TopologyWorker {
                     }
                     match request {
                         X11Request::Topology(response) => {
-                            let result =
-                                connection
-                                    .as_ref()
-                                    .ok_or(())
-                                    .and_then(|(connection, screen)| {
-                                        x11_topology_hash(connection, *screen)
-                                    });
+                            let result = connection.as_ref().ok_or(()).and_then(
+                                |(connection, screen, server)| {
+                                    server.validate(connection)?;
+                                    x11_topology_hash(connection, *screen)
+                                },
+                            );
                             if result.is_err() {
                                 connection = None;
                             }
                             let _ = response.send(result);
                         }
                         X11Request::Desktop(response) => {
-                            let result =
-                                connection
-                                    .as_ref()
-                                    .ok_or(())
-                                    .and_then(|(connection, screen)| {
-                                        x11_desktop_sentinel(connection, *screen)
-                                    });
+                            let result = connection.as_ref().ok_or(()).and_then(
+                                |(connection, screen, server)| {
+                                    server.validate(connection)?;
+                                    x11_desktop_sentinel(connection, *screen)
+                                },
+                            );
                             if result.is_err() {
                                 connection = None;
                             }
@@ -349,7 +357,7 @@ impl X11Topology {
     }
 }
 
-fn connect_x11() -> Result<(RustConnection, usize), ()> {
+fn connect_x11() -> Result<(RustConnection, usize, X11ServerIdentity), ()> {
     let display = parse_display(None).map_err(|_| ())?;
     let screen = usize::from(display.screen);
     let address = display
@@ -357,12 +365,74 @@ fn connect_x11() -> Result<(RustConnection, usize), ()> {
         .find(|address| matches!(address, ConnectAddress::Socket(_)))
         .ok_or(())?;
     let (stream, (family, address)) = DefaultStream::connect(&address).map_err(|_| ())?;
+    let (process_id, user_id) = x11_peer_identity(&stream)?;
+    let process_generation = process_generation(process_id).map_err(|_| ())?;
+    let executable = fs::read_link(format!("/proc/{process_id}/exe")).map_err(|_| ())?;
+    if !trusted_x11_server(process_id, user_id, &executable) {
+        return Err(());
+    }
     let (auth_name, auth_data) = get_auth(family, &address, display.display)
         .map_err(|_| ())?
-        .unwrap_or_default();
-    RustConnection::connect_to_stream_with_auth_info(stream, screen, auth_name, auth_data)
-        .map(|connection| (connection, screen))
-        .map_err(|_| ())
+        .filter(|(name, data)| !name.is_empty() && !data.is_empty())
+        .ok_or(())?;
+    let connection =
+        RustConnection::connect_to_stream_with_auth_info(stream, screen, auth_name, auth_data)
+            .map_err(|_| ())?;
+    let server = X11ServerIdentity {
+        process_id,
+        process_generation,
+        executable,
+        user_id,
+    };
+    server.validate(&connection)?;
+    Ok((connection, screen, server))
+}
+
+impl X11ServerIdentity {
+    fn validate(&self, connection: &RustConnection) -> Result<(), ()> {
+        if process_generation(self.process_id).map_err(|_| ())? != self.process_generation
+            || fs::read_link(format!("/proc/{}/exe", self.process_id)).map_err(|_| ())?
+                != self.executable
+            || !trusted_x11_server(self.process_id, self.user_id, &self.executable)
+            || connection.setup().vendor != b"The X.Org Foundation"
+            || connection
+                .query_extension(b"XWAYLAND")
+                .map_err(|_| ())?
+                .reply()
+                .map_err(|_| ())?
+                .present
+        {
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+fn x11_peer_identity(stream: &DefaultStream) -> Result<(u32, u32), ()> {
+    let credentials = rustix::net::sockopt::socket_peercred(stream).map_err(|_| ())?;
+    Ok((
+        u32::try_from(credentials.pid.as_raw_pid()).map_err(|_| ())?,
+        credentials.uid.as_raw(),
+    ))
+}
+
+fn native_x11_server_executable(executable: &Path) -> bool {
+    executable.file_name() == Some(OsStr::new("Xorg"))
+}
+
+fn trusted_x11_server(process_id: u32, user_id: u32, executable: &Path) -> bool {
+    let current_user_id = rustix::process::geteuid().as_raw();
+    let Ok(metadata) = fs::metadata(format!("/proc/{process_id}/exe")) else {
+        return false;
+    };
+    native_x11_server_executable(executable)
+        && (user_id == 0 || user_id == current_user_id)
+        && metadata.is_file()
+        && trusted_x11_server_file(metadata.uid(), metadata.mode())
+}
+
+fn trusted_x11_server_file(owner_id: u32, mode: u32) -> bool {
+    owner_id == 0 && mode & 0o022 == 0
 }
 
 fn x11_topology_hash(connection: &RustConnection, screen: usize) -> Result<String, ()> {
@@ -619,9 +689,7 @@ impl LinuxAtspiBackend {
             connection,
             generation: AtomicU64::new(0),
             latest: Mutex::new(None),
-            topology: (session_type() == "x11")
-                .then(X11TopologyWorker::spawn)
-                .transpose()?,
+            topology: Some(X11TopologyWorker::spawn()?),
         })
     }
 
@@ -631,6 +699,7 @@ impl LinuxAtspiBackend {
         private_state: bool,
     ) -> BTreeMap<String, bool> {
         let session = session_type();
+        let (wayland, x11) = display_protocol_permissions(session, display_geometry);
         BTreeMap::from([
             ("accessibility".to_string(), true),
             ("atspi2".to_string(), true),
@@ -638,8 +707,8 @@ impl LinuxAtspiBackend {
             ("display_geometry".to_string(), display_geometry),
             ("private_state".to_string(), private_state),
             ("screen_recording".to_string(), false),
-            ("wayland".to_string(), session == "wayland"),
-            ("x11".to_string(), session == "x11"),
+            ("wayland".to_string(), wayland),
+            ("x11".to_string(), x11),
         ])
     }
 
@@ -2041,9 +2110,29 @@ impl SurfaceWindow {
 fn process_generation(process_id: u32) -> Result<String, ProtocolError> {
     let stat = fs::read_to_string(format!("/proc/{process_id}/stat"))
         .map_err(|_| ProtocolError::StaleTarget("target process disappeared".to_string()))?;
-    parse_process_start_time(&stat)
-        .map(str::to_string)
-        .ok_or_else(|| ProtocolError::StaleTarget("target process changed".to_string()))
+    let start_time = parse_process_start_time(&stat)
+        .ok_or_else(|| ProtocolError::StaleTarget("target process changed".to_string()))?;
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|_| ProtocolError::StaleTarget("target process changed".to_string()))?;
+    let boot_id = boot_id.trim();
+    if !valid_boot_id(boot_id) {
+        return Err(ProtocolError::StaleTarget(
+            "target process changed".to_string(),
+        ));
+    }
+    semantic_fingerprint(&(boot_id, start_time))
+        .map_err(|_| ProtocolError::StaleTarget("target process changed".to_string()))
+}
+
+fn valid_boot_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
 }
 
 fn parse_process_start_time(stat: &str) -> Option<&str> {
@@ -2152,6 +2241,10 @@ fn session_type() -> &'static str {
         _ if std::env::var_os("DISPLAY").is_some() => "x11",
         _ => "unknown",
     }
+}
+
+fn display_protocol_permissions(session: &str, native_x11: bool) -> (bool, bool) {
+    (session == "wayland" && !native_x11, native_x11)
 }
 
 fn check_observation_boundary(
@@ -2281,8 +2374,7 @@ mod tests {
     fn proc_stat_start_time_is_field_twenty_two() {
         let process_id = std::process::id();
         let generation = process_generation(process_id).expect("current process generation");
-        assert!(!generation.is_empty());
-        assert!(generation.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(is_hash(&generation));
     }
 
     #[test]
@@ -2292,6 +2384,37 @@ mod tests {
             ("x11", session_type() == "x11"),
         ]);
         assert!(!(permissions["wayland"] && permissions["x11"]));
+    }
+
+    #[test]
+    fn native_x11_server_requires_exact_xorg_executable() {
+        assert!(native_x11_server_executable(Path::new(
+            "/usr/lib/xorg/Xorg"
+        )));
+        assert!(!native_x11_server_executable(Path::new(
+            "/usr/bin/Xwayland"
+        )));
+        assert!(!native_x11_server_executable(Path::new(
+            "/usr/lib/xorg/Xorg.bin"
+        )));
+        assert!(trusted_x11_server_file(0, 0o100755));
+        assert!(!trusted_x11_server_file(1_000, 0o100755));
+        assert!(!trusted_x11_server_file(0, 0o100775));
+        assert!(!trusted_x11_server_file(0, 0o100757));
+    }
+
+    #[test]
+    fn environment_alone_never_advertises_native_x11() {
+        assert_eq!(display_protocol_permissions("x11", false), (false, false));
+        assert_eq!(
+            display_protocol_permissions("unknown", false),
+            (false, false)
+        );
+        assert_eq!(
+            display_protocol_permissions("wayland", false),
+            (true, false)
+        );
+        assert_eq!(display_protocol_permissions("x11", true), (false, true));
     }
 
     #[test]
@@ -2509,6 +2632,8 @@ mod tests {
         let stat =
             "42 (name with ) parenthesis) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 20";
         assert_eq!(parse_process_start_time(stat), Some("123456"));
+        assert!(valid_boot_id("01234567-89ab-cdef-0123-456789abcdef"));
+        assert!(!valid_boot_id("01234567-89ab-cdef-0123-456789abcdeg"));
     }
 
     #[test]

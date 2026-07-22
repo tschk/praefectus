@@ -22,6 +22,7 @@ enum Behavior {
     NoEffect,
     CancelAfterSuccess,
     CancelBeforeEffect,
+    CancelWithNoEffect,
 }
 
 #[derive(Clone)]
@@ -35,7 +36,9 @@ struct MockExecutor {
     wrong_fingerprint: Arc<AtomicBool>,
     context_changed: Arc<AtomicBool>,
     context_unavailable: Arc<AtomicBool>,
+    cancel_during_after_observation: Arc<AtomicBool>,
     capabilities_unavailable: Arc<AtomicBool>,
+    capabilities_cancellation: Arc<Mutex<Option<CancellationToken>>>,
     session_isolation: Arc<Mutex<SessionIsolation>>,
 }
 
@@ -51,7 +54,9 @@ impl MockExecutor {
             wrong_fingerprint: Arc::new(AtomicBool::new(false)),
             context_changed: Arc::new(AtomicBool::new(false)),
             context_unavailable: Arc::new(AtomicBool::new(false)),
+            cancel_during_after_observation: Arc::new(AtomicBool::new(false)),
             capabilities_unavailable: Arc::new(AtomicBool::new(false)),
+            capabilities_cancellation: Arc::new(Mutex::new(None)),
             session_isolation: Arc::new(Mutex::new(SessionIsolation::SharedDesktop)),
         }
     }
@@ -63,6 +68,14 @@ impl Executor for MockExecutor {
     }
 
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        if let Some(cancellation) = self
+            .capabilities_cancellation
+            .lock()
+            .expect("capabilities cancellation lock")
+            .take()
+        {
+            cancellation.cancel();
+        }
         if self.capabilities_unavailable.load(Ordering::SeqCst) {
             return Err(ProtocolError::Executor(
                 "runtime capabilities are unavailable".to_string(),
@@ -131,6 +144,21 @@ impl Executor for MockExecutor {
         })
     }
 
+    fn observe_with_boundary(
+        &self,
+        target: &TargetRef,
+        cancellation: &CancellationToken,
+        _deadline_at_ms: i64,
+    ) -> Result<Observation, ProtocolError> {
+        let observation = self.observe(target)?;
+        if self.cancel_during_after_observation.load(Ordering::SeqCst)
+            && self.dispatches.load(Ordering::SeqCst) > 0
+        {
+            cancellation.cancel();
+        }
+        Ok(observation)
+    }
+
     fn resolve(&self, _target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
         if self.stale.load(Ordering::SeqCst) {
             Err(ProtocolError::StaleTarget("changed".to_string()))
@@ -175,6 +203,14 @@ impl Executor for MockExecutor {
                 Err(DispatchError {
                     message: "cancelled before dispatch".to_string(),
                     effect: EffectKnowledge::CancelledBeforeEffect,
+                    code: FailureCode::DispatchFailed,
+                })
+            }
+            Behavior::CancelWithNoEffect => {
+                cancellation.cancel();
+                Err(DispatchError {
+                    message: "provider stopped before dispatch".to_string(),
+                    effect: EffectKnowledge::NoEffect,
                     code: FailureCode::DispatchFailed,
                 })
             }
@@ -261,6 +297,29 @@ fn authority() -> Ed25519AuthorityVerifier {
         "generation-1".to_string(),
         signing_key().verifying_key(),
     )])
+    .expect("valid authority keyring")
+}
+
+#[test]
+fn authority_keyring_rejects_duplicate_key_ids() {
+    let key = signing_key().verifying_key();
+    assert!(
+        Ed25519AuthorityVerifier::new([
+            (
+                "host-1".to_string(),
+                "key-1".to_string(),
+                "generation-1".to_string(),
+                key,
+            ),
+            (
+                "host-1".to_string(),
+                "key-1".to_string(),
+                "generation-2".to_string(),
+                key,
+            ),
+        ])
+        .is_err()
+    );
 }
 
 fn terminal(report: &praefectus::ExecuteReport) -> &Terminal {
@@ -683,6 +742,28 @@ fn cancellation_after_dispatch_is_outcome_unknown() {
 }
 
 #[test]
+fn cancellation_during_post_dispatch_observation_is_outcome_unknown_without_verification() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    executor
+        .cancel_during_after_observation
+        .store(true, Ordering::SeqCst);
+    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let cancellation = CancellationToken::default();
+    let mut action = request("cancel-during-after-observation");
+    action.verification = VerificationPolicy::None;
+    sign_request(&mut action);
+    let report = engine
+        .execute(&action, &cancellation)
+        .expect("typed result");
+
+    assert!(matches!(
+        terminal(&report),
+        Terminal::OutcomeUnknown { receipt, .. } if receipt.effect == Effect::Unknown
+    ));
+}
+
+#[test]
 fn executor_certified_pre_effect_cancellation_stays_cancelled() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
@@ -691,6 +772,44 @@ fn executor_certified_pre_effect_cancellation_stays_cancelled() {
     let report = engine
         .execute(
             &request("cancel-before-dispatch"),
+            &CancellationToken::default(),
+        )
+        .expect("typed result");
+
+    assert!(matches!(terminal(&report), Terminal::CancelledBeforeEffect));
+}
+
+#[test]
+fn cancellation_during_capability_query_stays_cancelled_before_effect() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let cancellation = CancellationToken::default();
+    *executor
+        .capabilities_cancellation
+        .lock()
+        .expect("capabilities cancellation lock") = Some(cancellation.clone());
+    let engine = Engine::new(
+        executor.clone(),
+        directory.path().join("ledger.jsonl"),
+        authority(),
+    );
+    let report = engine
+        .execute(&request("cancel-capabilities"), &cancellation)
+        .expect("typed result");
+
+    assert!(matches!(terminal(&report), Terminal::CancelledBeforeEffect));
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cancellation_overrides_uncertified_no_effect_dispatch_failure() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    *executor.behavior.lock().expect("behavior lock") = Behavior::CancelWithNoEffect;
+    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let report = engine
+        .execute(
+            &request("cancel-uncertified-no-effect"),
             &CancellationToken::default(),
         )
         .expect("typed result");
@@ -1062,11 +1181,39 @@ fn incomplete_durable_claim_recovers_as_unknown_without_dispatch() {
         recovered.state,
         AckState::Terminal { terminal }
             if matches!(&*terminal, Terminal::OutcomeUnknown { receipt, .. }
-                if receipt.delivery_route == DeliveryRoute::TargetAddressed
+                if receipt.delivery_route == DeliveryRoute::Unknown
                     && receipt.interaction_mode == InteractionMode::BackgroundOnly
                     && receipt.context_preservation == ContextPreservation::Unavailable)
     ));
     assert!(replayed.acknowledgements[0].replayed);
+}
+
+#[test]
+fn target_state_verification_is_bounded_before_hashing() {
+    let mut oversized = request("oversized-verification");
+    oversized.verification = VerificationPolicy::TargetState {
+        expected: serde_json::Value::String("x".repeat(64 * 1024 + 1)),
+    };
+    assert!(normalized_action_hash(&oversized).is_err());
+
+    let mut nested = serde_json::Value::Null;
+    for _ in 0..=32 {
+        nested = serde_json::Value::Array(vec![nested]);
+    }
+    let mut too_deep = request("deep-verification");
+    too_deep.verification = VerificationPolicy::TargetState { expected: nested };
+    assert!(normalized_action_hash(&too_deep).is_err());
+}
+
+#[test]
+fn generic_scroll_delivery_route_is_runtime_defined() {
+    assert_eq!(
+        praefectus::action_delivery_route(&Action::Scroll {
+            direction: Direction::Down,
+            amount: 1,
+        }),
+        DeliveryRoute::Unknown
+    );
 }
 
 #[test]
@@ -1128,7 +1275,7 @@ fn untrusted_authority_is_denied_before_claim() {
     let engine = Engine::new(
         MockExecutor::new(),
         &ledger,
-        Ed25519AuthorityVerifier::new([]),
+        Ed25519AuthorityVerifier::new([]).expect("empty keyring must deny all authority"),
     );
 
     assert!(matches!(
