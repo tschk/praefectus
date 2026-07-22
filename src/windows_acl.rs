@@ -176,18 +176,25 @@ pub(crate) fn available() -> bool {
 }
 
 fn initialize_managed_state() -> io::Result<()> {
-    let _initialization = initialization_lock()?;
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(permission_error)?;
+    let managed = local.join("praefectus");
+    if validate_directory(&managed, true).is_ok() {
+        return Ok(());
+    }
+    let _initialization = initialization_lock()?;
+    if validate_directory(&managed, true).is_ok() {
+        return Ok(());
+    }
     let _guard = PathGuard::lock(&local)?;
     validate_directory(&local, false)?;
-    let managed = local.join("praefectus");
-    match std::fs::create_dir(&managed) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+    match std::fs::symlink_metadata(&managed) {
+        Ok(_) => return validate_directory(&managed, true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    std::fs::create_dir(&managed)?;
     restrict_directory(&managed)
 }
 
