@@ -39,15 +39,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
 
   msrv:
-    name: Rust 1.85 (MSRV)
+    name: Rust 1.87 (MSRV)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.85.0 --profile minimal
-      - run: rustup default 1.85.0
+      - run: rustup toolchain install 1.87.0 --profile minimal
+      - run: rustup default 1.87.0
       - run: cargo check --locked --all-targets --all-features
 
   integrations:
@@ -65,6 +65,8 @@ jobs:
         working-directory: plugins/openclaw
       - run: bun audit
         working-directory: plugins/openclaw
+      - run: bun run licenses
+        working-directory: plugins/openclaw
       - run: bun run format
         working-directory: plugins/openclaw
       - run: bun run lint
@@ -75,10 +77,21 @@ jobs:
         working-directory: plugins/openclaw
       - run: bun run build
         working-directory: plugins/openclaw
-      - run: python3 plugins/hermes/test_plugin.py
+      - run: python3 -m venv "${RUNNER_TEMP}/praefectus-hermes-venv"
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" -m pip install --requirement plugins/hermes/requirements-dev.txt
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" -m ruff format --check plugins/hermes
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" -m ruff check plugins/hermes
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" -m ty check --python-version 3.10 --ignore unresolved-import plugins/hermes
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" plugins/hermes/test_plugin.py
         env:
           PYTHONWARNINGS: error::ResourceWarning
-      - run: python3 -m compileall -q plugins/hermes
+      - run: |
+          "${RUNNER_TEMP}/praefectus-hermes-venv/bin/python" -m compileall -q plugins/hermes
 
   security:
     name: Release sanity
