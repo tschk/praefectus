@@ -2766,6 +2766,7 @@ mod tests {
             executor.channel.lock().expect("channel").methods.clear();
             let request = background_request(operation_id, action, verification);
             let directory = tempfile::tempdir().expect("temporary directory");
+            crate::restrict_directory(directory.path()).expect("restrict temporary directory");
             let engine = Engine::new(
                 executor,
                 directory.path().join("ledger.jsonl"),
@@ -3719,6 +3720,7 @@ mod tests {
             safety: SafetyClass::Reversible,
         };
         let directory = tempfile::tempdir().expect("temporary directory");
+        crate::restrict_directory(directory.path()).expect("restrict temporary directory");
         let report = Engine::new(
             executor,
             directory.path().join("ledger.jsonl"),

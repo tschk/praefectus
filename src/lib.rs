@@ -5956,6 +5956,7 @@ mod tests {
         use std::io::Write;
 
         let directory = tempfile::tempdir().unwrap();
+        super::restrict_directory(directory.path()).unwrap();
         let ledger = OperationLedger::new(directory.path().join("ledger.jsonl"));
         let acknowledgement = ActionAck {
             protocol_version: PROTOCOL_VERSION,
