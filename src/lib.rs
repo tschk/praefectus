@@ -4705,7 +4705,7 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
             .map_or(0, |index| index + 1)
     };
     let mut offset = 0;
-    let mut truncate_at = durable_len;
+    let truncate_at = durable_len;
     while offset < durable_len {
         let end = offset
             + bytes[offset..durable_len]
@@ -4715,13 +4715,9 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
             + 1;
         let line = &bytes[offset..end - 1];
         if !line.iter().all(u8::is_ascii_whitespace) && serde_json::from_slice::<T>(line).is_err() {
-            if end != durable_len {
-                return Err(ProtocolError::InvalidRequest(
-                    invalid_record_message.to_string(),
-                ));
-            }
-            truncate_at = offset;
-            break;
+            return Err(ProtocolError::InvalidRequest(
+                invalid_record_message.to_string(),
+            ));
         }
         offset = end;
     }
@@ -5988,6 +5984,23 @@ mod tests {
             contents
                 .lines()
                 .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+        );
+    }
+
+    #[test]
+    fn terminated_invalid_ledger_tail_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        super::restrict_directory(directory.path()).unwrap();
+        let ledger = OperationLedger::new(directory.path().join("ledger.jsonl"));
+        std::fs::write(&ledger.path, b"{\"kind\":\"claim\"\n").unwrap();
+
+        assert!(matches!(
+            ledger.repair_tail(),
+            Err(super::ProtocolError::InvalidRequest(_))
+        ));
+        assert_eq!(
+            std::fs::read(&ledger.path).unwrap(),
+            b"{\"kind\":\"claim\"\n"
         );
     }
 
