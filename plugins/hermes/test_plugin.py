@@ -151,6 +151,9 @@ def runtime_capabilities(platform="windows"):
     return {
         "platform": platform,
         "backend": backends[platform],
+        "session_isolation": (
+            "host_isolated" if platform == "browser" else "shared_desktop"
+        ),
         "supported_actions": actions,
         "action_capabilities": [
             {
@@ -611,9 +614,12 @@ class PluginTest(unittest.TestCase):
         runtime = runtime_capabilities()
         missing_backend = dict(runtime)
         del missing_backend["backend"]
+        missing_isolation = dict(runtime)
+        del missing_isolation["session_isolation"]
         malicious = [
             {**runtime, "platform": "secret-platform"},
             {**runtime, "backend": "credential-backend"},
+            {**runtime, "session_isolation": "caller_selected"},
             {**runtime, "display_geometry_hash": "A" * 64},
             {
                 **runtime,
@@ -644,6 +650,7 @@ class PluginTest(unittest.TestCase):
             },
             {**runtime, "permissions": {**runtime["permissions"], "accessibility": 1}},
             missing_backend,
+            missing_isolation,
         ]
         linux = runtime_capabilities("linux")
         del linux["permissions"]["x11"]

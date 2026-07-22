@@ -90,6 +90,7 @@ fn success_uses_the_stable_json_envelope() {
         serde_json::from_slice(&output.stdout).expect("JSON success envelope");
     assert_eq!(value["ok"], true);
     assert!(value["data"].is_object());
+    assert_eq!(value["data"]["session_isolation"], "shared_desktop");
 }
 
 #[test]

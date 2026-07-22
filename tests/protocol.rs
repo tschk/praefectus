@@ -84,6 +84,7 @@ impl Executor for MockExecutor {
         Ok(Capabilities {
             platform: "test".to_string(),
             backend: "mock".to_string(),
+            session_isolation: self.session_isolation(),
             supported_actions: vec!["scroll".to_string()],
             action_capabilities: vec![ActionCapability {
                 action: "scroll".to_string(),
@@ -300,6 +301,10 @@ fn authority() -> Ed25519AuthorityVerifier {
     .expect("valid authority keyring")
 }
 
+fn ledger_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    directory.path().join("state").join("ledger.jsonl")
+}
+
 #[test]
 fn authority_keyring_rejects_duplicate_key_ids() {
     let key = signing_key().verifying_key();
@@ -333,11 +338,7 @@ fn terminal(report: &praefectus::ExecuteReport) -> &Terminal {
 fn terminal_replay_does_not_dispatch_twice() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let first = engine
         .execute(&request("replay"), &CancellationToken::default())
         .expect("first execution");
@@ -354,7 +355,7 @@ fn terminal_replay_does_not_dispatch_twice() {
 #[test]
 fn concurrent_engines_dispatch_an_operation_once() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let executor = MockExecutor::new();
     let barrier = Arc::new(Barrier::new(3));
     let handles = (0..2)
@@ -383,7 +384,7 @@ fn concurrent_engines_dispatch_an_operation_once() {
 fn same_id_with_changed_action_conflicts() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     engine
         .execute(&request("conflict"), &CancellationToken::default())
         .expect("first execution");
@@ -404,7 +405,7 @@ fn same_id_with_changed_action_conflicts() {
 fn interaction_mode_is_authority_bound_and_conflicts_on_reuse() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let interactive = request("mode-conflict");
     engine
         .execute(&interactive, &CancellationToken::default())
@@ -430,11 +431,7 @@ fn interaction_mode_is_authority_bound_and_conflicts_on_reuse() {
 fn durable_replay_and_conflict_do_not_depend_on_live_capabilities() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let original = request("capability-replay");
     engine
         .execute(&original, &CancellationToken::default())
@@ -485,11 +482,14 @@ fn unknown_executor_isolation_is_durably_rejected_before_effect() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.session_isolation.lock().expect("isolation lock") = SessionIsolation::Unknown;
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
+    assert_eq!(
+        executor
+            .capabilities()
+            .expect("capabilities")
+            .session_isolation,
+        SessionIsolation::Unknown
     );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let report = engine
         .execute(&request("unknown-isolation"), &CancellationToken::default())
         .expect("durable rejection");
@@ -513,7 +513,7 @@ fn unknown_executor_isolation_is_durably_rejected_before_effect() {
 fn shared_desktop_background_receipt_proves_context_preservation() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let mut request = request("background-preserved");
     request.interaction_mode = InteractionMode::BackgroundOnly;
     sign_request(&mut request);
@@ -543,7 +543,7 @@ fn changed_or_unavailable_shared_context_never_reports_success() {
         .store(true, Ordering::SeqCst);
     let changed_engine = Engine::new(
         changed_executor,
-        changed_directory.path().join("ledger.jsonl"),
+        ledger_path(&changed_directory),
         authority(),
     );
     let mut changed = request("background-changed");
@@ -566,7 +566,7 @@ fn changed_or_unavailable_shared_context_never_reports_success() {
         .store(true, Ordering::SeqCst);
     let unavailable_engine = Engine::new(
         unavailable_executor.clone(),
-        unavailable_directory.path().join("ledger.jsonl"),
+        ledger_path(&unavailable_directory),
         authority(),
     );
     let mut unavailable = request("background-unavailable");
@@ -589,11 +589,7 @@ fn stale_target_fails_before_dispatch() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     executor.stale.store(true, Ordering::SeqCst);
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let report = engine
         .execute(&request("stale"), &CancellationToken::default())
         .expect("typed failure");
@@ -612,11 +608,7 @@ fn stale_target_fails_before_dispatch() {
 fn cancellation_and_timeout_stop_before_effect() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let cancellation = CancellationToken::default();
     cancellation.cancel();
     let cancelled = engine
@@ -642,11 +634,7 @@ fn ambiguous_dispatch_is_outcome_unknown_and_replayable() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.behavior.lock().expect("behavior lock") = Behavior::Ambiguous;
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let first = engine
         .execute(&request("ambiguous"), &CancellationToken::default())
         .expect("ambiguous result");
@@ -663,7 +651,7 @@ fn ambiguous_dispatch_is_outcome_unknown_and_replayable() {
 fn changed_post_action_observation_is_not_effect_verification() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let mut request = request("snapshot-changed");
     request.verification = VerificationPolicy::SnapshotChanged;
     sign_request(&mut request);
@@ -690,7 +678,7 @@ fn matching_state_on_a_replaced_target_is_not_verified() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     executor.changed_fingerprint.store(true, Ordering::SeqCst);
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(&request("replaced-target"), &CancellationToken::default())
         .expect("typed execution");
@@ -703,7 +691,7 @@ fn matching_state_on_an_unrequested_target_is_not_verified() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     executor.wrong_fingerprint.store(true, Ordering::SeqCst);
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(
             &request("unrequested-target"),
@@ -719,7 +707,7 @@ fn known_no_effect_dispatch_failure_is_not_ambiguous() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.behavior.lock().expect("behavior lock") = Behavior::NoEffect;
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(&request("no-effect"), &CancellationToken::default())
         .expect("typed failure");
@@ -732,7 +720,7 @@ fn cancellation_after_dispatch_is_outcome_unknown() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.behavior.lock().expect("behavior lock") = Behavior::CancelAfterSuccess;
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let cancellation = CancellationToken::default();
     let report = engine
         .execute(&request("cancel-after-dispatch"), &cancellation)
@@ -748,7 +736,7 @@ fn cancellation_during_post_dispatch_observation_is_outcome_unknown_without_veri
     executor
         .cancel_during_after_observation
         .store(true, Ordering::SeqCst);
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let cancellation = CancellationToken::default();
     let mut action = request("cancel-during-after-observation");
     action.verification = VerificationPolicy::None;
@@ -768,7 +756,7 @@ fn executor_certified_pre_effect_cancellation_stays_cancelled() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.behavior.lock().expect("behavior lock") = Behavior::CancelBeforeEffect;
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(
             &request("cancel-before-dispatch"),
@@ -788,11 +776,7 @@ fn cancellation_during_capability_query_stays_cancelled_before_effect() {
         .capabilities_cancellation
         .lock()
         .expect("capabilities cancellation lock") = Some(cancellation.clone());
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let report = engine
         .execute(&request("cancel-capabilities"), &cancellation)
         .expect("typed result");
@@ -806,7 +790,7 @@ fn cancellation_overrides_uncertified_no_effect_dispatch_failure() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     *executor.behavior.lock().expect("behavior lock") = Behavior::CancelWithNoEffect;
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(
             &request("cancel-uncertified-no-effect"),
@@ -820,7 +804,7 @@ fn cancellation_overrides_uncertified_no_effect_dispatch_failure() {
 #[test]
 fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let executor = MockExecutor::new();
     let engine = Engine::new(executor.clone(), &ledger, authority());
     let invalid_actions = vec![
@@ -1089,11 +1073,7 @@ fn native_executor_rejects_disabled_element_before_effect() {
 #[test]
 fn nested_protocol_versions_are_strict() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let engine = Engine::new(
-        MockExecutor::new(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
     let mut invalid = request("invalid-version");
     invalid.action_version += 1;
 
@@ -1113,11 +1093,7 @@ fn nested_protocol_versions_are_strict() {
 #[test]
 fn semantic_observation_ids_are_strict_opaque_hashes() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let engine = Engine::new(
-        MockExecutor::new(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
     let mut custom = request("provider-snapshot");
     let mut target = semantic_target();
     target.observation_id = "provider/session snapshot".to_string();
@@ -1155,7 +1131,7 @@ fn newly_created_ledger_directory_is_private() {
 #[test]
 fn incomplete_durable_claim_recovers_as_unknown_without_dispatch() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let executor = MockExecutor::new();
     let engine = Engine::new(executor.clone(), &ledger, authority());
     let mut background = request("recovery");
@@ -1219,7 +1195,10 @@ fn generic_scroll_delivery_route_is_runtime_defined() {
 #[test]
 fn legacy_claim_status_uses_explicit_unknown_receipt_facts() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
+    let setup = Engine::new(MockExecutor::new(), &ledger, authority());
+    assert!(setup.status("missing").expect("private state").is_none());
+    drop(setup);
     fs::write(
         &ledger,
         format!(
@@ -1247,7 +1226,7 @@ fn legacy_claim_status_uses_explicit_unknown_receipt_facts() {
 #[test]
 fn trajectory_redacts_identifiers_and_action_payloads() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let engine = Engine::new(MockExecutor::new(), &ledger, authority());
     let mut sensitive = request("private-operation");
     sensitive.action = Action::TypeText {
@@ -1271,7 +1250,7 @@ fn trajectory_redacts_identifiers_and_action_payloads() {
 #[test]
 fn untrusted_authority_is_denied_before_claim() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let engine = Engine::new(
         MockExecutor::new(),
         &ledger,
@@ -1288,7 +1267,7 @@ fn untrusted_authority_is_denied_before_claim() {
 #[test]
 fn signed_authority_rejects_tampered_bindings_before_claim() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let engine = Engine::new(MockExecutor::new(), &ledger, authority());
     let mut request = request("tampered");
     request.subject = "other-subject".to_string();
@@ -1304,11 +1283,7 @@ fn signed_authority_rejects_tampered_bindings_before_claim() {
 fn expired_signed_authority_is_terminal_before_effect() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
-    let engine = Engine::new(
-        executor.clone(),
-        directory.path().join("ledger.jsonl"),
-        authority(),
-    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
     let mut request = request("expired-authority");
     request.authority.grant.expires_at_ms = 1;
     sign_request(&mut request);
@@ -1326,7 +1301,7 @@ fn failed_requested_verification_is_outcome_unknown() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
     executor.frozen_observation.store(true, Ordering::SeqCst);
-    let engine = Engine::new(executor, directory.path().join("ledger.jsonl"), authority());
+    let engine = Engine::new(executor, ledger_path(&directory), authority());
     let report = engine
         .execute(&request("unverified"), &CancellationToken::default())
         .expect("typed result");
@@ -1337,7 +1312,7 @@ fn failed_requested_verification_is_outcome_unknown() {
 #[test]
 fn torn_terminal_is_repaired_then_recovered_and_replayed() {
     let directory = tempfile::tempdir().expect("temp directory");
-    let ledger = directory.path().join("ledger.jsonl");
+    let ledger = ledger_path(&directory);
     let executor = MockExecutor::new();
     let engine = Engine::new(executor.clone(), &ledger, authority());
     engine

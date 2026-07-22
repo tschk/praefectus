@@ -420,6 +420,7 @@ function redact(
     !hasOnlyKeys(value, [
       "platform",
       "backend",
+      "session_isolation",
       "supported_actions",
       "action_capabilities",
       "permissions",
@@ -427,6 +428,9 @@ function redact(
     ]) ||
     !["macos", "windows", "linux", "browser"].includes(
       String(value.platform),
+    ) ||
+    !["shared_desktop", "host_isolated", "unknown"].includes(
+      String(value.session_isolation),
     ) ||
     ![
       ["macos", "praefectus-macos-ax"],
@@ -525,6 +529,7 @@ function redact(
   return {
     platform: value.platform,
     backend: value.backend,
+    session_isolation: value.session_isolation,
     supported_actions: supportedActions.filter(
       (action) => action === "invoke" || action === "set_value",
     ),

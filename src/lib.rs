@@ -454,6 +454,7 @@ pub struct ExecuteReport {
 pub struct Capabilities {
     pub platform: String,
     pub backend: String,
+    pub session_isolation: SessionIsolation,
     pub supported_actions: Vec<String>,
     pub action_capabilities: Vec<ActionCapability>,
     pub permissions: BTreeMap<String, bool>,
@@ -3818,6 +3819,7 @@ impl Executor for NativeExecutor {
             Ok(Capabilities {
                 platform: "linux".to_string(),
                 backend: "praefectus-atspi2".to_string(),
+                session_isolation: self.session_isolation,
                 action_capabilities: supported_actions
                     .iter()
                     .map(|action| ActionCapability {
@@ -3868,6 +3870,7 @@ impl Executor for NativeExecutor {
             Ok(Capabilities {
                 platform: std::env::consts::OS.to_string(),
                 backend: self.runtime.resolve_backend().to_string(),
+                session_isolation: self.session_isolation,
                 supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
                 action_capabilities,
                 permissions,

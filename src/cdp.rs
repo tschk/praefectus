@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,8 @@ const MAX_CDP_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CDP_MESSAGES_PER_COMMAND: usize = 128;
 const MAX_EDIT_BYTES: usize = 64 * 1024;
 const MAX_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const STABILITY_SAMPLE_DELAY: Duration = Duration::from_millis(16);
+const STABILITY_WAIT_SLICE: Duration = Duration::from_millis(2);
 const STABILITY_TOLERANCE_CSS_PX: f64 = 0.25;
 const SCROLL_DELTA_CSS_PX: i64 = 100;
 const PROBE_FUNCTION: &str = r#"function(){const hash=b=>{let h=[1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225],k=[1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298],n=(b.length+72)&~63,m=new Uint8Array(n),w=new Uint32Array(64);m.set(b);m[b.length]=128;let z=b.length*8;m[n-4]=z>>>24;m[n-3]=z>>>16;m[n-2]=z>>>8;m[n-1]=z;for(let o=0;o<n;o+=64){for(let i=0;i<16;i++)w[i]=(m[o+4*i]<<24|m[o+4*i+1]<<16|m[o+4*i+2]<<8|m[o+4*i+3])>>>0;for(let i=16;i<64;i++){let x=w[i-15],y=w[i-2],a=(x>>>7|x<<25)^(x>>>18|x<<14)^x>>>3,c=(y>>>17|y<<15)^(y>>>19|y<<13)^y>>>10;w[i]=(w[i-16]+a+w[i-7]+c)>>>0}let[a,c,d,e,f,g,j,l]=h;for(let i=0;i<64;i++){let q=(f>>>6|f<<26)^(f>>>11|f<<21)^(f>>>25|f<<7),u=(f&g)^(~f&j),v=(l+q+u+k[i]+w[i])>>>0,x=(a>>>2|a<<30)^(a>>>13|a<<19)^(a>>>22|a<<10),y=(a&c)^(a&d)^(c&d),t=(x+y)>>>0;l=j;j=g;g=f;f=(e+v)>>>0;e=d;d=c;c=a;a=(v+t)>>>0}h=[(h[0]+a)>>>0,(h[1]+c)>>>0,(h[2]+d)>>>0,(h[3]+e)>>>0,(h[4]+f)>>>0,(h[5]+g)>>>0,(h[6]+j)>>>0,(h[7]+l)>>>0]}return h.map(x=>x.toString(16).padStart(8,"0")).join("")},s=getComputedStyle(this),r=this.getBoundingClientRect(),input=this instanceof HTMLInputElement&&["text","search","email","tel","url","password"].includes(this.type),editable=(input||this instanceof HTMLTextAreaElement||this.isContentEditable)&&!this.readOnly,v=input||this instanceof HTMLTextAreaElement?this.value:(this.isContentEditable?this.textContent:null);let valueHash=null,valueLength=null,valueTooLarge=false;if(v!==null){const b=new TextEncoder().encode(v);valueLength=b.length;if(b.length<=65536)valueHash=hash(b);else valueTooLarge=true}return{connected:this.isConnected,visible:s.display!=="none"&&s.visibility!=="hidden"&&s.visibility!=="collapse"&&Number(s.opacity)>0&&r.width>0&&r.height>0,enabled:!this.matches(":disabled"),receives:s.pointerEvents!=="none",editable,active:document.activeElement===this,valueHash,valueLength,valueTooLarge}}"#;
@@ -951,17 +953,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
             cancellation,
             deadline_at_ms,
         )?;
-        self.query_for_effect(
-            "Runtime.evaluate",
-            json!({
-                "expression": "new Promise(r=>requestAnimationFrame(()=>r(true)))",
-                "awaitPromise": true,
-                "returnByValue": true,
-            }),
-            cancellation,
-            deadline_at_ms,
-        )?;
-        check_effect_boundary(cancellation, deadline_at_ms)?;
+        wait_for_stability_sample(cancellation, deadline_at_ms)?;
         let second_box = self.query_for_effect(
             "DOM.getBoxModel",
             json!({"backendNodeId": target.backend_node_id}),
@@ -1265,6 +1257,7 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
         Ok(Capabilities {
             platform: "browser".to_string(),
             backend: BACKEND_NAME.to_string(),
+            session_isolation: self.config.session_isolation,
             supported_actions: if available {
                 vec![
                     "invoke".to_string(),
@@ -2252,6 +2245,27 @@ fn check_effect_boundary(
     }
 }
 
+fn wait_for_stability_sample(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    let started = Instant::now();
+    loop {
+        check_effect_boundary(cancellation, deadline_at_ms)?;
+        let remaining = STABILITY_SAMPLE_DELAY.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        let deadline_remaining_ms = deadline_at_ms.saturating_sub(now_ms());
+        if deadline_remaining_ms <= 0 {
+            return check_effect_boundary(cancellation, deadline_at_ms);
+        }
+        let deadline_remaining =
+            Duration::from_millis(u64::try_from(deadline_remaining_ms).unwrap_or(u64::MAX));
+        std::thread::sleep(remaining.min(STABILITY_WAIT_SLICE).min(deadline_remaining));
+    }
+}
+
 fn check_after_effect_boundary(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
@@ -2569,7 +2583,6 @@ mod tests {
             Ok(json!({"object":{"objectId":"object-1"}})),
             Ok(scroll_probe(true)),
             Ok(json!({"model":{"border":[10,10,30,10,30,30,10,30]}})),
-            Ok(json!({"result":{"value":true}})),
             Ok(json!({"model":{"border":[10,10,30,10,30,30,10,30]}})),
             Ok(viewport()),
             Ok(json!({"backendNodeId":hit_backend_node_id})),
@@ -2818,6 +2831,13 @@ mod tests {
         };
         let executor = CdpExecutor::new(isolated, channel).expect("isolated executor");
         assert_eq!(executor.session_isolation(), SessionIsolation::HostIsolated);
+        assert_eq!(
+            executor
+                .capabilities()
+                .expect("capabilities")
+                .session_isolation,
+            SessionIsolation::HostIsolated
+        );
     }
 
     #[test]
@@ -3387,6 +3407,57 @@ mod tests {
             effect.pointer("/arguments/1/value").and_then(Value::as_i64),
             Some(100)
         );
+        assert_eq!(
+            channel
+                .parameters
+                .iter()
+                .filter(|parameters| parameters
+                    .get("functionDeclaration")
+                    .and_then(Value::as_str)
+                    == Some(SCROLL_EFFECT_FUNCTION))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scroll_stability_sampling_uses_no_page_timing_command() {
+        let (executor, resolved) = resolved_scroll();
+        let mut channel = executor.channel.lock().expect("channel");
+        channel.responses.extend(scroll_pre_effect_responses(
+            7,
+            live_ax("list", "Feed", false, json!({})),
+        ));
+        channel
+            .responses
+            .push_back(Ok(scroll_effect_result(true, 0.0, 100.0, 100.0)));
+        drop(channel);
+
+        executor
+            .dispatch(
+                &Action::Scroll {
+                    direction: Direction::Down,
+                    amount: 1,
+                },
+                &resolved,
+                &VerificationPolicy::None,
+                &CancellationToken::default(),
+                i64::MAX,
+            )
+            .expect("scroll");
+        let channel = executor.channel.lock().expect("channel");
+        assert!(
+            !channel
+                .methods
+                .iter()
+                .any(|method| method == "Runtime.evaluate")
+        );
+        assert!(!channel.parameters.iter().any(|parameters| {
+            parameters
+                .get("expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| expression.contains("requestAnimationFrame"))
+        }));
     }
 
     #[test]

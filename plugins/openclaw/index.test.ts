@@ -96,6 +96,7 @@ function windowsCapabilities() {
   return {
     platform: "windows",
     backend: "praefectus-windows-uia",
+    session_isolation: "shared_desktop",
     supported_actions: ["invoke", "set_value", "scroll"],
     action_capabilities: [
       {
@@ -128,6 +129,7 @@ function cdpCapabilities() {
   return {
     platform: "browser",
     backend: "praefectus-chromium-cdp",
+    session_isolation: "host_isolated",
     supported_actions: ["invoke", "scroll", "set_value"],
     action_capabilities: [
       {
@@ -355,6 +357,7 @@ describe("Praefectus OpenClaw tools", () => {
     expect(output.details).toEqual({
       platform: "windows",
       backend: "praefectus-windows-uia",
+      session_isolation: "shared_desktop",
       supported_actions: ["invoke", "set_value"],
       action_capabilities: [
         {
@@ -397,9 +400,11 @@ describe("Praefectus OpenClaw tools", () => {
   test("rejects malformed or secret-bearing capability metadata", async () => {
     const base = windowsCapabilities();
     const { backend: _, ...missingBackend } = base;
+    const { session_isolation: __, ...missingIsolation } = base;
     for (const childOutput of [
       { ...base, platform: "secret-platform" },
       { ...base, backend: "credential-backend" },
+      { ...base, session_isolation: "caller_selected" },
       { ...base, display_geometry_hash: "not-a-hash" },
       { ...base, display_geometry_hash: "A".repeat(64) },
       { ...base, permissions: { ...base.permissions, token_secret: true } },
@@ -427,6 +432,7 @@ describe("Praefectus OpenClaw tools", () => {
         supported_actions: ["credential_backend"],
       },
       missingBackend,
+      missingIsolation,
     ]) {
       const capabilities = tools({}, async () => childOutput).find(
         (tool) => tool.name === "praefectus_capabilities",
@@ -474,6 +480,7 @@ describe("Praefectus OpenClaw tools", () => {
       {
         platform: "macos",
         backend: "praefectus-macos-ax",
+        session_isolation: "shared_desktop",
         supported_actions: [],
         action_capabilities: [],
         permissions: {
@@ -487,6 +494,7 @@ describe("Praefectus OpenClaw tools", () => {
       {
         platform: "linux",
         backend: "praefectus-atspi2",
+        session_isolation: "shared_desktop",
         supported_actions: [],
         action_capabilities: [],
         permissions: {

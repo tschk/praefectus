@@ -605,6 +605,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     if set(result) != {
         "platform",
         "backend",
+        "session_isolation",
         "supported_actions",
         "action_capabilities",
         "permissions",
@@ -613,6 +614,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         return {"error": {"code": "praefectus_error"}}
     platform = result.get("platform")
     backend = result.get("backend")
+    session_isolation = result.get("session_isolation")
     display_geometry_hash = result.get("display_geometry_hash")
     supported_actions = result.get("supported_actions")
     action_capabilities = result.get("action_capabilities")
@@ -639,6 +641,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     if (
         not isinstance(platform, str)
         or pairs.get(platform) != backend
+        or session_isolation not in ("shared_desktop", "host_isolated", "unknown")
         or not isinstance(display_geometry_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", display_geometry_hash) is None
         or not isinstance(supported_actions, list)
@@ -679,6 +682,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     return {
         "platform": platform,
         "backend": backend,
+        "session_isolation": session_isolation,
         "supported_actions": [
             action for action in supported_actions if action in ("invoke", "set_value")
         ],
