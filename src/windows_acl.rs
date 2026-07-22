@@ -25,7 +25,7 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileRenameInfo, GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL,
@@ -269,7 +269,7 @@ fn owner_acl(user: &CurrentUser, directory: bool) -> io::Result<LocalAllocation>
         ACE_FLAGS(0)
     };
     let access = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: GENERIC_ALL.0,
+        grfAccessPermissions: FILE_ALL_ACCESS.0,
         grfAccessMode: SET_ACCESS,
         grfInheritance: inheritance,
         Trustee: TRUSTEE_W {
@@ -400,7 +400,7 @@ fn validate_descriptor(
     let ace = unsafe { ptr::read_unaligned(raw_ace.cast::<ACCESS_ALLOWED_ACE>()) };
     let sid = PSID(unsafe { raw_ace.cast::<u8>().add(sid_offset).cast() });
     if u32::from(ace.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-        || ace.Mask & GENERIC_ALL.0 != GENERIC_ALL.0
+        || ace.Mask & FILE_ALL_ACCESS.0 != FILE_ALL_ACCESS.0
         || !bounded_valid_sid(sid, raw_ace.cast(), ace_len)
         || unsafe { EqualSid(sid, user.sid) }.is_err()
     {
