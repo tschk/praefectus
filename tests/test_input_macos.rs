@@ -10,11 +10,15 @@ mod mac_tests {
     fn post_key(code: u16, flags: u64) {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let down = CGEvent::new_keyboard_event(source.clone(), code, true).unwrap();
-        down.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(flags));
+        down.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
+            flags,
+        ));
         down.post(CGEventTapLocation::HID);
         let source_up = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let up = CGEvent::new_keyboard_event(source_up, code, false).unwrap();
-        up.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(flags));
+        up.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
+            flags,
+        ));
         up.post(CGEventTapLocation::HID);
     }
 
@@ -22,7 +26,9 @@ mod mac_tests {
     fn move_cursor_to_corner() {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let pos = CGPoint::new(200.0, 200.0);
-        let event = CGEvent::new_mouse_event(source, CGEventType::MouseMoved, pos, CGMouseButton::Left).unwrap();
+        let event =
+            CGEvent::new_mouse_event(source, CGEventType::MouseMoved, pos, CGMouseButton::Left)
+                .unwrap();
         event.post(CGEventTapLocation::HID);
         eprintln!("moved cursor to (200, 200)");
     }
@@ -31,7 +37,11 @@ mod mac_tests {
     fn type_hello_world() {
         // Type "hello" — key codes: h=0x04, e=0x0E, l=0x25, l=0x25, o=0x1F
         let codes: &[(u16, char)] = &[
-            (0x04, 'h'), (0x0E, 'e'), (0x25, 'l'), (0x25, 'l'), (0x1F, 'o'),
+            (0x04, 'h'),
+            (0x0E, 'e'),
+            (0x25, 'l'),
+            (0x25, 'l'),
+            (0x1F, 'o'),
         ];
         for &(code, ch) in codes {
             post_key(code, 0);
@@ -83,15 +93,12 @@ mod mac_tests {
         let source_ptr: *mut core_graphics::sys::CGEventSource =
             unsafe { std::mem::transmute_copy(&source) };
         let raw = unsafe {
-            CGEventCreateScrollWheelEvent(
-                source_ptr.cast(),
-                K_CGSCROLL_EVENT_UNIT_LINE,
-                2,
-                -3,
-                0,
-            )
+            CGEventCreateScrollWheelEvent(source_ptr.cast(), K_CGSCROLL_EVENT_UNIT_LINE, 2, -3, 0)
         };
-        assert!(!raw.is_null(), "CGEventCreateScrollWheelEvent returned null");
+        assert!(
+            !raw.is_null(),
+            "CGEventCreateScrollWheelEvent returned null"
+        );
         unsafe { CGEventPost(K_CGHID_EVENT_TAP, raw) };
         eprintln!("scrolled down 3 lines");
     }
@@ -100,9 +107,17 @@ mod mac_tests {
     fn left_click() {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let pos = CGPoint::new(300.0, 300.0);
-        let down = CGEvent::new_mouse_event(source.clone(), CGEventType::LeftMouseDown, pos, CGMouseButton::Left).unwrap();
+        let down = CGEvent::new_mouse_event(
+            source.clone(),
+            CGEventType::LeftMouseDown,
+            pos,
+            CGMouseButton::Left,
+        )
+        .unwrap();
         down.post(CGEventTapLocation::HID);
-        let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, pos, CGMouseButton::Left).unwrap();
+        let up =
+            CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, pos, CGMouseButton::Left)
+                .unwrap();
         up.post(CGEventTapLocation::HID);
         eprintln!("left-clicked at (300, 300)");
     }
