@@ -1022,10 +1022,10 @@ impl NativeRuntime {
                 })
                 .ok_or(NativeError)?;
             for i in 0.._count {
-                if i > 0 {
-                    if let Some(delay) = _delay_ms {
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                    }
+                if i > 0
+                    && let Some(delay) = _delay_ms
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
                 }
                 let _ = mac_post_key(code, 0);
             }
@@ -5009,10 +5009,10 @@ impl Executor for NativeExecutor {
                     self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
-                    if index + 1 < *count {
-                        if let Some(delay) = delay_ms {
-                            std::thread::sleep(std::time::Duration::from_millis(*delay));
-                        }
+                    if index + 1 < *count
+                        && let Some(delay) = delay_ms
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(*delay));
                     }
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
@@ -5548,16 +5548,15 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
 }
 
 fn persistence_unknown_ack(mut acknowledgement: ActionAck) -> ActionAck {
-    if let AckState::Terminal { terminal } = &mut acknowledgement.state {
-        if matches!(&**terminal, Terminal::Succeeded { .. }) {
-            let previous = std::mem::replace(&mut **terminal, Terminal::CancelledBeforeEffect);
-            if let Terminal::Succeeded { receipt } = previous {
-                **terminal = Terminal::OutcomeUnknown {
-                    receipt,
-                    message: "action completed but terminal receipt durability is unknown"
-                        .to_string(),
-                };
-            }
+    if let AckState::Terminal { terminal } = &mut acknowledgement.state
+        && matches!(&**terminal, Terminal::Succeeded { .. })
+    {
+        let previous = std::mem::replace(&mut **terminal, Terminal::CancelledBeforeEffect);
+        if let Terminal::Succeeded { receipt } = previous {
+            **terminal = Terminal::OutcomeUnknown {
+                receipt,
+                message: "action completed but terminal receipt durability is unknown".to_string(),
+            };
         }
     }
     acknowledgement
@@ -6792,10 +6791,10 @@ mod tests {
                 if matches!(&**terminal, Terminal::OutcomeUnknown { receipt, .. }
                     if receipt.effect == Effect::Verified)
         ));
-        if let AckState::Terminal { terminal } = &mut settled.state {
-            if let Terminal::OutcomeUnknown { message, .. } = &mut **terminal {
-                *message = "classified outcome is unknown".to_string();
-            }
+        if let AckState::Terminal { terminal } = &mut settled.state
+            && let Terminal::OutcomeUnknown { message, .. } = &mut **terminal
+        {
+            *message = "classified outcome is unknown".to_string();
         }
         let settled = ledger.finish_after_effect(settled);
         assert!(matches!(

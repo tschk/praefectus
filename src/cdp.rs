@@ -2196,10 +2196,10 @@ fn redacted_probe(mut value: Value, protected: bool) -> Value {
             ("valueLength", "value_length"),
             ("valueTooLarge", "value_too_large"),
         ] {
-            if let Some(field) = object.remove(from) {
-                if !protected {
-                    object.insert(to.to_string(), field);
-                }
+            if let Some(field) = object.remove(from)
+                && !protected
+            {
+                object.insert(to.to_string(), field);
             }
         }
     }
