@@ -6,7 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::ConnectionExt as _;
-use x11rb::protocol::xtest::XTestExtension;
+use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use crate::{Direction, MouseButton, NativeError, NativePoint};
