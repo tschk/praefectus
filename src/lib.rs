@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
