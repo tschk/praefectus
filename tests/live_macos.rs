@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// End-to-end test: open TextEdit, type text via CGEvent, verify it appears.
