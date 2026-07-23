@@ -1044,8 +1044,8 @@ impl NativeRuntime {
         #[cfg(windows)]
         {
             use windows::Win32::System::DataExchange::*;
-            use windows::Win32::UI::Clipboard::*;
             use windows::Win32::System::Memory::*;
+            use windows::Win32::UI::Clipboard::*;
             use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
             let wide: Vec<u16> = _text.encode_utf16().chain(std::iter::once(0)).collect();
