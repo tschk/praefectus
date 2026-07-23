@@ -6537,8 +6537,8 @@ mod tests {
         FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
         NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
         SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, default_ledger_path, native_snapshot_id,
-        target_capture_bounds, validate_matching_live_element, verify,
+        canonical_authority_bytes, default_ledger_path, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
 
     #[test]
