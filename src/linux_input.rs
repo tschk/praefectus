@@ -1,4 +1,3 @@
-use std::io::Read as _;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -112,10 +111,11 @@ fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<Stri
     if status != 0 {
         return Err(NativeError);
     }
+    let body = reply.body();
     let (_, results): (
         u32,
         std::collections::HashMap<String, zbus::zvariant::Value>,
-    ) = reply.body().deserialize().map_err(|_| NativeError)?;
+    ) = body.deserialize().map_err(|_| NativeError)?;
     let handle = results.get("session_handle").ok_or(NativeError)?;
     if let zbus::zvariant::Value::Str(s) = handle {
         Ok(s.to_string())
