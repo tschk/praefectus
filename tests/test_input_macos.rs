@@ -1,6 +1,5 @@
 /// Direct CGEvent input test — bypasses protocol, exercises the actual input code.
 /// This is what the native_* functions in lib.rs use under the hood.
-
 #[cfg(target_os = "macos")]
 mod mac_tests {
     use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
