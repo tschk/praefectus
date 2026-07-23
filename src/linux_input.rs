@@ -117,8 +117,11 @@ fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<Stri
         std::collections::HashMap<String, zbus::zvariant::Value>,
     ) = reply.body().deserialize().map_err(|_| NativeError)?;
     let handle = results.get("session_handle").ok_or(NativeError)?;
-    let handle = handle.downcast_ref::<str>().ok_or(NativeError)?;
-    Ok(handle.to_string())
+    if let zbus::zvariant::Value::Str(s) = handle {
+        Ok(s.to_string())
+    } else {
+        Err(NativeError)
+    }
 }
 
 fn portal_authorize(
