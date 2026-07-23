@@ -13,8 +13,6 @@ use crate::{Direction, MouseButton, NativeError, NativePoint};
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const PORTAL_RD_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
-const PORTAL_SS_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
-const PORTAL_APP_ID: &str = "praefectus";
 
 static PORTAL_SESSION: Mutex<Option<(String, zbus::blocking::Connection)>> = Mutex::new(None);
 
