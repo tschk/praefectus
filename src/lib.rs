@@ -6523,9 +6523,22 @@ mod tests {
         FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
         NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
         SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        canonical_authority_bytes, default_ledger_path, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element, verify,
     };
+
+    #[test]
+    fn test_default_ledger_path() {
+        let path = default_ledger_path();
+        assert!(path.ends_with("praefectus-operations.jsonl"));
+
+        #[cfg(windows)]
+        {
+            // On Windows, the path should contain "praefectus" before the filename
+            let parent = path.parent().unwrap();
+            assert_eq!(parent.file_name().unwrap(), "praefectus");
+        }
+    }
 
     #[test]
     fn authority_bytes_have_stable_key_order() {
