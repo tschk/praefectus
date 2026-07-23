@@ -2098,20 +2098,20 @@ fn parse_ax_tree(
 
     let selected_ids = selected
         .iter()
-        .map(|(raw_id, ..)| raw_id.clone())
+        .map(|(raw_id, ..)| raw_id.as_str())
         .collect::<BTreeSet<_>>();
     let mut opaque_ids = BTreeMap::new();
     for (raw_id, backend_node_id, ..) in &selected {
         let element_id = opaque_element_id(observation_id, &backend_node_id.to_string())
             .map_err(|_| CdpError::Protocol)?;
-        opaque_ids.insert(raw_id.clone(), element_id);
+        opaque_ids.insert(raw_id.as_str(), element_id);
     }
 
     let mut elements = Vec::with_capacity(selected.len());
     let mut nodes = BTreeMap::new();
-    for (index, (raw_id, backend_node_id, semantics)) in selected.into_iter().enumerate() {
-        let mut parent = parents.get(&raw_id).map(String::as_str);
-        while parent.is_some_and(|id| !selected_ids.contains(id)) {
+    for (index, (raw_id, backend_node_id, semantics)) in selected.iter().enumerate() {
+        let mut parent = parents.get(raw_id).map(String::as_str);
+        while parent.is_some_and(|id| !selected_ids.contains(&id)) {
             parent = parent.and_then(|id| parents.get(id).map(String::as_str));
         }
         let parent_id = parent.and_then(|id| opaque_ids.get(id)).cloned();
@@ -2121,7 +2121,7 @@ fn parse_ax_tree(
             .ok_or(CdpError::Protocol)?;
         let fingerprint_hash = semantic_fingerprint(&(
             document_id,
-            backend_node_id,
+            *backend_node_id,
             semantics.role.as_str(),
             semantics.name.as_deref(),
         ))
@@ -2147,7 +2147,7 @@ fn parse_ax_tree(
         nodes.insert(
             element_id,
             CdpNode {
-                backend_node_id,
+                backend_node_id: *backend_node_id,
                 protected: semantics.protected,
                 element: element.clone(),
             },
