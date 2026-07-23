@@ -96,10 +96,8 @@ fn portal_connection() -> Result<zbus::blocking::Connection, NativeError> {
 }
 
 fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<String, NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     let reply = connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -127,12 +125,10 @@ fn portal_authorize(
     connection: &zbus::blocking::Connection,
     session_handle: &str,
 ) -> Result<(), NativeError> {
-    let mut options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let mut options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     let types = zbus::zvariant::Value::U32(1 | 2);
-    options.insert("types", types).map_err(|_| NativeError)?;
+    options.insert("types".to_string(), types);
     let reply = connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -153,10 +149,8 @@ fn portal_start(
     connection: &zbus::blocking::Connection,
     session_handle: &str,
 ) -> Result<(), NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     let reply = connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -193,10 +187,8 @@ fn portal_notify_pointer_motion(
     dx: f64,
     dy: f64,
 ) -> Result<(), NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -215,10 +207,8 @@ fn portal_notify_pointer_button(
     button: u32,
     state: u32,
 ) -> Result<(), NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -237,10 +227,8 @@ fn portal_notify_pointer_axis(
     dx: f64,
     dy: f64,
 ) -> Result<(), NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     connection
         .call_method(
             Some(PORTAL_DESTINATION),
@@ -259,10 +247,8 @@ fn portal_notify_keyboard_keysym(
     keysym: u32,
     state: u32,
 ) -> Result<(), NativeError> {
-    let options = zbus::zvariant::Dict::new(
-        zbus::zvariant::Signature::Str,
-        zbus::zvariant::Signature::Variant,
-    );
+    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+        std::collections::HashMap::new();
     connection
         .call_method(
             Some(PORTAL_DESTINATION),
