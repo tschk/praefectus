@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -232,6 +233,42 @@ pub enum Action {
     SetValue {
         value: String,
     },
+    Screenshot {
+        path: PathBuf,
+    },
+    Application {
+        operation: ApplicationOperation,
+        name: String,
+    },
+    Window {
+        operation: WindowOperation,
+        app: Option<String>,
+        title: Option<String>,
+    },
+    Open {
+        target: String,
+        app: Option<String>,
+        no_focus: bool,
+    },
+    ClipboardWrite {
+        text: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationOperation {
+    Launch,
+    Switch,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowOperation {
+    Focus,
+    Close,
+    Minimize,
 }
 
 impl std::fmt::Debug for Action {
@@ -286,6 +323,31 @@ impl std::fmt::Debug for Action {
                 .debug_struct("SetValue")
                 .field("value", &"[redacted]")
                 .finish(),
+            Self::Screenshot { path } => formatter
+                .debug_struct("Screenshot")
+                .field("path", path)
+                .finish(),
+            Self::Application { operation, .. } => formatter
+                .debug_struct("Application")
+                .field("operation", operation)
+                .field("name", &"[redacted]")
+                .finish(),
+            Self::Window { operation, .. } => formatter
+                .debug_struct("Window")
+                .field("operation", operation)
+                .field("app", &"[redacted]")
+                .field("title", &"[redacted]")
+                .finish(),
+            Self::Open { no_focus, .. } => formatter
+                .debug_struct("Open")
+                .field("target", &"[redacted]")
+                .field("app", &"[redacted]")
+                .field("no_focus", no_focus)
+                .finish(),
+            Self::ClipboardWrite { .. } => formatter
+                .debug_struct("ClipboardWrite")
+                .field("text", &"[redacted]")
+                .finish(),
         }
     }
 }
@@ -302,6 +364,11 @@ impl Action {
             Self::Scroll { .. } => "scroll",
             Self::Move => "move",
             Self::SetValue { .. } => "set_value",
+            Self::Screenshot { .. } => "screenshot",
+            Self::Application { .. } => "application",
+            Self::Window { .. } => "window",
+            Self::Open { .. } => "open",
+            Self::ClipboardWrite { .. } => "clipboard_write",
         }
     }
 }
@@ -309,6 +376,11 @@ impl Action {
 pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
     match action {
         Action::Invoke | Action::SetValue { .. } => DeliveryRoute::TargetAddressed,
+        Action::Screenshot { .. }
+        | Action::Application { .. }
+        | Action::Window { .. }
+        | Action::Open { .. }
+        | Action::ClipboardWrite { .. } => DeliveryRoute::Pointer,
         Action::Scroll { .. } => DeliveryRoute::Unknown,
         _ => DeliveryRoute::Pointer,
     }
@@ -2308,6 +2380,11 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
     match action {
         Action::Invoke => base && actionability.invokable,
         Action::SetValue { .. } => base && actionability.editable,
+        Action::TypeText { .. }
+        | Action::Press { .. }
+        | Action::Paste { .. }
+        | Action::Hotkey { .. }
+        | Action::Scroll { .. } => base,
         _ => false,
     }
 }
@@ -4215,6 +4292,25 @@ impl NativeExecutor {
             if !mac_actionability_matches_observation(action, &actionability, &live_actionability) {
                 return Err(no_effect("semantic target actionability changed"));
             }
+            if matches!(
+                action,
+                Action::TypeText { .. }
+                    | Action::Press { .. }
+                    | Action::Paste { .. }
+                    | Action::Hotkey { .. }
+                    | Action::Scroll { .. }
+            ) {
+                if native.state.get("focused").and_then(Value::as_bool) != Some(true) {
+                    return Err(no_effect("semantic target is not focused"));
+                }
+                return self.dispatch(
+                    action,
+                    &ResolvedTarget::Element(Box::new(native)),
+                    &VerificationPolicy::None,
+                    cancellation,
+                    deadline_at_ms,
+                );
+            }
             match action {
                 Action::Invoke => {
                     Self::check_before_effect(cancellation, deadline_at_ms)?;
@@ -4277,19 +4373,63 @@ impl NativeExecutor {
                         .map_err(|_| unsupported("accessibility backend is unavailable"))?,
                 );
             }
-            let backend = backend
+            let backend_ref = backend
                 .as_ref()
                 .ok_or_else(|| unsupported("accessibility backend is unavailable"))?;
+            if matches!(
+                action,
+                Action::TypeText { .. }
+                    | Action::Press { .. }
+                    | Action::Paste { .. }
+                    | Action::Hotkey { .. }
+                    | Action::Scroll { .. }
+            ) {
+                let focused = backend_ref
+                    .focused_target(cancellation, deadline_at_ms)
+                    .map_err(|_| no_effect("focused target changed"))?;
+                if focused != *target {
+                    return Err(no_effect("semantic target is not focused"));
+                }
+                drop(backend);
+                return self.dispatch(
+                    action,
+                    &ResolvedTarget::Point(NativePoint { x: 0, y: 0 }),
+                    &VerificationPolicy::None,
+                    cancellation,
+                    deadline_at_ms,
+                );
+            }
             return match action {
-                Action::Invoke => backend.semantic_invoke(target, cancellation, deadline_at_ms),
+                Action::Invoke => backend_ref.semantic_invoke(target, cancellation, deadline_at_ms),
                 Action::SetValue { value } => {
-                    backend.semantic_set_value(target, value, cancellation, deadline_at_ms)
+                    backend_ref.semantic_set_value(target, value, cancellation, deadline_at_ms)
                 }
                 _ => Err(unsupported("semantic action is unavailable")),
             };
         }
         #[cfg(target_os = "windows")]
         {
+            if matches!(
+                action,
+                Action::TypeText { .. }
+                    | Action::Press { .. }
+                    | Action::Paste { .. }
+                    | Action::Hotkey { .. }
+                    | Action::Scroll { .. }
+            ) {
+                let focused = windows_uia::focused_target(cancellation, deadline_at_ms)
+                    .map_err(|_| no_effect("focused target changed"))?;
+                if focused != *target {
+                    return Err(no_effect("semantic target is not focused"));
+                }
+                return self.dispatch(
+                    action,
+                    &ResolvedTarget::Point(NativePoint { x: 0, y: 0 }),
+                    &VerificationPolicy::None,
+                    cancellation,
+                    deadline_at_ms,
+                );
+            }
             return match action {
                 Action::Invoke => windows_uia::invoke(target, cancellation, deadline_at_ms),
                 Action::SetValue { value } => {
@@ -4307,6 +4447,158 @@ impl NativeExecutor {
             let _ = (action, target, cancellation, deadline_at_ms);
             Err(unsupported("semantic action is unavailable"))
         }
+    }
+
+    fn dispatch_auxiliary(
+        &self,
+        action: &Action,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Option<DispatchReceipt>, DispatchError> {
+        let status = match action {
+            Action::Screenshot { path } => {
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                #[cfg(target_os = "macos")]
+                {
+                    Command::new("screencapture")
+                        .arg("-x")
+                        .arg(path)
+                        .status()
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(unsupported("screenshot is unavailable on this backend"));
+            }
+            Action::Application { operation, name } => {
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                #[cfg(target_os = "macos")]
+                {
+                    match operation {
+                        ApplicationOperation::Launch | ApplicationOperation::Switch => {
+                            Command::new("open")
+                                .args(["-a", name])
+                                .status()
+                                .map_err(|_| ambiguous("desktop action dispatch failed"))?
+                        }
+                        ApplicationOperation::Quit => Command::new("osascript")
+                            .args([
+                                "-e",
+                                "on run argv",
+                                "-e",
+                                "tell application (item 1 of argv) to quit",
+                                "-e",
+                                "end run",
+                                name,
+                            ])
+                            .status()
+                            .map_err(|_| ambiguous("desktop action dispatch failed"))?,
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(unsupported(
+                    "application actions are unavailable on this backend",
+                ));
+            }
+            Action::Window {
+                operation,
+                app,
+                title,
+            } => {
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                #[cfg(target_os = "macos")]
+                {
+                    let script = match operation {
+                        WindowOperation::Focus => "set frontmost to true",
+                        WindowOperation::Close => {
+                            "click button 1 of first window whose name is windowName"
+                        }
+                        WindowOperation::Minimize => {
+                            "set value of attribute \"AXMinimized\" of first window whose name is windowName to true"
+                        }
+                    };
+                    Command::new("osascript")
+                        .args([
+                            "-e",
+                            "on run argv",
+                            "-e",
+                            "set appName to item 1 of argv",
+                            "-e",
+                            "set windowName to item 2 of argv",
+                            "-e",
+                            "tell application \"System Events\" to tell process appName",
+                            "-e",
+                            script,
+                            "-e",
+                            "end tell",
+                            "-e",
+                            "end run",
+                            app.as_deref().unwrap_or(""),
+                            title.as_deref().unwrap_or(""),
+                        ])
+                        .status()
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(unsupported(
+                    "window actions are unavailable on this backend",
+                ));
+            }
+            Action::Open {
+                target,
+                app,
+                no_focus,
+            } => {
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                #[cfg(target_os = "macos")]
+                {
+                    let mut command = Command::new("open");
+                    if let Some(app) = app {
+                        command.args(["-a", app]);
+                    }
+                    if *no_focus {
+                        command.arg("-g");
+                    }
+                    command
+                        .arg(target)
+                        .status()
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(unsupported("open is unavailable on this backend"));
+            }
+            Action::ClipboardWrite { text } => {
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                #[cfg(target_os = "macos")]
+                {
+                    let mut child = Command::new("pbcopy")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?;
+                    child
+                        .stdin
+                        .take()
+                        .ok_or_else(|| ambiguous("clipboard dispatch failed"))?
+                        .write_all(text.as_bytes())
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?;
+                    child
+                        .wait()
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(unsupported(
+                    "clipboard actions are unavailable on this backend",
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if !status.success() {
+            return Err(ambiguous("desktop action outcome is unknown"));
+        }
+        Self::check_after_effect(cancellation, deadline_at_ms)?;
+        Ok(Some(DispatchReceipt {
+            backend: self.runtime.resolve_backend().to_string(),
+            fallback_chain: Vec::new(),
+        }))
     }
 
     pub fn observe_semantic(
@@ -4364,6 +4656,84 @@ impl NativeExecutor {
         ))
     }
 
+    pub fn observe_focused(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<semantic::SemanticTargetRef, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mut backend = self
+                .linux_atspi
+                .lock()
+                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
+            if backend.is_none() {
+                *backend = Some(linux_atspi::LinuxAtspiBackend::connect()?);
+            }
+            return backend
+                .as_mut()
+                .ok_or_else(|| ProtocolError::Executor("desktop backend error".to_string()))?
+                .focused_target(cancellation, deadline_at_ms);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use accessibility_sys::{
+                AXUIElementCreateApplication, AXUIElementGetPid, kAXErrorSuccess,
+            };
+
+            let observation = self.observe_semantic(cancellation, deadline_at_ms)?;
+            let window = mac_frontmost_window(cancellation, deadline_at_ms)
+                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
+            let mut process_id = 0;
+            if unsafe { AXUIElementGetPid(window.0, &mut process_id) } != kAXErrorSuccess
+                || process_id <= 0
+            {
+                return Err(ProtocolError::Executor("desktop backend error".to_string()));
+            }
+            let application =
+                AxElement::created(unsafe { AXUIElementCreateApplication(process_id) })
+                    .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
+            let focused = application.element("AXFocusedUIElement").map_err(|_| {
+                ProtocolError::TargetNotFound("focused target not found".to_string())
+            })?;
+            let native = mac_native_element(&focused, cancellation, deadline_at_ms)
+                .map_err(|_| ProtocolError::StaleTarget("focused target changed".to_string()))?;
+            let backend_id_hash = hash_bytes(native.id.as_bytes());
+            let fingerprint_hash = element_fingerprint_hash(&ElementFingerprint::from(&native))?;
+            let records: ElementObservations =
+                load_private_observation(&observation.observation_id)?;
+            let mut matches = records.elements.into_iter().filter(|record| {
+                record.backend_id_hash == backend_id_hash
+                    && record.element_fingerprint_hash == fingerprint_hash
+            });
+            let target = matches
+                .next()
+                .ok_or_else(|| {
+                    ProtocolError::TargetNotFound("focused target not found".to_string())
+                })?
+                .target;
+            if matches.next().is_some() {
+                return Err(ProtocolError::StaleTarget(
+                    "focused target is ambiguous".to_string(),
+                ));
+            }
+            observation
+                .resolve(&target, now_ms())
+                .map_err(semantic_protocol_error)?;
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            return Ok(target);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return windows_uia::focused_target(cancellation, deadline_at_ms);
+        }
+        #[allow(unreachable_code)]
+        Err(ProtocolError::Executor(
+            "focused observation is unavailable".to_string(),
+        ))
+    }
+
     #[cfg(target_os = "macos")]
     fn resolve_recorded_element(
         &self,
@@ -4414,6 +4784,89 @@ impl NativeExecutor {
         };
         persist_coordinate_observation(&observation)?;
         Ok(observation)
+    }
+
+    pub fn list_applications(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Value, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        #[cfg(target_os = "macos")]
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to get name of every application process whose background only is false",
+            ])
+            .output()?;
+        #[cfg(not(target_os = "macos"))]
+        return Err(ProtocolError::Executor(
+            "application enumeration is unavailable".to_string(),
+        ));
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        if !output.status.success() {
+            return Err(ProtocolError::Executor(
+                "application enumeration failed".to_string(),
+            ));
+        }
+        Ok(Value::Array(
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .split(", ")
+                .filter(|name| !name.is_empty())
+                .map(|name| Value::String(name.to_string()))
+                .collect(),
+        ))
+    }
+
+    pub fn list_windows(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Value, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        Ok(serde_json::to_value(
+            self.list_surfaces(cancellation, deadline_at_ms)?,
+        )?)
+    }
+
+    pub fn clipboard_read(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<String, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        #[cfg(target_os = "macos")]
+        let output = Command::new("pbpaste").output()?;
+        #[cfg(not(target_os = "macos"))]
+        return Err(ProtocolError::Executor(
+            "clipboard observation is unavailable".to_string(),
+        ));
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        if !output.status.success() || output.stdout.len() > 1024 * 1024 {
+            return Err(ProtocolError::Executor(
+                "clipboard observation failed".to_string(),
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|_| ProtocolError::Executor("clipboard is not UTF-8 text".to_string()))
+    }
+
+    pub fn doctor(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Value, ProtocolError> {
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        let capabilities = self.capabilities()?;
+        check_protocol_boundary(cancellation, deadline_at_ms)?;
+        Ok(serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "platform": capabilities.platform,
+            "backend": capabilities.backend,
+            "permissions": capabilities.permissions,
+            "supported_actions": capabilities.supported_actions,
+        }))
     }
 
     fn check_before_effect(
@@ -4673,6 +5126,20 @@ impl Executor for NativeExecutor {
                     "scroll",
                 ]);
             }
+            #[cfg(target_os = "macos")]
+            if private_state {
+                supported_actions.extend(["application", "open", "clipboard_write"]);
+                if accessibility {
+                    supported_actions.push("window");
+                }
+                if permissions
+                    .get("screen_recording")
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    supported_actions.push("screenshot");
+                }
+            }
             let action_capabilities = supported_actions
                 .iter()
                 .map(|action| ActionCapability {
@@ -4889,6 +5356,9 @@ impl Executor for NativeExecutor {
     ) -> Result<DispatchReceipt, DispatchError> {
         Self::check_before_effect(cancellation, deadline_at_ms)?;
         validate_action(action).map_err(|_| no_effect("action parameters are invalid"))?;
+        if let Some(receipt) = self.dispatch_auxiliary(action, cancellation, deadline_at_ms)? {
+            return Ok(receipt);
+        }
         if matches!(action, Action::SetValue { .. })
             && !matches!(verification, VerificationPolicy::TargetValueHash { .. })
         {
@@ -4900,11 +5370,7 @@ impl Executor for NativeExecutor {
             return self.dispatch_semantic(action, target, cancellation, deadline_at_ms);
         }
         match target {
-            ResolvedTarget::Point(_) => {
-                return Err(unsupported(
-                    "coordinate effects require artifact-bound observation provenance",
-                ));
-            }
+            ResolvedTarget::Point(_) => {}
             ResolvedTarget::None => return Err(no_effect("action requires a fenced target")),
             ResolvedTarget::Element(element) => validate_live_element(element)
                 .map_err(|_| no_effect("semantic target is unavailable"))?,
@@ -5086,6 +5552,13 @@ impl Executor for NativeExecutor {
                         fallback_chain: Vec::new(),
                     }
                 });
+            }
+            Action::Screenshot { .. }
+            | Action::Application { .. }
+            | Action::Window { .. }
+            | Action::Open { .. }
+            | Action::ClipboardWrite { .. } => {
+                unreachable!("auxiliary action handled above")
             }
         };
         result.map_err(|error| DispatchError {
@@ -5597,17 +6070,35 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
-    if matches!(request.target, TargetRef::None) {
+    let auxiliary = matches!(
+        request.action,
+        Action::Screenshot { .. }
+            | Action::Application { .. }
+            | Action::Window { .. }
+            | Action::Open { .. }
+            | Action::ClipboardWrite { .. }
+    );
+    if matches!(request.target, TargetRef::None) && !auxiliary {
         return Err(ProtocolError::InvalidRequest(
             "action requires a target".to_string(),
         ));
     }
-    if matches!(request.target, TargetRef::Coordinates { .. }) {
+    if auxiliary
+        && (!matches!(request.target, TargetRef::None)
+            || !matches!(request.verification, VerificationPolicy::None))
+    {
         return Err(ProtocolError::InvalidRequest(
-            "coordinate targets require artifact-bound observation provenance".to_string(),
+            "desktop action requires no target and no target verification".to_string(),
         ));
     }
     validate_action(&request.action)?;
+    if matches!(request.target, TargetRef::Coordinates { .. })
+        && !matches!(request.action, Action::Click { .. } | Action::Move)
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "coordinate targets support only click and move".to_string(),
+        ));
+    }
     validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
@@ -5701,6 +6192,33 @@ fn validate_action(action: &Action) -> Result<(), ProtocolError> {
         Action::Scroll { amount, .. } => (1..=100).contains(amount),
         Action::Move => true,
         Action::SetValue { value } => value.len() <= 16 * 1024,
+        Action::Screenshot { path } => {
+            path.is_absolute()
+                && path.file_name().is_some()
+                && path.extension().and_then(|value| value.to_str()) == Some("png")
+                && path.parent().is_some_and(Path::is_dir)
+        }
+        Action::Application { name, .. } => !name.is_empty() && name.len() <= 256,
+        Action::Window {
+            operation,
+            app,
+            title,
+        } => {
+            app.as_ref()
+                .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+                && title
+                    .as_ref()
+                    .is_none_or(|value| !value.is_empty() && value.len() <= 1024)
+                && (matches!(operation, WindowOperation::Focus) || title.is_some())
+        }
+        Action::Open { target, app, .. } => {
+            !target.is_empty()
+                && target.len() <= 16 * 1024
+                && app
+                    .as_ref()
+                    .is_none_or(|value| !value.is_empty() && value.len() <= 256)
+        }
+        Action::ClipboardWrite { text } => text.len() <= 1024 * 1024,
     };
     if valid {
         Ok(())
@@ -6518,7 +7036,9 @@ fn now_ms() -> i64 {
 
 #[cfg(not(windows))]
 pub fn default_ledger_path() -> PathBuf {
-    Path::new("praefectus-operations.jsonl").to_path_buf()
+    observation_root()
+        .join("praefectus")
+        .join("praefectus-operations.jsonl")
 }
 
 #[cfg(windows)]
@@ -6546,6 +7066,12 @@ mod tests {
     fn test_default_ledger_path() {
         let path = default_ledger_path();
         assert!(path.ends_with("praefectus-operations.jsonl"));
+
+        #[cfg(not(windows))]
+        assert_eq!(
+            path.parent().and_then(|parent| parent.file_name()),
+            Some("praefectus".as_ref())
+        );
 
         #[cfg(windows)]
         {

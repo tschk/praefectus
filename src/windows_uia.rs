@@ -492,6 +492,39 @@ pub(crate) fn snapshot(
     )
 }
 
+pub(crate) fn focused_target(
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<SemanticTargetRef, ProtocolError> {
+    let observation = snapshot(cancellation, deadline_at_ms)?;
+    let automation = Automation::new(provider_timeout(deadline_at_ms))
+        .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
+    check_observation_boundary(cancellation, deadline_at_ms)?;
+    let focused = unsafe { automation.client.GetFocusedElement() }
+        .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
+    let state = describe(&automation.client, &focused, cancellation, deadline_at_ms)?;
+    let element_id = opaque_element_id(
+        &observation.observation_id,
+        &runtime_id_text(&state.runtime_id),
+    )
+    .map_err(|_| ProtocolError::StaleTarget("focused target changed".to_string()))?;
+    let fingerprint_hash = fingerprint(&state)?;
+    let mut matches = observation.elements.iter().filter(|element| {
+        element.element_id == element_id && element.fingerprint_hash == fingerprint_hash
+    });
+    let element = matches
+        .next()
+        .ok_or_else(|| ProtocolError::TargetNotFound("focused target not found".to_string()))?;
+    if matches.next().is_some() {
+        return Err(ProtocolError::StaleTarget(
+            "focused target is ambiguous".to_string(),
+        ));
+    }
+    observation
+        .target(&element.tag)
+        .map_err(|_| ProtocolError::StaleTarget("focused target changed".to_string()))
+}
+
 fn snapshot_window(
     record: SurfaceRecord,
     cancellation: &CancellationToken,

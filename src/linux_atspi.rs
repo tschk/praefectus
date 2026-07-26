@@ -257,6 +257,26 @@ impl StoredSnapshot {
     }
 }
 
+fn focused_element_id(
+    stored: &StoredSnapshot,
+    focused: &StoredObject,
+) -> Result<String, ProtocolError> {
+    let expected = opaque_element_id(&stored.observation.observation_id, &focused.id()?)
+        .map_err(semantic_error)?;
+    let mut matches = stored
+        .targets
+        .iter()
+        .filter(|(element_id, target)| **element_id == expected && target.object == *focused);
+    let element_id = matches
+        .next()
+        .map(|(element_id, _)| element_id.clone())
+        .ok_or_else(desktop_state_unavailable)?;
+    if matches.next().is_some() {
+        return Err(desktop_state_unavailable());
+    }
+    Ok(element_id)
+}
+
 impl X11TopologyWorker {
     fn spawn() -> Result<Self, ProtocolError> {
         let (requests, receiver) = mpsc::sync_channel::<X11Request>(1);
@@ -721,6 +741,62 @@ impl LinuxAtspiBackend {
         let display_geometry_hash = self.display_geometry_hash()?;
         let window = self.active_window(cancellation, deadline_at_ms)?;
         self.snapshot_window(window, display_geometry_hash, cancellation, deadline_at_ms)
+    }
+
+    pub fn focused_target(
+        &self,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<SemanticTargetRef, ProtocolError> {
+        check_observation_boundary(cancellation, deadline_at_ms)?;
+        let topology = self
+            .topology
+            .as_ref()
+            .ok_or_else(desktop_state_unavailable)?;
+        let x11 = topology.desktop_sentinel()?;
+        let focus = self.accessibility_focus_sentinel(&x11, cancellation, deadline_at_ms)?;
+        let display_geometry_hash = self.display_geometry_hash()?;
+        let mut windows = self
+            .windows(cancellation, deadline_at_ms)?
+            .into_iter()
+            .filter(|window| window.object == focus.window);
+        let window = windows.next().ok_or_else(desktop_state_unavailable)?;
+        if windows.next().is_some()
+            || window.process_id != focus.process_id
+            || window.process_generation != focus.process_generation
+        {
+            return Err(desktop_state_unavailable());
+        }
+        let observation =
+            self.snapshot_window(window, display_geometry_hash, cancellation, deadline_at_ms)?;
+        let stored = self
+            .latest
+            .lock()
+            .map_err(|_| desktop_state_unavailable())?
+            .clone()
+            .ok_or_else(desktop_state_unavailable)?;
+        let element_id = focused_element_id(&stored, &focus.focused)?;
+        let element = observation
+            .elements
+            .iter()
+            .find(|element| element.element_id == element_id)
+            .ok_or_else(desktop_state_unavailable)?;
+        let target = SemanticTargetRef {
+            observation_id: observation.observation_id.clone(),
+            generation: observation.generation,
+            provenance_hash: observation.provenance_hash().map_err(semantic_error)?,
+            element_id,
+            fingerprint_hash: element.fingerprint_hash.clone(),
+        };
+        if self.accessibility_focus_sentinel(&x11, cancellation, deadline_at_ms)? != focus
+            || topology.desktop_sentinel()? != x11
+        {
+            return Err(desktop_state_unavailable());
+        }
+        observation
+            .resolve(&target, now_ms())
+            .map_err(semantic_error)?;
+        Ok(target)
     }
 
     pub fn list_surfaces(
@@ -2550,6 +2626,58 @@ mod tests {
         assert!(!active_window_state(StateSet::new(
             State::Active | State::Visible | State::Showing | State::Iconified
         )));
+    }
+
+    #[test]
+    fn focused_target_requires_exact_persisted_object_mapping() {
+        let focused = StoredObject {
+            bus_name: ":1.42".to_string(),
+            path: "/org/a11y/atspi/accessible/2".to_string(),
+        };
+        let observation_id = crate::hash_bytes(b"observation");
+        let element_id =
+            opaque_element_id(&observation_id, &focused.id().expect("object id")).expect("element");
+        let stored = StoredSnapshot {
+            protocol_version: PROTOCOL_VERSION,
+            observation: SemanticObservation {
+                protocol_version: PROTOCOL_VERSION,
+                observation_id,
+                generation: 1,
+                provenance: SemanticProvenance {
+                    backend: SemanticBackend::Accessibility,
+                    backend_name: BACKEND.to_string(),
+                    process_id: 42,
+                    process_generation: crate::hash_bytes(b"process"),
+                    window_id: crate::hash_bytes(b"window"),
+                    document_id: None,
+                    display_geometry_hash: crate::hash_bytes(b"display"),
+                },
+                observed_at_ms: 1,
+                expires_at_ms: 2,
+                truncated: false,
+                elements: Vec::new(),
+            },
+            targets: BTreeMap::from([(
+                element_id.clone(),
+                StoredTarget {
+                    object: focused.clone(),
+                    invoke_action: None,
+                },
+            )]),
+            window: focused.clone(),
+            window_fingerprint_hash: crate::hash_bytes(b"fingerprint"),
+            process_id: 42,
+            process_generation: crate::hash_bytes(b"process"),
+        };
+        assert_eq!(
+            focused_element_id(&stored, &focused).expect("focused target"),
+            element_id
+        );
+        let missing = StoredObject {
+            bus_name: ":1.42".to_string(),
+            path: "/org/a11y/atspi/accessible/3".to_string(),
+        };
+        assert!(focused_element_id(&stored, &missing).is_err());
     }
 
     #[test]

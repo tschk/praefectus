@@ -1,6 +1,6 @@
 # Praefectus
 
-Praefectus 0.3 implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
+Praefectus 0.4.1 implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
 
 The protocol provides durable at-most-once dispatch. Desktop and browser APIs are not transactional, so a crash, cancellation, or verification failure after dispatch can produce `outcome_unknown`; Praefectus never reports those cases as safely cancelled or retries them automatically.
 
@@ -34,7 +34,7 @@ On a shared native desktop, only target-addressed accessibility actions are back
 
 Strong noninterference requires a host-owned isolated desktop, browser profile/process, session, container, or virtual machine. `host_isolated` records that trusted executor configuration; Praefectus does not create or coordinate those environments. CDP invoke, scroll, and value actions are background-capable only under that isolation contract. This follows the common split in the reviewed systems: exact semantic or protocol-addressed delivery can avoid activation, while dependable concurrent pointer input requires a separately owned environment.
 
-Protocol v2 does not accept coordinate action targets, and the native and CDP backends do not capture or return screenshots. Screenshot bytes never enter requests, receipts, ledgers, trajectories, or plugin results. External visual artifacts remain host-owned and are represented, when needed outside the execution path, by bounded locators and hashes rather than embedded images.
+Protocol v2 accepts native coordinate targets only from a current `NativeExecutor::observe_coordinates` record whose display geometry and screen-content hashes still match. The native and CDP backends do not return screenshot bytes. Screenshot bytes never enter requests, receipts, ledgers, trajectories, or plugin results.
 
 ## Protocol guarantees
 
@@ -42,7 +42,7 @@ Protocol v2 does not accept coordinate action targets, and the native and CDP ba
 - Same operation ID and action hash replays the stored terminal result.
 - Same operation ID with a different hash is rejected as a conflict.
 - A durable claim without a terminal result becomes `outcome_unknown` on recovery.
-- Every effect requires an observation-fenced semantic element target; unfenced and coordinate targets fail before authority consumption.
+- Every effect requires an observation-fenced semantic element or native coordinate target; unfenced targets fail before authority consumption.
 - Cached element targets are rejected when their live process, process generation, window, display, provenance, observation generation, or element fingerprint is stale.
 - Cancellation and deadlines are checked before every effect and between repeated or chunked operations.
 - Receipts contain hashes and backend metadata, not screenshot or action content.

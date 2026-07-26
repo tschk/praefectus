@@ -51,7 +51,7 @@ mod native_input_tests {
             .dispatch(
                 &praefectus::Action::Move,
                 &target,
-                &VerificationPolicy::None,
+                &VerificationPolicy::SnapshotChanged,
                 &CancellationToken::default(),
                 now_ms() + 5000,
             )
@@ -67,7 +67,7 @@ mod native_input_tests {
                     allow_coordinate_fallback: false,
                 },
                 &target,
-                &VerificationPolicy::None,
+                &VerificationPolicy::SnapshotChanged,
                 &CancellationToken::default(),
                 now_ms() + 5000,
             )

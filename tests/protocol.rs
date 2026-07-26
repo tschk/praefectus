@@ -6,13 +6,13 @@ use std::sync::{Arc, Barrier, Mutex};
 use ed25519_dalek::{Signer, SigningKey};
 use praefectus::semantic::SemanticTargetRef;
 use praefectus::{
-    AckState, Action, ActionCapability, ActionRequest, AuthorityGrant, BackgroundSupport,
-    CancellationToken, Capabilities, ContextPreservation, DeliveryRoute, Direction, DispatchError,
-    DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge, Engine, Evidence, Executor,
-    FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
-    NativePoint, Observation, PROTOCOL_VERSION, ProtocolError, ResolvedTarget, SafetyClass,
-    SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-    normalized_action_hash,
+    AckState, Action, ActionCapability, ActionRequest, ApplicationOperation, AuthorityGrant,
+    BackgroundSupport, CancellationToken, Capabilities, ContextPreservation, DeliveryRoute,
+    Direction, DispatchError, DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge,
+    Engine, Evidence, Executor, FailureCode, InteractionMode, MouseButton, NativeBounds,
+    NativeElement, NativeExecutor, NativePoint, Observation, PROTOCOL_VERSION, ProtocolError,
+    ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
+    VerificationPolicy, WindowOperation, normalized_action_hash,
 };
 
 #[derive(Clone, Copy)]
@@ -940,20 +940,6 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
             Err(ProtocolError::InvalidRequest(_))
         ));
     }
-    let mut coordinate = request("unfenced-coordinate");
-    coordinate.target = TargetRef::Coordinates {
-        x: 1,
-        y: 1,
-        display_id: "display-1".to_string(),
-        display_geometry_hash: "0".repeat(64),
-        snapshot_id: "snapshot-1".to_string(),
-        snapshot_content_hash: "0".repeat(64),
-    };
-    sign_request(&mut coordinate);
-    assert!(matches!(
-        engine.execute(&coordinate, &CancellationToken::default()),
-        Err(ProtocolError::InvalidRequest(_))
-    ));
     let mut unknown_mode = request("unknown-interaction-mode");
     unknown_mode.interaction_mode = InteractionMode::Unknown;
     sign_request(&mut unknown_mode);
@@ -1006,7 +992,7 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
 }
 
 #[test]
-fn native_executor_rejects_coordinate_effects() {
+fn native_executor_routes_coordinate_effects() {
     let executor = NativeExecutor::default();
     let capabilities = executor.capabilities().expect("capabilities");
     assert!(
@@ -1027,9 +1013,9 @@ fn native_executor_rejects_coordinate_effects() {
             &CancellationToken::default(),
             i64::MAX,
         )
-        .expect_err("coordinate effect");
-    assert_eq!(error.effect, EffectKnowledge::NoEffect);
-    assert!(matches!(error.code, FailureCode::Unsupported));
+        .expect_err("unverifiable coordinate effect");
+    assert_eq!(error.effect, EffectKnowledge::Unknown);
+    assert!(matches!(error.code, FailureCode::DispatchFailed));
 }
 
 #[test]
@@ -1342,4 +1328,73 @@ fn torn_terminal_is_repaired_then_recovered_and_replayed() {
     ));
     assert!(replayed.acknowledgements[0].replayed);
     assert!(engine.status("torn").expect("status").is_some());
+}
+
+#[test]
+fn auxiliary_actions_are_bound_to_signed_targetless_operations() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
+    for (index, action) in [
+        Action::Screenshot {
+            path: directory.path().join("screen.png"),
+        },
+        Action::Application {
+            operation: ApplicationOperation::Launch,
+            name: "TextEdit".to_string(),
+        },
+        Action::Window {
+            operation: WindowOperation::Focus,
+            app: Some("TextEdit".to_string()),
+            title: None,
+        },
+        Action::Open {
+            target: "https://example.com".to_string(),
+            app: None,
+            no_focus: true,
+        },
+        Action::ClipboardWrite {
+            text: "value".to_string(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut request = request(&format!("auxiliary-{index}"));
+        request.action = action;
+        request.target = TargetRef::None;
+        request.verification = VerificationPolicy::None;
+        sign_request(&mut request);
+        let report = engine
+            .execute(&request, &CancellationToken::default())
+            .expect("durable auxiliary result");
+        assert!(matches!(
+            terminal(&report),
+            Terminal::Rejected {
+                code: FailureCode::Unsupported,
+                ..
+            }
+        ));
+        assert!(
+            engine
+                .status(&request.operation_id)
+                .expect("status")
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn auxiliary_actions_reject_fenced_targets() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
+    let mut request = request("auxiliary-target");
+    request.action = Action::ClipboardWrite {
+        text: "value".to_string(),
+    };
+    sign_request(&mut request);
+
+    assert!(matches!(
+        engine.execute(&request, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
 }
