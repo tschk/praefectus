@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -4449,13 +4450,14 @@ impl NativeExecutor {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn dispatch_auxiliary(
         &self,
         action: &Action,
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<Option<DispatchReceipt>, DispatchError> {
-        let status = match action {
+        let status: std::process::ExitStatus = match action {
             Action::Screenshot { path } => {
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
                 #[cfg(target_os = "macos")]
@@ -4599,6 +4601,25 @@ impl NativeExecutor {
             backend: self.runtime.resolve_backend().to_string(),
             fallback_chain: Vec::new(),
         }))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn dispatch_auxiliary(
+        &self,
+        action: &Action,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<Option<DispatchReceipt>, DispatchError> {
+        let message = match action {
+            Action::Screenshot { .. } => "screenshot is unavailable on this backend",
+            Action::Application { .. } => "application actions are unavailable on this backend",
+            Action::Window { .. } => "window actions are unavailable on this backend",
+            Action::Open { .. } => "open is unavailable on this backend",
+            Action::ClipboardWrite { .. } => "clipboard actions are unavailable on this backend",
+            _ => return Ok(None),
+        };
+        Self::check_before_effect(cancellation, deadline_at_ms)?;
+        Err(unsupported(message))
     }
 
     pub fn observe_semantic(
@@ -4793,29 +4814,31 @@ impl NativeExecutor {
     ) -> Result<Value, ProtocolError> {
         check_protocol_boundary(cancellation, deadline_at_ms)?;
         #[cfg(target_os = "macos")]
-        let output = Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to get name of every application process whose background only is false",
-            ])
-            .output()?;
-        #[cfg(not(target_os = "macos"))]
-        return Err(ProtocolError::Executor(
-            "application enumeration is unavailable".to_string(),
-        ));
-        check_protocol_boundary(cancellation, deadline_at_ms)?;
-        if !output.status.success() {
-            return Err(ProtocolError::Executor(
-                "application enumeration failed".to_string(),
+        {
+            let output = Command::new("osascript")
+                .args([
+                    "-e",
+                    "tell application \"System Events\" to get name of every application process whose background only is false",
+                ])
+                .output()?;
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            if !output.status.success() {
+                return Err(ProtocolError::Executor(
+                    "application enumeration failed".to_string(),
+                ));
+            }
+            return Ok(Value::Array(
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .split(", ")
+                    .filter(|name| !name.is_empty())
+                    .map(|name| Value::String(name.to_string()))
+                    .collect(),
             ));
         }
-        Ok(Value::Array(
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .split(", ")
-                .filter(|name| !name.is_empty())
-                .map(|name| Value::String(name.to_string()))
-                .collect(),
+        #[cfg(not(target_os = "macos"))]
+        Err(ProtocolError::Executor(
+            "application enumeration is unavailable".to_string(),
         ))
     }
 
@@ -4837,19 +4860,21 @@ impl NativeExecutor {
     ) -> Result<String, ProtocolError> {
         check_protocol_boundary(cancellation, deadline_at_ms)?;
         #[cfg(target_os = "macos")]
-        let output = Command::new("pbpaste").output()?;
-        #[cfg(not(target_os = "macos"))]
-        return Err(ProtocolError::Executor(
-            "clipboard observation is unavailable".to_string(),
-        ));
-        check_protocol_boundary(cancellation, deadline_at_ms)?;
-        if !output.status.success() || output.stdout.len() > 1024 * 1024 {
-            return Err(ProtocolError::Executor(
-                "clipboard observation failed".to_string(),
-            ));
+        {
+            let output = Command::new("pbpaste").output()?;
+            check_protocol_boundary(cancellation, deadline_at_ms)?;
+            if !output.status.success() || output.stdout.len() > 1024 * 1024 {
+                return Err(ProtocolError::Executor(
+                    "clipboard observation failed".to_string(),
+                ));
+            }
+            return String::from_utf8(output.stdout)
+                .map_err(|_| ProtocolError::Executor("clipboard is not UTF-8 text".to_string()));
         }
-        String::from_utf8(output.stdout)
-            .map_err(|_| ProtocolError::Executor("clipboard is not UTF-8 text".to_string()))
+        #[cfg(not(target_os = "macos"))]
+        Err(ProtocolError::Executor(
+            "clipboard observation is unavailable".to_string(),
+        ))
     }
 
     pub fn doctor(
