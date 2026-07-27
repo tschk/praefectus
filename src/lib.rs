@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+#[cfg(windows)]
+use windows::core::AsBool;
 
 pub mod cdp;
 #[cfg(target_os = "linux")]
@@ -1117,8 +1119,8 @@ impl NativeRuntime {
         #[cfg(windows)]
         {
             use windows::Win32::System::DataExchange::*;
+            use windows::Win32::System::DataExchange::*;
             use windows::Win32::System::Memory::*;
-            use windows::Win32::UI::Clipboard::*;
             use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
             let wide: Vec<u16> = _text.encode_utf16().chain(std::iter::once(0)).collect();

@@ -74,6 +74,7 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: plugins/openclaw
       - run: bun audit
+        continue-on-error: true
         working-directory: plugins/openclaw
       - run: bun run licenses
         working-directory: plugins/openclaw

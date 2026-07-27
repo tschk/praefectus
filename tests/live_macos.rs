@@ -6,6 +6,7 @@ mod live_macos_tests {
     /// This exercises the full native input path.
 
     #[test]
+    #[ignore = "requires macOS accessibility permissions and a running UI"]
     fn mac_e2e_type_text_in_textedit() {
         // Check accessibility permission first
         let caps_output = Command::new(env!("CARGO_BIN_EXE_praefectus"))
