@@ -4989,7 +4989,17 @@ impl NativeExecutor {
 #[cfg(target_os = "macos")]
 fn macos_semantic_actions(accessibility: bool) -> Vec<&'static str> {
     if accessibility {
-        vec!["invoke", "set_value"]
+        vec![
+            "invoke",
+            "set_value",
+            "click",
+            "type_text",
+            "press",
+            "paste",
+            "hotkey",
+            "move",
+            "scroll",
+        ]
     } else {
         Vec::new()
     }
@@ -7091,9 +7101,22 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_semantic_actions_require_accessibility_not_private_state() {
+    fn macos_public_input_actions_require_accessibility_not_private_state() {
         assert!(macos_semantic_actions(false).is_empty());
-        assert_eq!(macos_semantic_actions(true), vec!["invoke", "set_value"]);
+        assert_eq!(
+            macos_semantic_actions(true),
+            vec![
+                "invoke",
+                "set_value",
+                "click",
+                "type_text",
+                "press",
+                "paste",
+                "hotkey",
+                "move",
+                "scroll",
+            ]
+        );
     }
 
     #[test]

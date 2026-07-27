@@ -607,6 +607,21 @@ class PluginTest(unittest.TestCase):
             },
         )
 
+    def test_macos_capabilities_expose_public_accessibility_input_actions(self):
+        runtime = runtime_capabilities("macos")
+        runtime["supported_actions"] = [
+            "invoke", "set_value", "click", "type_text", "press", "paste", "hotkey", "move", "scroll"
+        ]
+        runtime["action_capabilities"] = [
+            {
+                "action": action,
+                "delivery_route": "target_addressed" if action in ("invoke", "set_value", "scroll") else "pointer",
+                "background_support": "guarded" if action in ("invoke", "set_value", "scroll") else "unavailable",
+            }
+            for action in runtime["supported_actions"]
+        ]
+        self.assertEqual(plugin._redact(runtime), runtime)
+
     def test_capabilities_reject_mismatched_background_facts(self):
         runtime = runtime_capabilities()
         for facts in (

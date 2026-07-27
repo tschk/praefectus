@@ -645,11 +645,11 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         or not isinstance(display_geometry_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", display_geometry_hash) is None
         or not isinstance(supported_actions, list)
-        or len(supported_actions) > 4
+        or len(supported_actions) > 9
         or not all(isinstance(action, str) for action in supported_actions)
         or len(supported_actions) != len(set(supported_actions))
         or not isinstance(action_capabilities, list)
-        or len(action_capabilities) > 4
+        or len(action_capabilities) > 9
         or not isinstance(permissions, dict)
         or not all(isinstance(allowed, bool) for allowed in permissions.values())
         or set(permissions) not in permission_shapes.get(platform, ())
@@ -663,17 +663,56 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     allowed_actions = (
         {"invoke", "scroll", "set_value"}
         if platform in ("windows", "browser")
-        else {"invoke", "set_value"}
+        else (
+            {
+                "invoke",
+                "set_value",
+                "click",
+                "type_text",
+                "press",
+                "paste",
+                "hotkey",
+                "move",
+                "scroll",
+            }
+            if platform == "macos"
+            else {"invoke", "set_value"}
+        )
     )
+    macos_action_facts = {
+        "invoke": ("target_addressed", "guarded"),
+        "set_value": ("target_addressed", "guarded"),
+        "scroll": ("target_addressed", "guarded"),
+        "click": ("pointer", "unavailable"),
+        "type_text": ("pointer", "unavailable"),
+        "press": ("pointer", "unavailable"),
+        "paste": ("pointer", "unavailable"),
+        "hotkey": ("pointer", "unavailable"),
+        "move": ("pointer", "unavailable"),
+    }
     background_support = "host_isolated_only" if platform == "browser" else "guarded"
     facts = []
     for fact in action_capabilities:
+        expected_fact = None
+        if platform == "macos" and isinstance(fact, dict):
+            action = fact.get("action")
+            if isinstance(action, str):
+                expected_fact = macos_action_facts.get(action)
         if (
             not isinstance(fact, dict)
             or set(fact) != {"action", "delivery_route", "background_support"}
             or fact.get("action") not in allowed_actions
-            or fact.get("delivery_route") != "target_addressed"
-            or fact.get("background_support") != background_support
+            or (
+                expected_fact is not None
+                and (fact.get("delivery_route"), fact.get("background_support")) != expected_fact
+            )
+            or (
+                expected_fact is None
+                and (
+                    fact.get("delivery_route") != "target_addressed"
+                    or fact.get("background_support") != background_support
+                )
+            )
         ):
             return {"error": {"code": "praefectus_error"}}
         facts.append(fact["action"])
@@ -688,14 +727,20 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         "platform": platform,
         "backend": backend,
         "session_isolation": session_isolation,
-        "supported_actions": [
-            action for action in supported_actions if action in ("invoke", "set_value")
-        ],
-        "action_capabilities": [
-            fact
-            for fact in action_capabilities
-            if fact["action"] in ("invoke", "set_value")
-        ],
+        "supported_actions": (
+            supported_actions
+            if platform == "macos"
+            else [action for action in supported_actions if action in ("invoke", "set_value")]
+        ),
+        "action_capabilities": (
+            action_capabilities
+            if platform == "macos"
+            else [
+                fact
+                for fact in action_capabilities
+                if fact["action"] in ("invoke", "set_value")
+            ]
+        ),
         "permissions": permissions,
         "display_geometry_hash": display_geometry_hash,
     }
