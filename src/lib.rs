@@ -4986,6 +4986,15 @@ impl NativeExecutor {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_semantic_actions(accessibility: bool) -> Vec<&'static str> {
+    if accessibility {
+        vec!["invoke", "set_value"]
+    } else {
+        Vec::new()
+    }
+}
+
 impl Executor for NativeExecutor {
     fn session_isolation(&self) -> SessionIsolation {
         self.session_isolation
@@ -5138,33 +5147,24 @@ impl Executor for NativeExecutor {
                 .list_screens()
                 .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
             let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let private_state = permissions.get("private_state").copied().unwrap_or(false);
             let mut supported_actions = Vec::new();
-            if accessibility && private_state {
-                supported_actions.extend([
-                    "invoke",
-                    "set_value",
-                    "click",
-                    "type_text",
-                    "press",
-                    "paste",
-                    "hotkey",
-                    "move",
-                    "scroll",
-                ]);
-            }
             #[cfg(target_os = "macos")]
-            if private_state {
-                supported_actions.extend(["application", "open", "clipboard_write"]);
-                if accessibility {
-                    supported_actions.push("window");
-                }
-                if permissions
-                    .get("screen_recording")
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    supported_actions.push("screenshot");
+            supported_actions.extend(macos_semantic_actions(accessibility));
+            #[cfg(not(target_os = "macos"))]
+            {
+                let private_state = permissions.get("private_state").copied().unwrap_or(false);
+                if accessibility && private_state {
+                    supported_actions.extend([
+                        "invoke",
+                        "set_value",
+                        "click",
+                        "type_text",
+                        "press",
+                        "paste",
+                        "hotkey",
+                        "move",
+                        "scroll",
+                    ]);
                 }
             }
             let action_capabilities = supported_actions
@@ -7085,9 +7085,16 @@ mod tests {
         FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
         NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
         SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, default_ledger_path, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        canonical_authority_bytes, default_ledger_path, macos_semantic_actions, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element, verify,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_semantic_actions_require_accessibility_not_private_state() {
+        assert!(macos_semantic_actions(false).is_empty());
+        assert_eq!(macos_semantic_actions(true), vec!["invoke", "set_value"]);
+    }
 
     #[test]
     fn test_default_ledger_path() {

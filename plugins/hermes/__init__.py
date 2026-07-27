@@ -657,7 +657,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         return {"error": {"code": "praefectus_error"}}
     if platform == "macos" and any(
         permissions.get(permission)
-        for permission in ("private_state", "coordinate_capture", "screen_recording")
+        for permission in ("coordinate_capture", "screen_recording")
     ):
         return {"error": {"code": "praefectus_error"}}
     allowed_actions = (

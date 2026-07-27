@@ -672,21 +672,21 @@ class PluginTest(unittest.TestCase):
             self.assertNotIn("secret", json.dumps(redacted))
             self.assertNotIn("credential", json.dumps(redacted))
 
-    def test_macos_capabilities_reject_private_or_capture_permissions(self):
+    def test_macos_capabilities_reject_capture_permissions_but_allow_private_state_fact(self):
         runtime = runtime_capabilities("macos")
         runtime["permissions"].update(
             {
-                "private_state": False,
+                "private_state": True,
                 "coordinate_capture": False,
                 "screen_recording": False,
             }
         )
         self.assertNotIn("error", plugin._redact(runtime))
-        for permission in ("private_state", "coordinate_capture", "screen_recording"):
+        for permission in ("coordinate_capture", "screen_recording"):
             unsafe = runtime_capabilities("macos")
             unsafe["permissions"].update(
                 {
-                    "private_state": False,
+                    "private_state": True,
                     "coordinate_capture": False,
                     "screen_recording": False,
                     permission: True,
