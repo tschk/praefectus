@@ -136,6 +136,14 @@ def runtime_capabilities(platform="windows"):
         "private_state": True,
         "screen_recording": False,
     }
+    if platform == "macos":
+        permissions.update(
+            {
+                "private_state": False,
+                "coordinate_capture": False,
+                "screen_recording": False,
+            }
+        )
     if platform == "linux":
         permissions.update(
             {"atspi2": True, "display_geometry": True, "wayland": False, "x11": True}
@@ -663,6 +671,30 @@ class PluginTest(unittest.TestCase):
             self.assertEqual(redacted, {"error": {"code": "praefectus_error"}})
             self.assertNotIn("secret", json.dumps(redacted))
             self.assertNotIn("credential", json.dumps(redacted))
+
+    def test_macos_capabilities_reject_private_or_capture_permissions(self):
+        runtime = runtime_capabilities("macos")
+        runtime["permissions"].update(
+            {
+                "private_state": False,
+                "coordinate_capture": False,
+                "screen_recording": False,
+            }
+        )
+        self.assertNotIn("error", plugin._redact(runtime))
+        for permission in ("private_state", "coordinate_capture", "screen_recording"):
+            unsafe = runtime_capabilities("macos")
+            unsafe["permissions"].update(
+                {
+                    "private_state": False,
+                    "coordinate_capture": False,
+                    "screen_recording": False,
+                    permission: True,
+                }
+            )
+            self.assertEqual(
+                plugin._redact(unsafe), {"error": {"code": "praefectus_error"}}
+            )
 
     def test_capabilities_accept_exact_full_runtime_contracts(self):
         for platform in ("macos", "windows", "linux", "browser"):

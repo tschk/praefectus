@@ -655,6 +655,11 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         or set(permissions) not in permission_shapes.get(platform, ())
     ):
         return {"error": {"code": "praefectus_error"}}
+    if platform == "macos" and any(
+        permissions.get(permission)
+        for permission in ("private_state", "coordinate_capture", "screen_recording")
+    ):
+        return {"error": {"code": "praefectus_error"}}
     allowed_actions = (
         {"invoke", "scroll", "set_value"}
         if platform in ("windows", "browser")
