@@ -35,7 +35,16 @@ _SET_VALUE_ACTION = _object(
     {"kind": {"const": "set_value"}, "value": {"type": "string", "maxLength": 16384}},
     ["kind", "value"],
 )
-_ACTION = {"oneOf": [_INVOKE_ACTION, _SET_VALUE_ACTION]}
+_CLICK_ACTION = _object(
+    {
+        "kind": {"const": "click"},
+        "button": {"const": "left"},
+        "count": {"const": 1},
+        "allow_coordinate_fallback": {"const": False},
+    },
+    ["kind", "button", "count", "allow_coordinate_fallback"],
+)
+_ACTION = {"oneOf": [_INVOKE_ACTION, _SET_VALUE_ACTION, _CLICK_ACTION]}
 
 _IDENTIFIER = {
     "type": "string",
@@ -103,6 +112,7 @@ _REQUEST = _object(
 _REQUEST["oneOf"] = [
     {"properties": {"action": _INVOKE_ACTION, "verification": _NO_VERIFICATION}},
     {"properties": {"action": _SET_VALUE_ACTION, "verification": _VALUE_VERIFICATION}},
+    {"properties": {"action": _CLICK_ACTION, "verification": _NO_VERIFICATION}},
 ]
 
 EXECUTE_SCHEMA = {
@@ -305,7 +315,7 @@ def _receipt(receipt: Any) -> dict[str, Any] | None:
             ),
         )
         or receipt.get("protocol_version") != 2
-        or receipt.get("action_name") not in ("invoke", "set_value", "unknown")
+        or receipt.get("action_name") not in ("invoke", "set_value", "click", "unknown")
         or not isinstance(receipt.get("action_hash"), str)
         or re.fullmatch(r"[0-9a-f]{64}", receipt["action_hash"]) is None
         or not isinstance(receipt.get("started_at_ms"), int)
@@ -321,7 +331,7 @@ def _receipt(receipt: Any) -> dict[str, Any] | None:
             isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", item)
             for item in receipt["fallback_chain"]
         )
-        or receipt.get("delivery_route") not in ("target_addressed", "unknown")
+        or receipt.get("delivery_route") not in ("target_addressed", "pointer", "unknown")
         or receipt.get("session_isolation")
         not in ("shared_desktop", "host_isolated", "unknown")
         or receipt.get("interaction_mode")
@@ -385,6 +395,14 @@ def _valid_receipt_context(receipt: dict[str, Any], terminal_kind: Any) -> bool:
         receipt.get("interaction_mode"),
     ):
         return False
+    if (
+        receipt.get("action_name") == "click"
+        and receipt.get("delivery_route") != "pointer"
+    ) or (
+        receipt.get("action_name") in ("invoke", "set_value")
+        and receipt.get("delivery_route") != "target_addressed"
+    ):
+        return False
     if receipt.get("interaction_mode") == "interactive":
         return receipt.get("context_preservation") == "not_applicable"
     if receipt.get("session_isolation") == "host_isolated":
@@ -404,7 +422,7 @@ def _valid_receipt_context(receipt: dict[str, Any], terminal_kind: Any) -> bool:
 def _valid_terminal_effect(receipt: dict[str, Any], terminal_kind: Any) -> bool:
     if terminal_kind == "succeeded":
         return (
-            receipt.get("action_name") == "invoke"
+            receipt.get("action_name") in ("invoke", "click")
             and receipt.get("effect") in ("executed_unverified", "verified")
         ) or (
             receipt.get("action_name") == "set_value"
@@ -798,7 +816,8 @@ def _valid_execution(result: dict[str, Any], request: dict[str, Any]) -> bool:
             not _is_recovery_receipt(receipt, terminal.get("kind"))
             and (
                 receipt.get("action_name") != action.get("kind")
-                or receipt.get("delivery_route") != "target_addressed"
+                or receipt.get("delivery_route")
+                != ("pointer" if action.get("kind") == "click" else "target_addressed")
                 or receipt.get("interaction_mode") != request.get("interaction_mode")
             )
         )
@@ -808,7 +827,7 @@ def _valid_execution(result: dict[str, Any], request: dict[str, Any]) -> bool:
         effect = receipt.get("effect")
         if effect == "unknown":
             return True
-        if action.get("kind") == "invoke":
+        if action.get("kind") in ("invoke", "click"):
             return (
                 verification.get("kind") == "none" and effect == "executed_unverified"
             )
@@ -820,7 +839,7 @@ def _valid_execution(result: dict[str, Any], request: dict[str, Any]) -> bool:
     if terminal.get("kind") != "succeeded":
         return True
     return (
-        action.get("kind") == "invoke"
+        action.get("kind") in ("invoke", "click")
         and verification.get("kind") == "none"
         and receipt.get("effect") == "executed_unverified"
     ) or (
@@ -897,6 +916,16 @@ def _valid_proposal(args: Any) -> bool:
         return False
     if action == {"kind": "invoke"}:
         return verification == {"kind": "none"}
+    if action == {
+        "kind": "click",
+        "button": "left",
+        "count": 1,
+        "allow_coordinate_fallback": False,
+    }:
+        return (
+            args["interaction_mode"] == "interactive"
+            and verification == {"kind": "none"}
+        )
     if (
         action.get("kind") != "set_value"
         or set(action) != {"kind", "value"}

@@ -64,6 +64,18 @@ def set_value_request(value="secret"):
     }
 
 
+def click_request():
+    return {
+        **invoke_request(),
+        "action": {
+            "kind": "click",
+            "button": "left",
+            "count": 1,
+            "allow_coordinate_fallback": False,
+        },
+    }
+
+
 def outcome_unknown(
     operation_id="op-1",
     interaction_mode="interactive",
@@ -105,6 +117,18 @@ def outcome_unknown(
             }
         ]
     }
+
+
+def pointer_succeeded(action_name="click"):
+    result = outcome_unknown()
+    terminal = result["acknowledgements"][0]["state"]["terminal"]
+    terminal["kind"] = "succeeded"
+    del terminal["message"]
+    receipt = terminal["receipt"]
+    receipt["action_name"] = action_name
+    receipt["delivery_route"] = "pointer"
+    receipt["effect"] = "executed_unverified"
+    return result
 
 
 def legacy_recovery(operation_id="op-1"):
@@ -223,6 +247,17 @@ class PluginTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(result))
         self.assertFalse(result["acknowledgements"][0]["terminal"]["retry_safe"])
 
+    def test_execute_forwards_interactive_fenced_click_to_host_executor(self):
+        request = click_request()
+        with patch.object(plugin, "_run_host_executor", return_value=pointer_succeeded()) as run:
+            result = json.loads(plugin._execute(request))
+        run.assert_called_once_with(request)
+        receipt = result["acknowledgements"][0]["terminal"]["receipt"]
+        self.assertEqual(receipt["action_name"], "click")
+        self.assertEqual(receipt["delivery_route"], "pointer")
+        self.assertEqual(receipt["interaction_mode"], "interactive")
+        self.assertEqual(receipt["effect"], "executed_unverified")
+
     def test_execute_fails_closed_without_host_authority(self):
         with patch.dict(os.environ, {}, clear=True):
             result = json.loads(plugin._execute(invoke_request()))
@@ -323,15 +358,6 @@ class PluginTest(unittest.TestCase):
             },
             {**invoke_request(), "interaction_mode": "host_isolated"},
             {**invoke_request(), "interaction_mode": "unknown"},
-            {
-                **invoke_request(),
-                "action": {
-                    "kind": "click",
-                    "button": "left",
-                    "count": 1,
-                    "allow_coordinate_fallback": False,
-                },
-            },
             {
                 **invoke_request(),
                 "action": {
