@@ -249,7 +249,9 @@ class PluginTest(unittest.TestCase):
 
     def test_execute_forwards_interactive_fenced_click_to_host_executor(self):
         request = click_request()
-        with patch.object(plugin, "_run_host_executor", return_value=pointer_succeeded()) as run:
+        with patch.object(
+            plugin, "_run_host_executor", return_value=pointer_succeeded()
+        ) as run:
             result = json.loads(plugin._execute(request))
         run.assert_called_once_with(request)
         receipt = result["acknowledgements"][0]["terminal"]["receipt"]
@@ -636,13 +638,25 @@ class PluginTest(unittest.TestCase):
     def test_macos_capabilities_expose_public_accessibility_input_actions(self):
         runtime = runtime_capabilities("macos")
         runtime["supported_actions"] = [
-            "invoke", "set_value", "click", "type_text", "press", "paste", "hotkey", "move", "scroll"
+            "invoke",
+            "set_value",
+            "click",
+            "type_text",
+            "press",
+            "paste",
+            "hotkey",
+            "move",
+            "scroll",
         ]
         runtime["action_capabilities"] = [
             {
                 "action": action,
-                "delivery_route": "target_addressed" if action in ("invoke", "set_value", "scroll") else "pointer",
-                "background_support": "guarded" if action in ("invoke", "set_value", "scroll") else "unavailable",
+                "delivery_route": "target_addressed"
+                if action in ("invoke", "set_value", "scroll")
+                else "pointer",
+                "background_support": "guarded"
+                if action in ("invoke", "set_value", "scroll")
+                else "unavailable",
             }
             for action in runtime["supported_actions"]
         ]
@@ -713,7 +727,9 @@ class PluginTest(unittest.TestCase):
             self.assertNotIn("secret", json.dumps(redacted))
             self.assertNotIn("credential", json.dumps(redacted))
 
-    def test_macos_capabilities_reject_capture_permissions_but_allow_private_state_fact(self):
+    def test_macos_capabilities_reject_capture_permissions_but_allow_private_state_fact(
+        self,
+    ):
         runtime = runtime_capabilities("macos")
         runtime["permissions"].update(
             {

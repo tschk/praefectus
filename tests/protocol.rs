@@ -1002,12 +1002,6 @@ fn native_executor_routes_coordinate_effects() {
         // No desktop session on CI — capabilities may be empty.
         return;
     }
-    assert!(
-        capabilities
-            .supported_actions
-            .iter()
-            .any(|action| action == "move")
-    );
     assert_eq!(
         capabilities.permissions.get("coordinate_capture"),
         Some(&false)

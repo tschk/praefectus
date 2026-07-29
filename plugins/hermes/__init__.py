@@ -331,7 +331,8 @@ def _receipt(receipt: Any) -> dict[str, Any] | None:
             isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", item)
             for item in receipt["fallback_chain"]
         )
-        or receipt.get("delivery_route") not in ("target_addressed", "pointer", "unknown")
+        or receipt.get("delivery_route")
+        not in ("target_addressed", "pointer", "unknown")
         or receipt.get("session_isolation")
         not in ("shared_desktop", "host_isolated", "unknown")
         or receipt.get("interaction_mode")
@@ -722,7 +723,8 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
             or fact.get("action") not in allowed_actions
             or (
                 expected_fact is not None
-                and (fact.get("delivery_route"), fact.get("background_support")) != expected_fact
+                and (fact.get("delivery_route"), fact.get("background_support"))
+                != expected_fact
             )
             or (
                 expected_fact is None
@@ -748,7 +750,11 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         "supported_actions": (
             supported_actions
             if platform == "macos"
-            else [action for action in supported_actions if action in ("invoke", "set_value")]
+            else [
+                action
+                for action in supported_actions
+                if action in ("invoke", "set_value")
+            ]
         ),
         "action_capabilities": (
             action_capabilities
@@ -922,10 +928,9 @@ def _valid_proposal(args: Any) -> bool:
         "count": 1,
         "allow_coordinate_fallback": False,
     }:
-        return (
-            args["interaction_mode"] == "interactive"
-            and verification == {"kind": "none"}
-        )
+        return args["interaction_mode"] == "interactive" and verification == {
+            "kind": "none"
+        }
     if (
         action.get("kind") != "set_value"
         or set(action) != {"kind", "value"}
