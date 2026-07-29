@@ -1006,6 +1006,10 @@ fn native_executor_routes_coordinate_effects() {
         capabilities.permissions.get("coordinate_capture"),
         Some(&false)
     );
+    let move_available = capabilities
+        .supported_actions
+        .iter()
+        .any(|action| action == "move");
     let error = executor
         .dispatch(
             &Action::Move,
@@ -1015,8 +1019,13 @@ fn native_executor_routes_coordinate_effects() {
             i64::MAX,
         )
         .expect_err("unverifiable coordinate effect");
-    assert_eq!(error.effect, EffectKnowledge::Unknown);
-    assert!(matches!(error.code, FailureCode::DispatchFailed));
+    if move_available {
+        assert_eq!(error.effect, EffectKnowledge::Unknown);
+        assert!(matches!(error.code, FailureCode::DispatchFailed));
+    } else {
+        assert_eq!(error.effect, EffectKnowledge::NoEffect);
+        assert!(matches!(error.code, FailureCode::Unsupported));
+    }
 }
 
 #[test]
