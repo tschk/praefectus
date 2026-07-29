@@ -7121,6 +7121,32 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_unavailable_accessibility_advertises_no_ax_pointer_or_semantic_actions() {
+        let supported = macos_semantic_actions(false);
+        assert!(
+            supported.is_empty(),
+            "unavailable accessibility must advertise no AX-backed actions"
+        );
+        for action in [
+            "invoke",
+            "set_value",
+            "click",
+            "type_text",
+            "press",
+            "paste",
+            "hotkey",
+            "move",
+            "scroll",
+        ] {
+            assert!(
+                !supported.contains(&action),
+                "must not advertise {action} when accessibility is unavailable"
+            );
+        }
+    }
+
     #[test]
     fn test_default_ledger_path() {
         let path = default_ledger_path();
