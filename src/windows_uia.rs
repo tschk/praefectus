@@ -502,7 +502,8 @@ pub(crate) fn focused_target(
     check_observation_boundary(cancellation, deadline_at_ms)?;
     let focused = unsafe { automation.client.GetFocusedElement() }
         .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
-    let state = describe(&automation.client, &focused, cancellation, deadline_at_ms)?;
+    let state = describe(&automation.client, &focused, cancellation, deadline_at_ms)
+        .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
     let element_id = opaque_element_id(
         &observation.observation_id,
         &runtime_id_text(&state.runtime_id),

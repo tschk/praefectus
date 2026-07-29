@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-#[cfg(windows)]
-use windows::core::AsBool;
 
 pub mod cdp;
 #[cfg(target_os = "linux")]
@@ -1118,9 +1116,10 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::System::DataExchange::*;
+            use windows::Win32::Foundation::{GlobalFree, HANDLE};
             use windows::Win32::System::DataExchange::*;
             use windows::Win32::System::Memory::*;
+            use windows::Win32::System::Ole::CF_UNICODETEXT;
             use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
             let wide: Vec<u16> = _text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1152,7 +1151,7 @@ impl NativeRuntime {
                 .is_err()
             {
                 unsafe {
-                    let _ = GlobalFree(hglobal);
+                    let _ = GlobalFree(Some(hglobal));
                 }
                 return Err(NativeError);
             }
@@ -1569,9 +1568,9 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
             }
             return Err(NativeError);
         }
-        let old_bmp = unsafe { SelectObject(mem_dc, bitmap) };
+        let old_bmp = unsafe { SelectObject(mem_dc, bitmap.into()) };
         let blt_ok =
-            unsafe { BitBlt(mem_dc, 0, 0, cx, cy, Some(screen_dc), ox, oy, SRCCOPY) }.as_bool();
+            unsafe { BitBlt(mem_dc, 0, 0, cx, cy, Some(screen_dc), ox, oy, SRCCOPY) }.is_ok();
         unsafe {
             let _ = SelectObject(mem_dc, old_bmp);
         }
@@ -1753,7 +1752,7 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
         use windows::Win32::UI::Input::KeyboardAndMouse::*;
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
-        if !unsafe { SetCursorPos(point.x as i32, point.y as i32) }.as_bool() {
+        if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
             return Err(NativeError);
         }
         let (down_flags, up_flags) = match button {
@@ -1840,7 +1839,7 @@ fn native_move(point: &NativePoint) -> Result<(), NativeError> {
     {
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
-        if !unsafe { SetCursorPos(point.x as i32, point.y as i32) }.as_bool() {
+        if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
             return Err(NativeError);
         }
         Ok(())
@@ -7095,9 +7094,12 @@ mod tests {
         FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
         NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
         SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, default_ledger_path, macos_semantic_actions, native_snapshot_id,
-        target_capture_bounds, validate_matching_live_element, verify,
+        canonical_authority_bytes, default_ledger_path, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
+
+    #[cfg(target_os = "macos")]
+    use super::macos_semantic_actions;
 
     #[cfg(target_os = "macos")]
     #[test]
