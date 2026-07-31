@@ -8,9 +8,10 @@ use praefectus::{
     AckState, Action, ActionCapability, ActionRequest, AuthorityGrant, BackgroundSupport,
     CancellationToken, Capabilities, DeliveryRoute, Direction, DispatchError, DispatchReceipt,
     Ed25519AuthorityVerifier, Effect, EffectKnowledge, Engine, Evidence, ExecuteReport, Executor,
-    InteractionMode, MouseButton, NativeExecutor, NativePoint, Observation, PROTOCOL_VERSION,
-    ProtocolError, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
-    Terminal, VerificationPolicy, action_delivery_route, normalized_action_hash,
+    FailureCode, InteractionMode, MouseButton, NativeExecutor, NativePoint, Observation,
+    PROTOCOL_VERSION, ProtocolError, ResolvedTarget, SafetyClass, SessionIsolation,
+    SignedAuthority, TargetRef, Terminal, VerificationPolicy, action_delivery_route,
+    normalized_action_hash,
 };
 use sha2::{Digest, Sha256};
 
@@ -874,6 +875,25 @@ fn native_executor_refuses_new_actions_without_a_fenced_target() {
             "{}",
             action_name(&action)
         );
+        let advertised = native
+            .capabilities()
+            .expect("capabilities")
+            .supported_actions
+            .iter()
+            .any(|supported| supported == action_name(&action));
+        if advertised {
+            assert!(
+                matches!(error.code, FailureCode::InvalidRequest),
+                "{} must be refused by the fence, not by capability",
+                action_name(&action)
+            );
+        } else {
+            assert!(
+                matches!(error.code, FailureCode::Unsupported),
+                "{}",
+                action_name(&action)
+            );
+        }
     }
 }
 
@@ -906,10 +926,10 @@ fn new_actions_replay_and_conflict_on_operation_identity() {
             target: target.clone(),
             interaction_mode: InteractionMode::Interactive,
             verification: VerificationPolicy::None,
-            expected: Outcome::RejectedBeforeEffect,
+            expected: Outcome::ExecutedUnverified,
         };
         let directory = tempfile::tempdir().expect("temp directory");
-        let executor = HostExecutor::new(Backend::Standard);
+        let executor = HostExecutor::new(Backend::Extended);
         let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
         let operation_id = format!("replay-{index}");
         let first = engine
@@ -920,7 +940,13 @@ fn new_actions_replay_and_conflict_on_operation_identity() {
             .expect("first execution");
         assert_eq!(
             classify(Ok(first)),
-            Outcome::RejectedBeforeEffect,
+            Outcome::ExecutedUnverified,
+            "{}",
+            action_name(&action)
+        );
+        assert_eq!(
+            executor.dispatches.load(Ordering::SeqCst),
+            1,
             "{}",
             action_name(&action)
         );
@@ -932,6 +958,12 @@ fn new_actions_replay_and_conflict_on_operation_identity() {
             .expect("replay");
         assert!(
             replay.acknowledgements[0].replayed,
+            "{}",
+            action_name(&action)
+        );
+        assert_eq!(
+            executor.dispatches.load(Ordering::SeqCst),
+            1,
             "{}",
             action_name(&action)
         );
@@ -948,6 +980,6 @@ fn new_actions_replay_and_conflict_on_operation_identity() {
             "{}",
             action_name(&action)
         );
-        assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
     }
 }

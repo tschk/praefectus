@@ -912,34 +912,57 @@ fn secure_command(name: &str) -> Result<Command, NativeError> {
     Err(NativeError)
 }
 
-fn global_input_allowed() -> bool {
+pub(crate) fn global_input_allowed() -> bool {
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ALLOWED.get_or_init(|| {
         std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_ok_and(|value| value == "1")
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputDelivery {
+    PerProcess(i32),
+    GlobalTap,
+    Refused,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn input_delivery(pid: i32, global_allowed: bool) -> InputDelivery {
+    if pid > 0 {
+        InputDelivery::PerProcess(pid)
+    } else if global_allowed {
+        InputDelivery::GlobalTap
+    } else {
+        InputDelivery::Refused
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeError> {
     use core_graphics::event::CGEventTapLocation;
 
-    let pid = MAC_DELIVERY_PID.with(std::cell::Cell::get);
-    if pid > 0 {
-        #[cfg(feature = "skylight")]
-        {
-            use foreign_types::ForeignType;
-            if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-                return Ok(());
+    match input_delivery(
+        MAC_DELIVERY_PID.with(std::cell::Cell::get),
+        global_input_allowed(),
+    ) {
+        InputDelivery::PerProcess(pid) => {
+            #[cfg(feature = "skylight")]
+            {
+                use foreign_types::ForeignType;
+                if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
+                    return Ok(());
+                }
             }
+            event.post_to_pid(pid);
+            Ok(())
         }
-        event.post_to_pid(pid);
-        return Ok(());
+        InputDelivery::GlobalTap => {
+            event.post(CGEventTapLocation::HID);
+            Ok(())
+        }
+        InputDelivery::Refused => Err(NativeError),
     }
-    if !global_input_allowed() {
-        return Err(NativeError);
-    }
-    event.post(CGEventTapLocation::HID);
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -7625,6 +7648,23 @@ mod tests {
     fn global_input_is_refused_unless_a_host_opts_in() {
         assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
         assert!(!super::global_input_allowed());
+    }
+
+    #[test]
+    fn input_is_delivered_per_process_and_never_globally_without_an_opt_in() {
+        use super::{InputDelivery, input_delivery};
+
+        assert_eq!(input_delivery(4321, false), InputDelivery::PerProcess(4321));
+        assert_eq!(input_delivery(4321, true), InputDelivery::PerProcess(4321));
+        assert_eq!(input_delivery(0, false), InputDelivery::Refused);
+        assert_eq!(input_delivery(-1, false), InputDelivery::Refused);
+        assert_eq!(input_delivery(0, true), InputDelivery::GlobalTap);
+        for pid in [i32::MIN, -1, 0] {
+            assert_eq!(input_delivery(pid, false), InputDelivery::Refused);
+        }
+        for pid in [1, i32::MAX] {
+            assert_eq!(input_delivery(pid, false), InputDelivery::PerProcess(pid));
+        }
     }
 
     #[cfg(target_os = "macos")]
