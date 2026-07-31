@@ -966,6 +966,35 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
 }
 
 #[cfg(target_os = "macos")]
+const MAC_SCROLL_PIXELS_PER_LINE: i64 = 40;
+
+#[cfg(target_os = "macos")]
+fn mac_set_scroll_deltas(event: &core_graphics::event::CGEvent, wheel1: i32, wheel2: i32) {
+    use core_graphics::event::EventField;
+
+    let lines = [i64::from(wheel1), i64::from(wheel2)];
+    let pixels = lines.map(|line| line.saturating_mul(MAC_SCROLL_PIXELS_PER_LINE));
+    for (index, (line, pixel)) in lines.into_iter().zip(pixels).enumerate() {
+        let (delta, point_delta, fixed_delta) = if index == 0 {
+            (
+                EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+                EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+                EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+            )
+        } else {
+            (
+                EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+                EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+                EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+            )
+        };
+        event.set_integer_value_field(delta, line);
+        event.set_integer_value_field(point_delta, pixel);
+        event.set_double_value_field(fixed_delta, pixel as f64);
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -1576,6 +1605,7 @@ impl NativeRuntime {
                     return Err(NativeError);
                 }
                 let event: core_graphics::event::CGEvent = unsafe { std::mem::transmute(raw) };
+                mac_set_scroll_deltas(&event, w1, w2);
                 if let Some((x, y)) = MAC_DELIVERY_POINT.with(std::cell::Cell::get) {
                     event.set_location(core_graphics::geometry::CGPoint::new(x, y));
                 }
