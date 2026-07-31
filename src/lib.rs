@@ -37,8 +37,16 @@ const MAX_VERIFICATION_JSON_BYTES: usize = 64 * 1024;
 const MAX_VERIFICATION_JSON_DEPTH: usize = 32;
 const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
 const MAX_SELECT_TEXT_RANGE: u32 = 1_048_576;
+#[cfg(target_os = "macos")]
 const MAX_DRAG_STEPS: i64 = 24;
-const SECONDARY_ACTIONS: [&str; 8] = [
+const SECONDARY_ACTIVATION_ACTIONS: [&str; 5] = [
+    "AXConfirm",
+    "AXCancel",
+    "AXPick",
+    "AXIncrement",
+    "AXDecrement",
+];
+pub const SECONDARY_ACTIONS: [&str; 8] = [
     "AXShowMenu",
     "AXShowDefaultUI",
     "AXShowAlternateUI",
@@ -440,10 +448,16 @@ fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute 
             Action::Invoke
             | Action::SetValue { .. }
             | Action::SelectText { .. }
-            | Action::PerformSecondaryAction { .. }
-            | Action::Scroll { .. },
+            | Action::PerformSecondaryAction { .. },
             TargetRef::Element { .. },
         ) => DeliveryRoute::TargetAddressed,
+        (Action::Scroll { .. }, TargetRef::Element { .. }) => {
+            if cfg!(target_os = "macos") {
+                native_pointer_delivery_route()
+            } else {
+                DeliveryRoute::TargetAddressed
+            }
+        }
         (_, TargetRef::Element { .. }) => native_pointer_delivery_route(),
         _ => DeliveryRoute::Pointer,
     }
@@ -886,6 +900,7 @@ impl Drop for MacDeliveryPidGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(target_os = "macos")]
 fn global_input_allowed() -> bool {
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1862,6 +1877,7 @@ fn native_drag(
         let end = CGPoint::new(destination.x as f64, destination.y as f64);
         post(CGEventType::LeftMouseDown, start)?;
         let mut interrupted = false;
+        let mut failed = false;
         for step in 1..=MAX_DRAG_STEPS {
             if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                 interrupted = true;
@@ -1872,10 +1888,16 @@ fn native_drag(
                 start.x + (end.x - start.x) * ratio,
                 start.y + (end.y - start.y) * ratio,
             );
-            post(CGEventType::LeftMouseDragged, point)?;
+            if post(CGEventType::LeftMouseDragged, point).is_err() {
+                failed = true;
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
-        post(CGEventType::LeftMouseUp, end)?;
+        let released = post(CGEventType::LeftMouseUp, end).is_ok();
+        if failed || !released {
+            return Err(ambiguous("drag dispatch outcome is unknown"));
+        }
         if interrupted {
             return Err(ambiguous("drag interrupted after partial dispatch"));
         }
@@ -2568,7 +2590,10 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
     match action {
         Action::Invoke => base && actionability.invokable,
         Action::SetValue { .. } | Action::SelectText { .. } => base && actionability.editable,
-        Action::PerformSecondaryAction { .. } => base,
+        Action::PerformSecondaryAction { name } => {
+            base && (!SECONDARY_ACTIVATION_ACTIONS.contains(&name.as_str())
+                || actionability.invokable)
+        }
         Action::TypeText { .. }
         | Action::Press { .. }
         | Action::Paste { .. }
@@ -4345,7 +4370,9 @@ fn strict_action_capability<'a>(
             ),
             "scroll" => matches!(
                 capability.delivery_route,
-                DeliveryRoute::Pointer | DeliveryRoute::TargetAddressed
+                DeliveryRoute::Pointer
+                    | DeliveryRoute::TargetAddressed
+                    | DeliveryRoute::PerProcessEvent
             ),
             _ => false,
         };
@@ -5492,23 +5519,19 @@ impl Executor for NativeExecutor {
                 .map(|action| ActionCapability {
                     action: (*action).to_string(),
                     delivery_route: match *action {
-                        "invoke"
-                        | "set_value"
-                        | "select_text"
-                        | "perform_secondary_action"
-                        | "scroll" => DeliveryRoute::TargetAddressed,
-                        "type_text" | "press" | "paste" | "hotkey" => {
+                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                            DeliveryRoute::TargetAddressed
+                        }
+                        "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
                             native_pointer_delivery_route()
                         }
                         _ => DeliveryRoute::Pointer,
                     },
                     background_support: match *action {
-                        "invoke"
-                        | "set_value"
-                        | "select_text"
-                        | "perform_secondary_action"
-                        | "scroll" => BackgroundSupport::Guarded,
-                        "type_text" | "press" | "paste" | "hotkey"
+                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                            BackgroundSupport::Guarded
+                        }
+                        "scroll" | "type_text" | "press" | "paste" | "hotkey"
                             if native_pointer_delivery_route()
                                 == DeliveryRoute::PerProcessEvent =>
                         {
@@ -5759,6 +5782,23 @@ impl Executor for NativeExecutor {
             return Err(unsupported(
                 "action is unavailable with current permissions or backend",
             ));
+        }
+        #[cfg(target_os = "macos")]
+        if !global_input_allowed()
+            && MAC_DELIVERY_PID.with(std::cell::Cell::get) <= 0
+            && matches!(
+                action,
+                Action::Click { .. }
+                    | Action::Move
+                    | Action::Drag { .. }
+                    | Action::Scroll { .. }
+                    | Action::TypeText { .. }
+                    | Action::Press { .. }
+                    | Action::Paste { .. }
+                    | Action::Hotkey { .. }
+            )
+        {
+            return Err(no_effect("global input delivery is disabled for this host"));
         }
         let native_target = || match target {
             ResolvedTarget::Point(point) => Ok(Target::Point(point.clone())),
@@ -7552,6 +7592,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn global_input_is_refused_unless_a_host_opts_in() {
+        assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
+        assert!(!super::global_input_allowed());
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

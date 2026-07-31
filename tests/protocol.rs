@@ -1002,7 +1002,15 @@ fn native_executor_routes_coordinate_effects() {
         // No desktop session on CI — capabilities may be empty.
         return;
     }
-    assert!(capabilities.permissions.contains_key("coordinate_capture"));
+    let coordinate_capture = capabilities
+        .permissions
+        .get("coordinate_capture")
+        .copied()
+        .expect("coordinate capture permission");
+    assert!(
+        !coordinate_capture || cfg!(all(target_os = "macos", feature = "screencapturekit")),
+        "coordinate capture requires a capture backend"
+    );
     let move_available = capabilities
         .supported_actions
         .iter()
@@ -1016,7 +1024,12 @@ fn native_executor_routes_coordinate_effects() {
             i64::MAX,
         )
         .expect_err("unverifiable coordinate effect");
-    if move_available {
+    let global_input_enabled =
+        std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_ok_and(|value| value == "1");
+    if move_available && !global_input_enabled && cfg!(target_os = "macos") {
+        assert_eq!(error.effect, EffectKnowledge::NoEffect);
+        assert!(matches!(error.code, FailureCode::InvalidRequest));
+    } else if move_available {
         assert_eq!(error.effect, EffectKnowledge::Unknown);
         assert!(matches!(error.code, FailureCode::DispatchFailed));
     } else {
