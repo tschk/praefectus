@@ -3949,6 +3949,100 @@ pub struct VerifiedAuthority {
     pub expires_at_ms: i64,
 }
 
+/// Stable model-facing statement that a dispatched outcome was never recorded.
+pub const INTERRUPTED_OUTCOME_MESSAGE: &str = "the outcome of this operation was not recorded; verify the actual state before redoing anything with side effects";
+
+const RECOVERED_CLAIM_MESSAGE: &str = "a durable claim existed without a terminal receipt";
+
+fn interrupted_outcome_message() -> String {
+    format!("{RECOVERED_CLAIM_MESSAGE}; {INTERRUPTED_OUTCOME_MESSAGE}")
+}
+
+/// Identity of one dispatchable operation in a host outcome ledger.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct OutcomeKey {
+    pub operation_id: String,
+    pub action_hash: String,
+}
+
+/// Host answer to a dispatch request for one [`OutcomeKey`].
+#[derive(Clone, Debug)]
+pub enum LedgerDecision {
+    Dispatch,
+    Recorded(Box<Terminal>),
+    Interrupted,
+}
+
+/// Host-owned durable record of which operations were dispatched and how they ended.
+pub trait OutcomeLedger: Send + Sync {
+    /// Grants permission to dispatch the key exactly once, or resolves it from the record.
+    fn begin(&self, key: &OutcomeKey) -> Result<LedgerDecision, ProtocolError>;
+    /// Durably records the terminal outcome of a key that [`OutcomeLedger::begin`] granted.
+    fn record(&self, key: &OutcomeKey, terminal: &Terminal) -> Result<(), ProtocolError>;
+}
+
+impl<T: OutcomeLedger + ?Sized> OutcomeLedger for Arc<T> {
+    fn begin(&self, key: &OutcomeKey) -> Result<LedgerDecision, ProtocolError> {
+        (**self).begin(key)
+    }
+
+    fn record(&self, key: &OutcomeKey, terminal: &Terminal) -> Result<(), ProtocolError> {
+        (**self).record(key, terminal)
+    }
+}
+
+/// Outcome ledger that records nothing and always grants dispatch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullOutcomeLedger;
+
+impl OutcomeLedger for NullOutcomeLedger {
+    fn begin(&self, _key: &OutcomeKey) -> Result<LedgerDecision, ProtocolError> {
+        Ok(LedgerDecision::Dispatch)
+    }
+
+    fn record(&self, _key: &OutcomeKey, _terminal: &Terminal) -> Result<(), ProtocolError> {
+        Ok(())
+    }
+}
+
+/// Process-local reference outcome ledger for tests and single-process hosts.
+#[derive(Debug, Default)]
+pub struct MemoryOutcomeLedger {
+    entries: std::sync::Mutex<BTreeMap<OutcomeKey, Option<Terminal>>>,
+}
+
+impl MemoryOutcomeLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl OutcomeLedger for MemoryOutcomeLedger {
+    fn begin(&self, key: &OutcomeKey) -> Result<LedgerDecision, ProtocolError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ProtocolError::Ledger("outcome ledger is poisoned".to_string()))?;
+        match entries.get(key) {
+            Some(Some(terminal)) => Ok(LedgerDecision::Recorded(Box::new(terminal.clone()))),
+            Some(None) => Ok(LedgerDecision::Interrupted),
+            None => {
+                entries.insert(key.clone(), None);
+                Ok(LedgerDecision::Dispatch)
+            }
+        }
+    }
+
+    fn record(&self, key: &OutcomeKey, terminal: &Terminal) -> Result<(), ProtocolError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ProtocolError::Ledger("outcome ledger is poisoned".to_string()))?;
+        entries.insert(key.clone(), Some(terminal.clone()));
+        Ok(())
+    }
+}
+
 pub struct Ed25519AuthorityVerifier {
     issuers: BTreeMap<(String, String), (String, VerifyingKey)>,
 }
@@ -4078,12 +4172,15 @@ pub enum ProtocolError {
     Json(#[from] serde_json::Error),
     #[error("executor error: {0}")]
     Executor(String),
+    #[error("outcome ledger error: {0}")]
+    Ledger(String),
 }
 
 pub struct Engine<E> {
     executor: E,
     ledger: OperationLedger,
     authority: Arc<dyn AuthorityVerifier>,
+    outcomes: Arc<dyn OutcomeLedger>,
 }
 
 impl<E: Executor> Engine<E> {
@@ -4096,7 +4193,14 @@ impl<E: Executor> Engine<E> {
             executor,
             ledger: OperationLedger::new(ledger_path.into()),
             authority: Arc::new(authority),
+            outcomes: Arc::new(NullOutcomeLedger),
         }
+    }
+
+    /// Installs a host outcome ledger that resolves re-presented operations without re-dispatch.
+    pub fn with_outcome_ledger(mut self, outcomes: impl OutcomeLedger + 'static) -> Self {
+        self.outcomes = Arc::new(outcomes);
+        self
     }
 
     pub fn execute(
@@ -4109,6 +4213,10 @@ impl<E: Executor> Engine<E> {
         let authority = self.authority.verify(request, &action_hash)?;
         let effect_deadline_at_ms = request.deadline_at_ms.min(authority.expires_at_ms);
         let session_isolation = self.executor.session_isolation();
+        let outcome_key = OutcomeKey {
+            operation_id: request.operation_id.clone(),
+            action_hash: action_hash.clone(),
+        };
         let _operation_guard = self.ledger.execution_lock()?;
         self.ledger.repair_tail()?;
         match self
@@ -4136,9 +4244,14 @@ impl<E: Executor> Engine<E> {
                 receipt.action_name = action_name.unwrap_or_else(|| "unknown".to_string());
                 receipt.delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
                 receipt.interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
-                let terminal = Terminal::OutcomeUnknown {
-                    receipt,
-                    message: "a durable claim existed without a terminal receipt".to_string(),
+                let terminal = match self.outcomes.begin(&outcome_key)? {
+                    LedgerDecision::Recorded(terminal) => *terminal,
+                    LedgerDecision::Dispatch | LedgerDecision::Interrupted => {
+                        Terminal::OutcomeUnknown {
+                            receipt,
+                            message: interrupted_outcome_message(),
+                        }
+                    }
                 };
                 let acknowledgement = terminal_ack(request, &action_hash, terminal, false);
                 self.ledger.finish(&acknowledgement)?;
@@ -4147,6 +4260,25 @@ impl<E: Executor> Engine<E> {
                 });
             }
             ClaimResult::New => {}
+        }
+
+        match self.outcomes.begin(&outcome_key)? {
+            LedgerDecision::Dispatch => {}
+            LedgerDecision::Recorded(terminal) => {
+                return self.finish_early(request, &action_hash, *terminal);
+            }
+            LedgerDecision::Interrupted => {
+                let receipt =
+                    empty_receipt(request, &action_hash, Effect::Unknown, session_isolation);
+                return self.finish_early(
+                    request,
+                    &action_hash,
+                    Terminal::OutcomeUnknown {
+                        receipt,
+                        message: interrupted_outcome_message(),
+                    },
+                );
+            }
         }
 
         let accepted = ack(request, &action_hash, 0, AckState::Accepted, false);
@@ -4422,8 +4554,12 @@ impl<E: Executor> Engine<E> {
         };
         let mut terminal_ack = terminal_ack(request, &action_hash, terminal, false);
         if effect_may_have_occurred {
+            if self.record_outcome(&outcome_key, &terminal_ack).is_err() {
+                terminal_ack = persistence_unknown_ack(terminal_ack);
+            }
             terminal_ack = self.ledger.finish_after_effect(terminal_ack);
         } else {
+            self.record_outcome(&outcome_key, &terminal_ack)?;
             self.ledger.finish(&terminal_ack)?;
         }
         Ok(ExecuteReport {
@@ -4439,10 +4575,26 @@ impl<E: Executor> Engine<E> {
     ) -> Result<ExecuteReport, ProtocolError> {
         let accepted = ack(request, action_hash, 0, AckState::Accepted, false);
         let terminal_ack = terminal_ack(request, action_hash, terminal, false);
+        let outcome_key = OutcomeKey {
+            operation_id: request.operation_id.clone(),
+            action_hash: action_hash.to_string(),
+        };
+        self.record_outcome(&outcome_key, &terminal_ack)?;
         self.ledger.finish(&terminal_ack)?;
         Ok(ExecuteReport {
             acknowledgements: vec![accepted, terminal_ack],
         })
+    }
+
+    fn record_outcome(
+        &self,
+        key: &OutcomeKey,
+        acknowledgement: &ActionAck,
+    ) -> Result<(), ProtocolError> {
+        let AckState::Terminal { terminal } = &acknowledgement.state else {
+            return Ok(());
+        };
+        self.outcomes.record(key, terminal)
     }
 
     pub fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
@@ -6476,7 +6628,7 @@ impl OperationLedger {
                         after: None,
                         warnings: Vec::new(),
                     },
-                    message: "a durable claim existed without a terminal receipt".to_string(),
+                    message: interrupted_outcome_message(),
                 }),
             },
         };
