@@ -435,6 +435,7 @@ impl<C: CdpChannel> CdpExecutor<C> {
                 window_id: self.config.target_id.clone(),
                 document_id: Some(document_id),
                 display_geometry_hash,
+                host_opt_ins: Vec::new(),
             },
             observed_at_ms,
             expires_at_ms: deadline_at_ms

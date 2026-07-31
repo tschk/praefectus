@@ -566,6 +566,7 @@ fn snapshot_window(
         window_id: window_id.clone(),
         document_id: None,
         display_geometry_hash,
+        host_opt_ins: Vec::new(),
     };
     let provenance_hash = semantic_fingerprint(&(
         PROTOCOL_VERSION,
@@ -1123,6 +1124,7 @@ fn resolve(
         window_id: mapping.window_id.clone(),
         document_id: None,
         display_geometry_hash: mapping.display_geometry_hash.clone(),
+        host_opt_ins: Vec::new(),
     };
     if semantic_fingerprint(&(
         PROTOCOL_VERSION,

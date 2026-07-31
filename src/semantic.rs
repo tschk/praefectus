@@ -27,6 +27,7 @@ pub struct SemanticProvenance {
     pub window_id: String,
     pub document_id: Option<String>,
     pub display_geometry_hash: String,
+    pub host_opt_ins: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -271,6 +272,7 @@ fn valid_provenance(provenance: &SemanticProvenance) -> bool {
         && valid_text(&provenance.process_generation, 1, 256)
         && valid_text(&provenance.window_id, 1, 512)
         && is_hash(&provenance.display_geometry_hash)
+        && valid_host_opt_ins(&provenance.host_opt_ins)
         && match provenance.backend {
             SemanticBackend::Accessibility => provenance.document_id.is_none(),
             SemanticBackend::Dom => provenance
@@ -278,6 +280,19 @@ fn valid_provenance(provenance: &SemanticProvenance) -> bool {
                 .as_deref()
                 .is_some_and(|value| valid_text(value, 1, 512)),
         }
+}
+
+pub const MAX_HOST_OPT_INS: usize = 8;
+
+fn valid_host_opt_ins(opt_ins: &[String]) -> bool {
+    opt_ins.len() <= MAX_HOST_OPT_INS
+        && opt_ins.windows(2).all(|pair| pair[0] < pair[1])
+        && opt_ins.iter().all(|opt_in| {
+            valid_text(opt_in, 1, 128)
+                && opt_in
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
 }
 
 fn valid_element(element: &SemanticElement) -> bool {
@@ -340,6 +355,7 @@ mod tests {
                 window_id: "window-1".to_string(),
                 document_id: Some("document-1".to_string()),
                 display_geometry_hash: "2".repeat(64),
+                host_opt_ins: Vec::new(),
             },
             observed_at_ms: 1_000,
             expires_at_ms: 31_000,
@@ -367,6 +383,35 @@ mod tests {
                     editable: false,
                 },
             }],
+        }
+    }
+
+    #[test]
+    fn host_opt_ins_are_bounded_sorted_and_bound_into_provenance() {
+        let mut observation = observation();
+        observation.provenance.host_opt_ins = vec!["AXEnhancedUserInterface".to_string()];
+        observation.validate(2_000).unwrap();
+        let fenced = observation.provenance_hash().unwrap();
+
+        let mut declared = observation.clone();
+        declared.provenance.host_opt_ins.clear();
+        assert_ne!(declared.provenance_hash().unwrap(), fenced);
+
+        for rejected in [
+            vec![
+                "AXManualAccessibility".to_string(),
+                "AXEnhanced".to_string(),
+            ],
+            vec!["AXManualAccessibility".to_string(); 2],
+            vec!["AX Manual Accessibility".to_string()],
+            vec!["a".to_string(); MAX_HOST_OPT_INS + 1],
+        ] {
+            let mut invalid = observation.clone();
+            invalid.provenance.host_opt_ins = rejected;
+            assert_eq!(
+                invalid.validate(2_000),
+                Err(SemanticError::InvalidObservation)
+            );
         }
     }
 

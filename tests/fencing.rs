@@ -287,6 +287,7 @@ fn recorded_provenance() -> SemanticProvenance {
         window_id: "window-1".to_string(),
         document_id: None,
         display_geometry_hash: "c".repeat(64),
+        host_opt_ins: Vec::new(),
     }
 }
 

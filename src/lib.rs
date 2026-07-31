@@ -2920,6 +2920,82 @@ fn mac_observation_window(
 }
 
 #[cfg(target_os = "macos")]
+const MAC_AX_OPT_IN_ATTRIBUTES: [&str; 2] = ["AXEnhancedUserInterface", "AXManualAccessibility"];
+
+#[cfg(target_os = "macos")]
+fn mac_ax_opt_ins() -> &'static [&'static str] {
+    static OPT_INS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    OPT_INS.get_or_init(|| {
+        let Ok(configured) = std::env::var("PRAEFECTUS_AX_OPT_IN") else {
+            return Vec::new();
+        };
+        MAC_AX_OPT_IN_ATTRIBUTES
+            .into_iter()
+            .filter(|attribute| {
+                configured
+                    .split(',')
+                    .any(|entry| entry.trim() == *attribute)
+            })
+            .collect()
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mac_apply_ax_opt_ins(application: &AxElement) -> Vec<String> {
+    use accessibility_sys::{AXUIElementSetAttributeValue, kAXErrorSuccess};
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
+
+    let mut applied = Vec::new();
+    for attribute in mac_ax_opt_ins() {
+        if application.prepare().is_err() {
+            break;
+        }
+        let key = CFString::new(attribute);
+        let value = CFBoolean::true_value();
+        let status = unsafe {
+            AXUIElementSetAttributeValue(
+                application.0,
+                key.as_concrete_TypeRef(),
+                value.as_CFTypeRef(),
+            )
+        };
+        if status == kAXErrorSuccess {
+            applied.push((*attribute).to_string());
+        }
+    }
+    applied
+}
+
+#[cfg(target_os = "macos")]
+const MAC_CHILD_AXES: [&str; 3] = ["AXChildren", "AXRows", "AXVisibleChildren"];
+
+#[cfg(target_os = "macos")]
+fn mac_child_elements(element: &AxElement) -> Result<Vec<AxElement>, NativeError> {
+    let mut errored = false;
+    for axis in MAC_CHILD_AXES {
+        match element.has_attribute(axis) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(_) => {
+                errored = true;
+                continue;
+            }
+        }
+        match element.elements(axis, MAX_MAC_AX_COLLECTION_ITEMS) {
+            Ok(children) if !children.is_empty() => return Ok(children),
+            Ok(_) => {}
+            Err(_) => errored = true,
+        }
+    }
+    if errored {
+        return Err(NativeError);
+    }
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "macos")]
 fn mac_element_at_path(
     mut element: AxElement,
     path: &[usize],
@@ -2943,8 +3019,7 @@ fn mac_element_at_path(
                 "semantic target resolution timed out".to_string(),
             ));
         }
-        element = element
-            .elements("AXChildren", MAX_MAC_AX_COLLECTION_ITEMS)
+        element = mac_child_elements(&element)
             .map_err(|_| ProtocolError::StaleTarget("semantic target path changed".to_string()))?
             .into_iter()
             .nth(*index)
@@ -3049,24 +3124,14 @@ fn mac_resolve_observed_element_inner(
                 matched_target |= element.identity_eq(&target);
             }
         }
-        match element.has_attribute("AXChildren") {
-            Ok(false) => {}
-            Ok(true) => queue.extend(
-                element
-                    .elements(
-                        "AXChildren",
-                        MAX_MAC_AX_COLLECTION_ITEMS.saturating_sub(visited),
-                    )
-                    .map_err(|_| {
-                        ProtocolError::StaleTarget("semantic target tree changed".to_string())
-                    })?,
-            ),
-            Err(_) => {
-                return Err(ProtocolError::StaleTarget(
-                    "semantic target tree changed".to_string(),
-                ));
-            }
+        let children = mac_child_elements(&element)
+            .map_err(|_| ProtocolError::StaleTarget("semantic target tree changed".to_string()))?;
+        if children.len() > MAX_MAC_AX_COLLECTION_ITEMS.saturating_sub(visited) {
+            return Err(ProtocolError::StaleTarget(
+                "semantic target tree changed".to_string(),
+            ));
         }
+        queue.extend(children);
     }
     if now_ms() >= resolution_deadline_at_ms {
         return Err(ProtocolError::StaleTarget(
@@ -3476,6 +3541,7 @@ fn mac_semantic_snapshot(
     if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.1) } != kAXErrorSuccess {
         return Err(ProtocolError::Executor("desktop backend error".to_string()));
     }
+    let host_opt_ins = mac_apply_ax_opt_ins(&application);
     let process_generation = mac_process_generation(process_id)
         .map_err(|_| ProtocolError::StaleTarget("focused process changed".to_string()))?;
     let window_id = mac_window_identity(&window, process_id)
@@ -3490,6 +3556,7 @@ fn mac_semantic_snapshot(
         generation,
         observed_at_ms,
         display_geometry_hash,
+        &host_opt_ins,
     ))?;
     let provenance = semantic::SemanticProvenance {
         backend: semantic::SemanticBackend::Accessibility,
@@ -3500,6 +3567,7 @@ fn mac_semantic_snapshot(
         window_id,
         document_id: None,
         display_geometry_hash: display_geometry_hash.to_string(),
+        host_opt_ins,
     };
     let mut queue = VecDeque::from([(window, Vec::<usize>::new(), None::<String>)]);
     let mut elements = Vec::new();
@@ -3536,18 +3604,15 @@ fn mac_semantic_snapshot(
             truncated = true;
             break;
         }
-        let children = match element.has_attribute("AXChildren") {
-            Ok(false) => Vec::new(),
-            Ok(true) => match element.elements(
-                "AXChildren",
-                MAX_MAC_AX_COLLECTION_ITEMS.saturating_sub(visited),
-            ) {
-                Ok(children) => children,
-                Err(_) => {
+        let children = match mac_child_elements(&element) {
+            Ok(mut children) => {
+                let budget = MAX_MAC_AX_COLLECTION_ITEMS.saturating_sub(visited);
+                if children.len() > budget {
                     truncated = true;
-                    Vec::new()
+                    children.truncate(budget);
                 }
-            },
+                children
+            }
             Err(_) => {
                 truncated = true;
                 Vec::new()
