@@ -4,6 +4,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
+mod macos_capture;
+
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -611,6 +614,7 @@ pub struct SurfaceDescriptor {
     pub window_id: String,
     pub display_geometry_hash: String,
     pub bounds: Option<Rect>,
+    pub content_hash: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -852,6 +856,8 @@ const MAC_FLAG_COMMAND: u64 = 1 << 20;
 #[cfg(target_os = "macos")]
 thread_local! {
     static MAC_DELIVERY_PID: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static MAC_DELIVERY_POINT: std::cell::Cell<Option<(f64, f64)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(target_os = "macos")]
@@ -859,8 +865,16 @@ struct MacDeliveryPidGuard;
 
 #[cfg(target_os = "macos")]
 impl MacDeliveryPidGuard {
-    fn new(pid: Option<i32>) -> Self {
+    fn new(pid: Option<i32>, bounds: Option<&NativeBounds>) -> Self {
         MAC_DELIVERY_PID.with(|value| value.set(pid.unwrap_or(0)));
+        MAC_DELIVERY_POINT.with(|value| {
+            value.set(bounds.map(|bounds| {
+                (
+                    bounds.x.saturating_add(bounds.width / 2) as f64,
+                    bounds.y.saturating_add(bounds.height / 2) as f64,
+                )
+            }));
+        });
         Self
     }
 }
@@ -869,6 +883,7 @@ impl MacDeliveryPidGuard {
 impl Drop for MacDeliveryPidGuard {
     fn drop(&mut self) {
         MAC_DELIVERY_PID.with(|value| value.set(0));
+        MAC_DELIVERY_POINT.with(|value| value.set(None));
     }
 }
 
@@ -1467,7 +1482,6 @@ impl NativeRuntime {
         }
         #[cfg(target_os = "macos")]
         {
-            use core_graphics::event::CGEventTapLocation;
             use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
             unsafe extern "C" {
                 fn CGEventCreateScrollWheelEvent(
@@ -1503,7 +1517,10 @@ impl NativeRuntime {
                     return Err(NativeError);
                 }
                 let event: core_graphics::event::CGEvent = unsafe { std::mem::transmute(raw) };
-                event.post(CGEventTapLocation::HID);
+                if let Some((x, y)) = MAC_DELIVERY_POINT.with(std::cell::Cell::get) {
+                    event.set_location(core_graphics::geometry::CGPoint::new(x, y));
+                }
+                mac_post_event(&event);
             }
             Ok(())
         }
@@ -1552,7 +1569,8 @@ fn native_platform_permissions() -> Value {
     serde_json::json!({
         "accessibility": unsafe { accessibility_sys::AXIsProcessTrusted() },
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
-        "coordinate_capture": false,
+        "coordinate_capture": core_graphics::access::ScreenCaptureAccess.preflight()
+            && macos_capture::available(),
         "private_state": private_storage_available(),
     })
 }
@@ -1614,8 +1632,6 @@ fn native_screens() -> Result<Value, NativeError> {
 fn native_screen_content_hash() -> Result<String, NativeError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::display::CGDisplay;
-
         if !native_permissions()
             .get("coordinate_capture")
             .and_then(Value::as_bool)
@@ -1623,17 +1639,7 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
         {
             return Err(NativeError);
         }
-        let mut hasher = Sha256::new();
-        for id in CGDisplay::active_displays().map_err(|_| NativeError)? {
-            let display = CGDisplay::new(id);
-            let image = display.image().ok_or(NativeError)?;
-            let data = image.data();
-            hasher.update(id.to_be_bytes());
-            hasher.update(image.width().to_be_bytes());
-            hasher.update(image.height().to_be_bytes());
-            hasher.update(data.as_ref());
-        }
-        Ok(hex::encode(hasher.finalize()))
+        return macos_capture::screen_content_hash().map_err(|_| NativeError);
     }
     #[cfg(target_os = "linux")]
     {
@@ -3209,6 +3215,9 @@ fn mac_list_surfaces(
                 width: bounds.width,
                 height: bounds.height,
             }),
+            content_hash: u32::try_from(cg_window_number)
+                .ok()
+                .and_then(|window| macos_capture::window_content_hash(window).ok()),
         };
         let persisted = persist_private_observation(
             &id,
@@ -4556,7 +4565,7 @@ impl NativeExecutor {
                 if native.state.get("focused").and_then(Value::as_bool) != Some(true) {
                     return Err(no_effect("semantic target is not focused"));
                 }
-                let _delivery = MacDeliveryPidGuard::new(native.process_id);
+                let _delivery = MacDeliveryPidGuard::new(native.process_id, native.bounds.as_ref());
                 return self.dispatch(
                     action,
                     &ResolvedTarget::Element(Box::new(native)),
