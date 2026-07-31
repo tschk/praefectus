@@ -2639,6 +2639,16 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
 }
 
 #[cfg(target_os = "macos")]
+fn mac_scroll_action_name(direction: Direction) -> Option<&'static str> {
+    match direction {
+        Direction::Up => Some("AXScrollUpByPage"),
+        Direction::Down => Some("AXScrollDownByPage"),
+        Direction::Left => Some("AXScrollLeftByPage"),
+        Direction::Right => Some("AXScrollRightByPage"),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn mac_set_selected_range(
     element: &AxElement,
     start: u32,
@@ -4626,6 +4636,35 @@ impl NativeExecutor {
                 )?;
             if !mac_actionability_matches_observation(action, &actionability, &live_actionability) {
                 return Err(no_effect("semantic target actionability changed"));
+            }
+            if let Action::Scroll { direction, amount } = action
+                && let Some(name) = mac_scroll_action_name(*direction)
+                && element
+                    .actions()
+                    .is_ok_and(|actions| actions.iter().any(|action| action == name))
+            {
+                let name = CFString::new(name);
+                for index in 0..*amount {
+                    if index == 0 {
+                        Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+                        return Err(ambiguous("scroll interrupted after partial dispatch"));
+                    }
+                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
+                        != kAXErrorSuccess
+                    {
+                        return Err(if index == 0 {
+                            no_effect("semantic scroll is unavailable")
+                        } else {
+                            ambiguous("accessibility action outcome is unknown")
+                        });
+                    }
+                }
+                Self::check_after_effect(cancellation, deadline_at_ms)?;
+                return Ok(DispatchReceipt {
+                    backend: "praefectus-macos-ax".to_string(),
+                    fallback_chain: Vec::new(),
+                });
             }
             if matches!(
                 action,
@@ -7667,6 +7706,31 @@ mod tests {
         for pid in [1, i32::MAX] {
             assert_eq!(input_delivery(pid, false), InputDelivery::PerProcess(pid));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_semantic_scroll_names_one_page_action_per_direction() {
+        use super::{Direction, mac_scroll_action_name};
+
+        let names = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ]
+        .map(|direction| mac_scroll_action_name(direction).expect("scroll action"));
+        assert_eq!(
+            names,
+            [
+                "AXScrollUpByPage",
+                "AXScrollDownByPage",
+                "AXScrollLeftByPage",
+                "AXScrollRightByPage",
+            ]
+        );
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len());
     }
 
     #[cfg(target_os = "macos")]
