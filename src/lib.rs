@@ -1630,13 +1630,14 @@ fn native_platform_permissions() -> Value {
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
         "coordinate_capture": cfg!(feature = "screencapturekit")
             && core_graphics::access::ScreenCaptureAccess.preflight(),
+        "global_input": global_input_allowed(),
         "private_state": private_storage_available(),
     })
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn native_platform_permissions() -> Value {
-    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": private_storage_available()})
+    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": private_storage_available(), "global_input": global_input_allowed()})
 }
 
 #[cfg(windows)]
@@ -1646,12 +1647,13 @@ fn native_platform_permissions() -> Value {
         "screen_recording": false,
         "coordinate_capture": false,
         "private_state": private_storage_available(),
+        "global_input": global_input_allowed(),
     })
 }
 
 #[cfg(not(any(unix, windows)))]
 fn native_platform_permissions() -> Value {
-    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": false})
+    serde_json::json!({"accessibility": false, "screen_recording": false, "coordinate_capture": false, "private_state": false, "global_input": global_input_allowed()})
 }
 
 fn native_screens() -> Result<Value, NativeError> {

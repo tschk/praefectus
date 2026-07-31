@@ -725,6 +725,7 @@ impl LinuxAtspiBackend {
             ("atspi2".to_string(), true),
             ("coordinate_capture".to_string(), false),
             ("display_geometry".to_string(), display_geometry),
+            ("global_input".to_string(), crate::global_input_allowed()),
             ("private_state".to_string(), private_state),
             ("screen_recording".to_string(), false),
             ("wayland".to_string(), wayland),
