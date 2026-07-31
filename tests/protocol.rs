@@ -9,10 +9,11 @@ use praefectus::{
     AckState, Action, ActionCapability, ActionRequest, ApplicationOperation, AuthorityGrant,
     BackgroundSupport, CancellationToken, Capabilities, ContextPreservation, DeliveryRoute,
     Direction, DispatchError, DispatchReceipt, Ed25519AuthorityVerifier, Effect, EffectKnowledge,
-    Engine, Evidence, Executor, FailureCode, InteractionMode, MouseButton, NativeBounds,
-    NativeElement, NativeExecutor, NativePoint, Observation, PROTOCOL_VERSION, ProtocolError,
-    ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-    VerificationPolicy, WindowOperation, normalized_action_hash,
+    Engine, Evidence, Executor, FailureCode, INTERRUPTED_OUTCOME_MESSAGE, InteractionMode,
+    LedgerDecision, MemoryOutcomeLedger, MouseButton, NativeBounds, NativeElement, NativeExecutor,
+    NativePoint, NullOutcomeLedger, Observation, OutcomeKey, OutcomeLedger, PROTOCOL_VERSION,
+    ProtocolError, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
+    Terminal, VerificationPolicy, WindowOperation, normalized_action_hash,
 };
 
 #[derive(Clone, Copy)]
@@ -1416,5 +1417,150 @@ fn auxiliary_actions_reject_fenced_targets() {
     assert!(matches!(
         engine.execute(&request, &CancellationToken::default()),
         Err(ProtocolError::InvalidRequest(_))
+    ));
+}
+
+#[test]
+fn recorded_outcome_replays_after_a_lost_engine_ledger_without_dispatch() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let outcomes = Arc::new(MemoryOutcomeLedger::new());
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority())
+        .with_outcome_ledger(outcomes.clone());
+    let first = engine
+        .execute(&request("outcome-replay"), &CancellationToken::default())
+        .expect("first execution");
+    assert!(matches!(terminal(&first), Terminal::Succeeded { .. }));
+
+    let recovered_directory = tempfile::tempdir().expect("temp directory");
+    let recovered = Engine::new(
+        executor.clone(),
+        ledger_path(&recovered_directory),
+        authority(),
+    )
+    .with_outcome_ledger(outcomes.clone())
+    .execute(&request("outcome-replay"), &CancellationToken::default())
+    .expect("recovered execution");
+
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
+    assert!(matches!(terminal(&recovered), Terminal::Succeeded { .. }));
+}
+
+#[test]
+fn an_unrecorded_outcome_surfaces_interrupted_semantics_without_dispatch() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let outcomes = Arc::new(MemoryOutcomeLedger::new());
+    let request = request("outcome-interrupted");
+    let key = OutcomeKey {
+        operation_id: request.operation_id.clone(),
+        action_hash: normalized_action_hash(&request).expect("action hash"),
+    };
+    assert!(matches!(
+        outcomes.begin(&key).expect("begin"),
+        LedgerDecision::Dispatch
+    ));
+
+    let report = Engine::new(executor.clone(), ledger_path(&directory), authority())
+        .with_outcome_ledger(outcomes.clone())
+        .execute(&request, &CancellationToken::default())
+        .expect("interrupted execution");
+
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+    let terminal = terminal(&report);
+    assert!(!matches!(
+        terminal,
+        Terminal::CancelledBeforeEffect | Terminal::Succeeded { .. }
+    ));
+    match terminal {
+        Terminal::OutcomeUnknown { receipt, message } => {
+            assert!(message.contains(INTERRUPTED_OUTCOME_MESSAGE));
+            assert_eq!(receipt.effect, Effect::Unknown);
+        }
+        _ => panic!("expected outcome_unknown"),
+    }
+}
+
+#[test]
+fn an_incomplete_durable_claim_reports_the_interrupted_message() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let ledger = ledger_path(&directory);
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), &ledger, authority());
+    engine
+        .execute(&request("claim-interrupted"), &CancellationToken::default())
+        .expect("initial execution");
+    let contents = fs::read_to_string(&ledger).expect("ledger");
+    let claim = contents.lines().next().expect("claim");
+    fs::write(&ledger, format!("{claim}\n")).expect("incomplete ledger");
+
+    let recovered = engine
+        .status("claim-interrupted")
+        .expect("status")
+        .expect("recovered status");
+
+    assert!(matches!(
+        recovered.state,
+        AckState::Terminal { terminal }
+            if matches!(&*terminal, Terminal::OutcomeUnknown { message, .. }
+                if message.contains(INTERRUPTED_OUTCOME_MESSAGE))
+    ));
+}
+
+#[test]
+fn outcome_keys_separate_operations_and_action_hashes() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let outcomes = Arc::new(MemoryOutcomeLedger::new());
+    let first = request("outcome-key-a");
+    let second = request("outcome-key-b");
+    assert_ne!(
+        OutcomeKey {
+            operation_id: first.operation_id.clone(),
+            action_hash: normalized_action_hash(&first).expect("action hash"),
+        },
+        OutcomeKey {
+            operation_id: second.operation_id.clone(),
+            action_hash: normalized_action_hash(&second).expect("action hash"),
+        }
+    );
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority())
+        .with_outcome_ledger(outcomes.clone());
+    engine
+        .execute(&first, &CancellationToken::default())
+        .expect("first execution");
+    engine
+        .execute(&second, &CancellationToken::default())
+        .expect("second execution");
+
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 2);
+
+    let mut changed = request("outcome-key-a");
+    changed.action = Action::Scroll {
+        direction: Direction::Up,
+        amount: 2,
+    };
+    sign_request(&mut changed);
+    assert!(matches!(
+        engine.execute(&changed, &CancellationToken::default()),
+        Err(ProtocolError::Conflict)
+    ));
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn the_null_outcome_ledger_always_grants_dispatch() {
+    let key = OutcomeKey {
+        operation_id: "null-ledger".to_string(),
+        action_hash: "hash".to_string(),
+    };
+    let ledger = NullOutcomeLedger;
+    ledger
+        .record(&key, &Terminal::CancelledBeforeEffect)
+        .expect("record");
+
+    assert!(matches!(
+        ledger.begin(&key).expect("begin"),
+        LedgerDecision::Dispatch
     ));
 }
