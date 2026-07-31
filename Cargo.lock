@@ -830,6 +830,7 @@ dependencies = [
  "core-foundation",
  "core-graphics",
  "ed25519-dalek",
+ "foreign-types",
  "fs2",
  "hex",
  "libc",

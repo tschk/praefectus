@@ -33,6 +33,18 @@ const MAX_COORDINATE_OBSERVATION_AGE_MS: i64 = 30_000;
 const MAX_VERIFICATION_JSON_BYTES: usize = 64 * 1024;
 const MAX_VERIFICATION_JSON_DEPTH: usize = 32;
 const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
+const MAX_SELECT_TEXT_RANGE: u32 = 1_048_576;
+const MAX_DRAG_STEPS: i64 = 24;
+const SECONDARY_ACTIONS: [&str; 8] = [
+    "AXShowMenu",
+    "AXShowDefaultUI",
+    "AXShowAlternateUI",
+    "AXIncrement",
+    "AXDecrement",
+    "AXConfirm",
+    "AXCancel",
+    "AXPick",
+];
 #[cfg(target_os = "macos")]
 const MAX_MAC_SEMANTIC_ELEMENTS: usize = 512;
 #[cfg(target_os = "macos")]
@@ -108,6 +120,7 @@ pub enum SessionIsolation {
 pub enum DeliveryRoute {
     TargetAddressed,
     Pointer,
+    SkyLightPerPid,
     Unknown,
 }
 
@@ -231,6 +244,17 @@ pub enum Action {
         amount: u32,
     },
     Move,
+    Drag {
+        to: TargetRef,
+        button: MouseButton,
+    },
+    SelectText {
+        start: u32,
+        length: u32,
+    },
+    PerformSecondaryAction {
+        name: String,
+    },
     SetValue {
         value: String,
     },
@@ -320,6 +344,20 @@ impl std::fmt::Debug for Action {
                 .field("amount", amount)
                 .finish(),
             Self::Move => formatter.write_str("Move"),
+            Self::Drag { button, .. } => formatter
+                .debug_struct("Drag")
+                .field("to", &"[redacted]")
+                .field("button", button)
+                .finish(),
+            Self::SelectText { start, length } => formatter
+                .debug_struct("SelectText")
+                .field("start", start)
+                .field("length", length)
+                .finish(),
+            Self::PerformSecondaryAction { name } => formatter
+                .debug_struct("PerformSecondaryAction")
+                .field("name", name)
+                .finish(),
             Self::SetValue { .. } => formatter
                 .debug_struct("SetValue")
                 .field("value", &"[redacted]")
@@ -364,6 +402,9 @@ impl Action {
             Self::Hotkey { .. } => "hotkey",
             Self::Scroll { .. } => "scroll",
             Self::Move => "move",
+            Self::Drag { .. } => "drag",
+            Self::SelectText { .. } => "select_text",
+            Self::PerformSecondaryAction { .. } => "perform_secondary_action",
             Self::SetValue { .. } => "set_value",
             Self::Screenshot { .. } => "screenshot",
             Self::Application { .. } => "application",
@@ -376,7 +417,10 @@ impl Action {
 
 pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
     match action {
-        Action::Invoke | Action::SetValue { .. } => DeliveryRoute::TargetAddressed,
+        Action::Invoke
+        | Action::SetValue { .. }
+        | Action::SelectText { .. }
+        | Action::PerformSecondaryAction { .. } => DeliveryRoute::TargetAddressed,
         Action::Screenshot { .. }
         | Action::Application { .. }
         | Action::Window { .. }
@@ -801,8 +845,46 @@ const MAC_FLAG_ALTERNATE: u64 = 1 << 19;
 const MAC_FLAG_COMMAND: u64 = 1 << 20;
 
 #[cfg(target_os = "macos")]
+thread_local! {
+    static MAC_DELIVERY_PID: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(target_os = "macos")]
+struct MacDeliveryPidGuard;
+
+#[cfg(target_os = "macos")]
+impl MacDeliveryPidGuard {
+    fn new(pid: Option<i32>) -> Self {
+        MAC_DELIVERY_PID.with(|value| value.set(pid.unwrap_or(0)));
+        Self
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacDeliveryPidGuard {
+    fn drop(&mut self) {
+        MAC_DELIVERY_PID.with(|value| value.set(0));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_post_event(event: &core_graphics::event::CGEvent) {
+    use core_graphics::event::CGEventTapLocation;
+
+    #[cfg(feature = "skylight")]
+    {
+        use foreign_types::ForeignType;
+        let pid = MAC_DELIVERY_PID.with(std::cell::Cell::get);
+        if pid > 0 && skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
+            return;
+        }
+    }
+    event.post(CGEventTapLocation::HID);
+}
+
+#[cfg(target_os = "macos")]
 fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation};
+    use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     let source =
         CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
@@ -810,14 +892,14 @@ fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
     event.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
         flags,
     ));
-    event.post(CGEventTapLocation::HID);
+    mac_post_event(&event);
     let source_up =
         CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
     let event_up = CGEvent::new_keyboard_event(source_up, code, false).map_err(|_| NativeError)?;
     event_up.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
         flags,
     ));
-    event_up.post(CGEventTapLocation::HID);
+    mac_post_event(&event_up);
     Ok(())
 }
 
@@ -863,6 +945,17 @@ impl NativeRuntime {
             Target::Point(point) => native_click(&point, button).map_err(ambiguous_dispatch),
             Target::Element(_) => Err(unsupported("click requires a pointer target")),
         }
+    }
+
+    fn drag(
+        &self,
+        origin: &NativePoint,
+        destination: &NativePoint,
+        button: &str,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<(), DispatchError> {
+        native_drag(origin, destination, button, cancellation, deadline_at_ms)
     }
 
     fn move_cursor(&self, target: Target) -> Result<(), NativeError> {
@@ -1702,6 +1795,70 @@ fn native_target_content_hash(point: &NativePoint) -> Result<String, NativeError
     }
 }
 
+fn native_drag(
+    origin: &NativePoint,
+    destination: &NativePoint,
+    button: &str,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        use core_graphics::geometry::CGPoint;
+
+        if button != "left" {
+            return Err(unsupported("drag supports only the left button"));
+        }
+        if !native_permissions()
+            .get("accessibility")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(unsupported("accessibility permission is unavailable"));
+        }
+        if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+            return Err(no_effect("drag was interrupted before dispatch"));
+        }
+        let post = |kind: CGEventType, point: CGPoint| -> Result<(), DispatchError> {
+            let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+                .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
+            let event = CGEvent::new_mouse_event(source, kind, point, CGMouseButton::Left)
+                .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
+            event.post(CGEventTapLocation::HID);
+            Ok(())
+        };
+        let start = CGPoint::new(origin.x as f64, origin.y as f64);
+        let end = CGPoint::new(destination.x as f64, destination.y as f64);
+        post(CGEventType::LeftMouseDown, start)?;
+        let mut interrupted = false;
+        for step in 1..=MAX_DRAG_STEPS {
+            if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+                interrupted = true;
+                break;
+            }
+            let ratio = step as f64 / MAX_DRAG_STEPS as f64;
+            let point = CGPoint::new(
+                start.x + (end.x - start.x) * ratio,
+                start.y + (end.y - start.y) * ratio,
+            );
+            post(CGEventType::LeftMouseDragged, point)?;
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        post(CGEventType::LeftMouseUp, end)?;
+        if interrupted {
+            return Err(ambiguous("drag interrupted after partial dispatch"));
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (origin, destination, button, cancellation, deadline_at_ms);
+        Err(unsupported("drag is unavailable on this backend"))
+    }
+}
+
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
@@ -2381,7 +2538,8 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
         && actionability.stable;
     match action {
         Action::Invoke => base && actionability.invokable,
-        Action::SetValue { .. } => base && actionability.editable,
+        Action::SetValue { .. } | Action::SelectText { .. } => base && actionability.editable,
+        Action::PerformSecondaryAction { .. } => base,
         Action::TypeText { .. }
         | Action::Press { .. }
         | Action::Paste { .. }
@@ -2389,6 +2547,87 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
         | Action::Scroll { .. } => base,
         _ => false,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_set_selected_range(
+    element: &AxElement,
+    start: u32,
+    length: u32,
+) -> Result<(), DispatchError> {
+    use accessibility_sys::{
+        AXUIElementSetAttributeValue, AXValueCreate, kAXErrorSuccess, kAXValueTypeCFRange,
+    };
+    use core_foundation::base::{CFRange, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    let range = CFRange {
+        location: i64::from(start) as isize,
+        length: i64::from(length) as isize,
+    };
+    let value = unsafe {
+        AXValueCreate(
+            kAXValueTypeCFRange,
+            std::ptr::from_ref(&range).cast::<std::ffi::c_void>(),
+        )
+    };
+    if value.is_null() {
+        return Err(no_effect("text selection range is unavailable"));
+    }
+    let attribute = CFString::new("AXSelectedTextRange");
+    let status = unsafe {
+        AXUIElementSetAttributeValue(
+            element.0,
+            attribute.as_concrete_TypeRef(),
+            value.cast::<std::ffi::c_void>(),
+        )
+    };
+    unsafe { CFRelease(value.cast::<std::ffi::c_void>() as CFTypeRef) };
+    if status != kAXErrorSuccess {
+        return Err(ambiguous("accessibility action outcome is unknown"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_selected_range(element: &AxElement) -> Option<(u32, u32)> {
+    use accessibility_sys::{
+        AXUIElementCopyAttributeValue, AXValueGetValue, kAXErrorSuccess, kAXValueTypeCFRange,
+    };
+    use core_foundation::base::{CFRange, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    let attribute = CFString::new("AXSelectedTextRange");
+    let mut value: CFTypeRef = std::ptr::null();
+    let status = unsafe {
+        AXUIElementCopyAttributeValue(
+            element.0,
+            attribute.as_concrete_TypeRef(),
+            std::ptr::from_mut(&mut value),
+        )
+    };
+    if status != kAXErrorSuccess || value.is_null() {
+        return None;
+    }
+    let mut range = CFRange {
+        location: 0,
+        length: 0,
+    };
+    let copied = unsafe {
+        AXValueGetValue(
+            value.cast_mut().cast(),
+            kAXValueTypeCFRange,
+            std::ptr::from_mut(&mut range).cast::<std::ffi::c_void>(),
+        )
+    };
+    unsafe { CFRelease(value) };
+    if !copied || range.location < 0 || range.length < 0 {
+        return None;
+    }
+    Some((
+        u32::try_from(range.location).ok()?,
+        u32::try_from(range.length).ok()?,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -4305,6 +4544,7 @@ impl NativeExecutor {
                 if native.state.get("focused").and_then(Value::as_bool) != Some(true) {
                     return Err(no_effect("semantic target is not focused"));
                 }
+                let _delivery = MacDeliveryPidGuard::new(native.process_id);
                 return self.dispatch(
                     action,
                     &ResolvedTarget::Element(Box::new(native)),
@@ -4351,6 +4591,42 @@ impl NativeExecutor {
                             value.as_CFTypeRef(),
                         )
                     } != kAXErrorSuccess
+                    {
+                        return Err(ambiguous("accessibility action outcome is unknown"));
+                    }
+                }
+                Action::SelectText { start, length } => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !element.is_settable("AXSelectedTextRange") {
+                        return Err(no_effect("semantic target has no settable text selection"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    mac_set_selected_range(&element, *start, *length)?;
+                    if mac_selected_range(&element) != Some((*start, *length)) {
+                        return Err(ambiguous("text selection outcome is unknown"));
+                    }
+                }
+                Action::PerformSecondaryAction { name } => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !secondary_action_allowed(name) {
+                        return Err(unsupported("secondary action is not permitted"));
+                    }
+                    if !element
+                        .actions()
+                        .is_ok_and(|actions| actions.iter().any(|action| action == name))
+                    {
+                        return Err(no_effect("semantic target does not advertise that action"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    let name = CFString::new(name);
+                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
+                        != kAXErrorSuccess
                     {
                         return Err(ambiguous("accessibility action outcome is unknown"));
                     }
@@ -4991,7 +5267,10 @@ fn macos_semantic_actions(accessibility: bool) -> Vec<&'static str> {
         vec![
             "invoke",
             "set_value",
+            "select_text",
+            "perform_secondary_action",
             "click",
+            "drag",
             "type_text",
             "press",
             "paste",
@@ -5181,12 +5460,19 @@ impl Executor for NativeExecutor {
                 .map(|action| ActionCapability {
                     action: (*action).to_string(),
                     delivery_route: match *action {
-                        "invoke" | "set_value" => DeliveryRoute::TargetAddressed,
-                        "scroll" => DeliveryRoute::TargetAddressed,
-                        _ => DeliveryRoute::Pointer,
+                        "invoke"
+                        | "set_value"
+                        | "select_text"
+                        | "perform_secondary_action"
+                        | "scroll" => DeliveryRoute::TargetAddressed,
+                        _ => native_pointer_delivery_route(),
                     },
                     background_support: match *action {
-                        "invoke" | "set_value" | "scroll" => BackgroundSupport::Guarded,
+                        "invoke"
+                        | "set_value"
+                        | "select_text"
+                        | "perform_secondary_action"
+                        | "scroll" => BackgroundSupport::Guarded,
                         _ => BackgroundSupport::Unavailable,
                     },
                 })
@@ -5571,6 +5857,37 @@ impl Executor for NativeExecutor {
                         fallback_chain: Vec::new(),
                     }
                 });
+            }
+            Action::Drag { to, button } => {
+                if !matches!(button, MouseButton::Left) {
+                    return Err(unsupported("drag supports only the left button"));
+                }
+                let ResolvedTarget::Point(origin) = target else {
+                    return Err(no_effect("drag requires a fenced coordinate target"));
+                };
+                let destination =
+                    Executor::resolve_with_boundary(self, to, cancellation, deadline_at_ms)
+                        .map_err(|_| no_effect("drag destination is not fenced"))?;
+                let ResolvedTarget::Point(destination) = destination else {
+                    return Err(no_effect("drag destination is not a fenced coordinate"));
+                };
+                Self::check_before_effect(cancellation, deadline_at_ms)?;
+                self.runtime
+                    .drag(origin, &destination, "left", cancellation, deadline_at_ms)?;
+                if matches!(verification, VerificationPolicy::None) {
+                    return Err(ambiguous("native input event delivery cannot be verified"));
+                }
+                return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
+                    DispatchReceipt {
+                        backend: self.runtime.resolve_backend().to_string(),
+                        fallback_chain: Vec::new(),
+                    }
+                });
+            }
+            Action::SelectText { .. } | Action::PerformSecondaryAction { .. } => {
+                return Err(no_effect(
+                    "action requires a fenced semantic element target",
+                ));
             }
             Action::SetValue { value } => {
                 if !cfg!(target_os = "macos") {
@@ -6129,10 +6446,29 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     }
     validate_action(&request.action)?;
     if matches!(request.target, TargetRef::Coordinates { .. })
-        && !matches!(request.action, Action::Click { .. } | Action::Move)
+        && !matches!(
+            request.action,
+            Action::Click { .. } | Action::Move | Action::Drag { .. }
+        )
     {
         return Err(ProtocolError::InvalidRequest(
-            "coordinate targets support only click and move".to_string(),
+            "coordinate targets support only click, move, and drag".to_string(),
+        ));
+    }
+    if matches!(request.action, Action::Drag { .. })
+        && !matches!(request.target, TargetRef::Coordinates { .. })
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "drag requires a fenced coordinate target".to_string(),
+        ));
+    }
+    if matches!(
+        request.action,
+        Action::SelectText { .. } | Action::PerformSecondaryAction { .. }
+    ) && !matches!(request.target, TargetRef::Element { .. })
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "action requires a fenced semantic element target".to_string(),
         ));
     }
     validate_verification(&request.verification)?;
@@ -6200,6 +6536,59 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+#[cfg(all(target_os = "macos", feature = "skylight"))]
+mod skylight {
+    use std::ffi::{CString, c_void};
+    use std::sync::OnceLock;
+
+    type PostToPid = unsafe extern "C" fn(i32, *const c_void) -> i32;
+
+    const FRAMEWORK: &str = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
+    const SYMBOL: &str = "SLEventPostToPid";
+
+    fn entry() -> Option<PostToPid> {
+        static ENTRY: OnceLock<Option<usize>> = OnceLock::new();
+        let address = (*ENTRY.get_or_init(|| {
+            let path = CString::new(FRAMEWORK).ok()?;
+            let symbol = CString::new(SYMBOL).ok()?;
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) };
+            if handle.is_null() {
+                return None;
+            }
+            let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
+            if address.is_null() {
+                None
+            } else {
+                Some(address as usize)
+            }
+        }))?;
+        Some(unsafe { std::mem::transmute::<usize, PostToPid>(address) })
+    }
+
+    pub(crate) fn available() -> bool {
+        entry().is_some()
+    }
+
+    pub(crate) fn post_to_pid(pid: i32, event: *const c_void) -> bool {
+        if pid <= 0 || event.is_null() {
+            return false;
+        }
+        entry().is_some_and(|post| unsafe { post(pid, event) } == 0)
+    }
+}
+
+fn native_pointer_delivery_route() -> DeliveryRoute {
+    #[cfg(all(target_os = "macos", feature = "skylight"))]
+    if skylight::available() {
+        return DeliveryRoute::SkyLightPerPid;
+    }
+    DeliveryRoute::Pointer
+}
+
+fn secondary_action_allowed(name: &str) -> bool {
+    SECONDARY_ACTIONS.contains(&name)
+}
+
 fn validate_action(action: &Action) -> Result<(), ProtocolError> {
     let valid = match action {
         Action::Invoke => true,
@@ -6227,6 +6616,11 @@ fn validate_action(action: &Action) -> Result<(), ProtocolError> {
         }
         Action::Scroll { amount, .. } => (1..=100).contains(amount),
         Action::Move => true,
+        Action::Drag { to, .. } => matches!(to, TargetRef::Coordinates { .. }),
+        Action::SelectText { start, length } => {
+            u64::from(*start).saturating_add(u64::from(*length)) <= u64::from(MAX_SELECT_TEXT_RANGE)
+        }
+        Action::PerformSecondaryAction { name } => secondary_action_allowed(name),
         Action::SetValue { value } => value.len() <= 16 * 1024,
         Action::Screenshot { path } => {
             path.is_absolute()
@@ -7110,7 +7504,10 @@ mod tests {
             vec![
                 "invoke",
                 "set_value",
+                "select_text",
+                "perform_secondary_action",
                 "click",
+                "drag",
                 "type_text",
                 "press",
                 "paste",
