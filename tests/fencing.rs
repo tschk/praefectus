@@ -24,16 +24,7 @@ type RequestAttack = (&'static str, fn(&mut ActionRequest));
 const NOW_MS: i64 = 1_700_000_000_000;
 const COORDINATE_AGE_LIMIT_MS: i64 = 30_000;
 const SELECT_TEXT_RANGE_LIMIT: u32 = 1_048_576;
-const ALLOWED_SECONDARY_ACTIONS: [&str; 8] = [
-    "AXShowMenu",
-    "AXShowDefaultUI",
-    "AXShowAlternateUI",
-    "AXIncrement",
-    "AXDecrement",
-    "AXConfirm",
-    "AXCancel",
-    "AXPick",
-];
+use praefectus::SECONDARY_ACTIONS as ALLOWED_SECONDARY_ACTIONS;
 
 #[derive(Clone)]
 struct CoordinateFence {
