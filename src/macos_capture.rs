@@ -38,7 +38,21 @@ fn capture(filter: &SCContentFilter, width: u32, height: u32) -> Result<CGImage,
         .map_err(|_| CaptureError)
 }
 
+const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(crate) fn screen_content_hash() -> Result<String, CaptureError> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .spawn(move || {
+            let _ = sender.send(blocking_screen_content_hash());
+        })
+        .map_err(|_| CaptureError)?;
+    receiver
+        .recv_timeout(CAPTURE_TIMEOUT)
+        .map_err(|_| CaptureError)?
+}
+
+fn blocking_screen_content_hash() -> Result<String, CaptureError> {
     let displays = displays()?;
     if displays.is_empty() {
         return Err(CaptureError);
@@ -50,8 +64,10 @@ pub(crate) fn screen_content_hash() -> Result<String, CaptureError> {
             .with_display(&display)
             .with_excluding_windows(&[])
             .build();
-        let image = capture(&filter, frame.size.width as u32, frame.size.height as u32)?;
+        let image = capture(&filter, display.width(), display.height())?;
         hasher.update(display.display_id().to_be_bytes());
+        hasher.update(frame.size.width.to_bits().to_be_bytes());
+        hasher.update(frame.size.height.to_bits().to_be_bytes());
         image_digest(&image, &mut hasher);
     }
     Ok(hex::encode(hasher.finalize()))
