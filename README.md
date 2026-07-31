@@ -1,6 +1,6 @@
 # Praefectus
 
-Praefectus 0.5.0 implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
+Praefectus 0.6.0 implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
 
 The protocol provides durable at-most-once dispatch. Desktop and browser APIs are not transactional, so a crash, cancellation, or verification failure after dispatch can produce `outcome_unknown`; Praefectus never reports those cases as safely cancelled or retries them automatically.
 
@@ -37,6 +37,8 @@ macOS delivers input aimed at a fenced element to that element's process through
 Strong noninterference requires a host-owned isolated desktop, browser profile/process, session, container, or virtual machine. `host_isolated` records that trusted executor configuration; Praefectus does not create or coordinate those environments. CDP invoke, scroll, and value actions are background-capable only under that isolation contract. This follows the common split in the reviewed systems: exact semantic or protocol-addressed delivery can avoid activation, while dependable concurrent pointer input requires a separately owned environment.
 
 Protocol v2 accepts native coordinate targets only from a current `NativeExecutor::observe_coordinates` record whose display geometry and screen-content hashes still match. The native and CDP backends do not return screenshot bytes. Screenshot bytes never enter requests, receipts, ledgers, trajectories, or plugin results.
+
+`screenshot`, `application`, `window`, `open`, and `clipboard_write` are auxiliary host-level actions, not fenced ones. They name an application or window by string rather than by an observation-fenced target, they are not advertised in the semantic action capabilities, and their effects are not verified against a fenced element. On macOS they are carried out through the platform's own scripting and utility programs, resolved from a fixed directory list rather than through `PATH`; `window` uses accessibility actions rather than synthesized pointer input. A host that needs these effects bound to a specific observed window should close or focus through a fenced semantic target instead.
 
 ## Protocol guarantees
 
