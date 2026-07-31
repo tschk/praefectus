@@ -120,7 +120,7 @@ pub enum SessionIsolation {
 pub enum DeliveryRoute {
     TargetAddressed,
     Pointer,
-    SkyLightPerPid,
+    PerProcessEvent,
     Unknown,
 }
 
@@ -434,9 +434,14 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
 fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute {
     match (action, target) {
         (
-            Action::Invoke | Action::SetValue { .. } | Action::Scroll { .. },
+            Action::Invoke
+            | Action::SetValue { .. }
+            | Action::SelectText { .. }
+            | Action::PerformSecondaryAction { .. }
+            | Action::Scroll { .. },
             TargetRef::Element { .. },
         ) => DeliveryRoute::TargetAddressed,
+        (_, TargetRef::Element { .. }) => native_pointer_delivery_route(),
         _ => DeliveryRoute::Pointer,
     }
 }
@@ -871,13 +876,17 @@ impl Drop for MacDeliveryPidGuard {
 fn mac_post_event(event: &core_graphics::event::CGEvent) {
     use core_graphics::event::CGEventTapLocation;
 
-    #[cfg(feature = "skylight")]
-    {
-        use foreign_types::ForeignType;
-        let pid = MAC_DELIVERY_PID.with(std::cell::Cell::get);
-        if pid > 0 && skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-            return;
+    let pid = MAC_DELIVERY_PID.with(std::cell::Cell::get);
+    if pid > 0 {
+        #[cfg(feature = "skylight")]
+        {
+            use foreign_types::ForeignType;
+            if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
+                return;
+            }
         }
+        event.post_to_pid(pid);
+        return;
     }
     event.post(CGEventTapLocation::HID);
 }
@@ -1804,7 +1813,7 @@ fn native_drag(
 ) -> Result<(), DispatchError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
         use core_graphics::geometry::CGPoint;
 
@@ -1826,7 +1835,7 @@ fn native_drag(
                 .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
             let event = CGEvent::new_mouse_event(source, kind, point, CGMouseButton::Left)
                 .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
-            event.post(CGEventTapLocation::HID);
+            mac_post_event(&event);
             Ok(())
         };
         let start = CGPoint::new(origin.x as f64, origin.y as f64);
@@ -1862,7 +1871,7 @@ fn native_drag(
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
         use core_graphics::geometry::CGPoint;
 
@@ -1900,8 +1909,8 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
             .map_err(|_| NativeError)?;
         let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
             .map_err(|_| NativeError)?;
-        down_event.post(CGEventTapLocation::HID);
-        up_event.post(CGEventTapLocation::HID);
+        mac_post_event(&down_event);
+        mac_post_event(&up_event);
         Ok(())
     }
     #[cfg(windows)]
@@ -1969,7 +1978,7 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
 fn native_move(point: &NativePoint) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
         use core_graphics::geometry::CGPoint;
 
@@ -1989,7 +1998,7 @@ fn native_move(point: &NativePoint) -> Result<(), NativeError> {
             CGMouseButton::Left,
         )
         .map_err(|_| NativeError)?;
-        event.post(CGEventTapLocation::HID);
+        mac_post_event(&event);
         Ok(())
     }
     #[cfg(windows)]
@@ -4307,10 +4316,13 @@ fn strict_action_capability<'a>(
     let mut facts = BTreeMap::new();
     for capability in &capabilities.action_capabilities {
         let route_is_valid = match capability.action.as_str() {
-            "invoke" | "set_value" => capability.delivery_route == DeliveryRoute::TargetAddressed,
-            "click" | "type_text" | "press" | "paste" | "hotkey" | "move" => {
-                capability.delivery_route == DeliveryRoute::Pointer
+            "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                capability.delivery_route == DeliveryRoute::TargetAddressed
             }
+            "click" | "drag" | "type_text" | "press" | "paste" | "hotkey" | "move" => matches!(
+                capability.delivery_route,
+                DeliveryRoute::Pointer | DeliveryRoute::PerProcessEvent
+            ),
             "scroll" => matches!(
                 capability.delivery_route,
                 DeliveryRoute::Pointer | DeliveryRoute::TargetAddressed
@@ -5473,6 +5485,9 @@ impl Executor for NativeExecutor {
                         | "select_text"
                         | "perform_secondary_action"
                         | "scroll" => BackgroundSupport::Guarded,
+                        _ if native_pointer_delivery_route() == DeliveryRoute::PerProcessEvent => {
+                            BackgroundSupport::Guarded
+                        }
                         _ => BackgroundSupport::Unavailable,
                     },
                 })
@@ -6565,10 +6580,6 @@ mod skylight {
         Some(unsafe { std::mem::transmute::<usize, PostToPid>(address) })
     }
 
-    pub(crate) fn available() -> bool {
-        entry().is_some()
-    }
-
     pub(crate) fn post_to_pid(pid: i32, event: *const c_void) -> bool {
         if pid <= 0 || event.is_null() {
             return false;
@@ -6578,11 +6589,11 @@ mod skylight {
 }
 
 fn native_pointer_delivery_route() -> DeliveryRoute {
-    #[cfg(all(target_os = "macos", feature = "skylight"))]
-    if skylight::available() {
-        return DeliveryRoute::SkyLightPerPid;
+    if cfg!(target_os = "macos") {
+        DeliveryRoute::PerProcessEvent
+    } else {
+        DeliveryRoute::Pointer
     }
-    DeliveryRoute::Pointer
 }
 
 fn secondary_action_allowed(name: &str) -> bool {
