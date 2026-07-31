@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "screencapturekit"))]
 mod macos_capture;
 
 #[cfg(target_os = "macos")]
@@ -1580,7 +1580,8 @@ fn native_platform_permissions() -> Value {
     serde_json::json!({
         "accessibility": unsafe { accessibility_sys::AXIsProcessTrusted() },
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
-        "coordinate_capture": core_graphics::access::ScreenCaptureAccess.preflight(),
+        "coordinate_capture": cfg!(feature = "screencapturekit")
+            && core_graphics::access::ScreenCaptureAccess.preflight(),
         "private_state": private_storage_available(),
     })
 }
@@ -1649,7 +1650,10 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
         {
             return Err(NativeError);
         }
+        #[cfg(feature = "screencapturekit")]
         return macos_capture::screen_content_hash().map_err(|_| NativeError);
+        #[cfg(not(feature = "screencapturekit"))]
+        return Err(NativeError);
     }
     #[cfg(target_os = "linux")]
     {
