@@ -43,6 +43,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_click_at_current_cursor_position() {
         // Move to a safe position first, then click
         let executor = NativeExecutor::default();
@@ -76,6 +77,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_type_text_types_characters() {
         let executor = NativeExecutor::default();
         let receipt = executor
@@ -96,6 +98,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_press_sends_key_events() {
         let executor = NativeExecutor::default();
         // Press escape — safe, no side effects
@@ -116,6 +119,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_hotkey_sends_modifier_combo() {
         let executor = NativeExecutor::default();
         // Cmd+Space — Spotlight toggle, will open/close it
@@ -134,6 +138,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_scroll_scrolls_vertically() {
         let executor = NativeExecutor::default();
         let receipt = executor
@@ -152,6 +157,7 @@ mod native_input_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn native_paste_writes_clipboard_and_pastes() {
         let executor = NativeExecutor::default();
         let receipt = executor

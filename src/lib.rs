@@ -614,7 +614,6 @@ pub struct SurfaceDescriptor {
     pub window_id: String,
     pub display_geometry_hash: String,
     pub bounds: Option<Rect>,
-    pub content_hash: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -888,7 +887,15 @@ impl Drop for MacDeliveryPidGuard {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_post_event(event: &core_graphics::event::CGEvent) {
+fn global_input_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeError> {
     use core_graphics::event::CGEventTapLocation;
 
     let pid = MAC_DELIVERY_PID.with(std::cell::Cell::get);
@@ -897,13 +904,17 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) {
         {
             use foreign_types::ForeignType;
             if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-                return;
+                return Ok(());
             }
         }
         event.post_to_pid(pid);
-        return;
+        return Ok(());
+    }
+    if !global_input_allowed() {
+        return Err(NativeError);
     }
     event.post(CGEventTapLocation::HID);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -916,14 +927,14 @@ fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
     event.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
         flags,
     ));
-    mac_post_event(&event);
+    mac_post_event(&event)?;
     let source_up =
         CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
     let event_up = CGEvent::new_keyboard_event(source_up, code, false).map_err(|_| NativeError)?;
     event_up.set_flags(core_graphics::event::CGEventFlags::from_bits_truncate(
         flags,
     ));
-    mac_post_event(&event_up);
+    mac_post_event(&event_up)?;
     Ok(())
 }
 
@@ -1520,7 +1531,7 @@ impl NativeRuntime {
                 if let Some((x, y)) = MAC_DELIVERY_POINT.with(std::cell::Cell::get) {
                     event.set_location(core_graphics::geometry::CGPoint::new(x, y));
                 }
-                mac_post_event(&event);
+                mac_post_event(&event)?;
             }
             Ok(())
         }
@@ -1569,8 +1580,7 @@ fn native_platform_permissions() -> Value {
     serde_json::json!({
         "accessibility": unsafe { accessibility_sys::AXIsProcessTrusted() },
         "screen_recording": core_graphics::access::ScreenCaptureAccess.preflight(),
-        "coordinate_capture": core_graphics::access::ScreenCaptureAccess.preflight()
-            && macos_capture::available(),
+        "coordinate_capture": core_graphics::access::ScreenCaptureAccess.preflight(),
         "private_state": private_storage_available(),
     })
 }
@@ -1841,7 +1851,7 @@ fn native_drag(
                 .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
             let event = CGEvent::new_mouse_event(source, kind, point, CGMouseButton::Left)
                 .map_err(|_| ambiguous("drag dispatch outcome is unknown"))?;
-            mac_post_event(&event);
+            mac_post_event(&event).map_err(|_| unsupported("global pointer input is disabled"))?;
             Ok(())
         };
         let start = CGPoint::new(origin.x as f64, origin.y as f64);
@@ -1915,8 +1925,8 @@ fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
             .map_err(|_| NativeError)?;
         let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
             .map_err(|_| NativeError)?;
-        mac_post_event(&down_event);
-        mac_post_event(&up_event);
+        mac_post_event(&down_event)?;
+        mac_post_event(&up_event)?;
         Ok(())
     }
     #[cfg(windows)]
@@ -2004,7 +2014,7 @@ fn native_move(point: &NativePoint) -> Result<(), NativeError> {
             CGMouseButton::Left,
         )
         .map_err(|_| NativeError)?;
-        mac_post_event(&event);
+        mac_post_event(&event)?;
         Ok(())
     }
     #[cfg(windows)]
@@ -3215,9 +3225,6 @@ fn mac_list_surfaces(
                 width: bounds.width,
                 height: bounds.height,
             }),
-            content_hash: u32::try_from(cg_window_number)
-                .ok()
-                .and_then(|window| macos_capture::window_content_hash(window).ok()),
         };
         let persisted = persist_private_observation(
             &id,
@@ -5486,7 +5493,10 @@ impl Executor for NativeExecutor {
                         | "select_text"
                         | "perform_secondary_action"
                         | "scroll" => DeliveryRoute::TargetAddressed,
-                        _ => native_pointer_delivery_route(),
+                        "type_text" | "press" | "paste" | "hotkey" => {
+                            native_pointer_delivery_route()
+                        }
+                        _ => DeliveryRoute::Pointer,
                     },
                     background_support: match *action {
                         "invoke"
@@ -5494,7 +5504,10 @@ impl Executor for NativeExecutor {
                         | "select_text"
                         | "perform_secondary_action"
                         | "scroll" => BackgroundSupport::Guarded,
-                        _ if native_pointer_delivery_route() == DeliveryRoute::PerProcessEvent => {
+                        "type_text" | "press" | "paste" | "hotkey"
+                            if native_pointer_delivery_route()
+                                == DeliveryRoute::PerProcessEvent =>
+                        {
                             BackgroundSupport::Guarded
                         }
                         _ => BackgroundSupport::Unavailable,
@@ -6518,7 +6531,44 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid deadline or authority signature".to_string(),
         ));
     }
-    let valid_snapshot = match &request.target {
+    let valid_snapshot = target_provenance_is_valid(&request.target);
+    if !valid_snapshot {
+        return Err(ProtocolError::InvalidRequest(
+            "invalid target provenance".to_string(),
+        ));
+    }
+    if let Action::Drag { to, .. } = &request.action {
+        if !target_provenance_is_valid(to) {
+            return Err(ProtocolError::InvalidRequest(
+                "invalid drag destination provenance".to_string(),
+            ));
+        }
+        let TargetRef::Coordinates { snapshot_id, .. } = to else {
+            return Err(ProtocolError::InvalidRequest(
+                "drag requires a fenced coordinate destination".to_string(),
+            ));
+        };
+        if !valid_protocol_snapshot_id(snapshot_id) {
+            return Err(ProtocolError::InvalidRequest(
+                "invalid drag destination snapshot ID".to_string(),
+            ));
+        }
+    }
+    let snapshot_id = match &request.target {
+        TargetRef::Coordinates { snapshot_id, .. } => Some(snapshot_id),
+        TargetRef::Element { target } => Some(&target.observation_id),
+        TargetRef::None => None,
+    };
+    if snapshot_id.is_some_and(|snapshot_id| !valid_protocol_snapshot_id(snapshot_id)) {
+        return Err(ProtocolError::InvalidRequest(
+            "invalid snapshot ID".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn target_provenance_is_valid(target: &TargetRef) -> bool {
+    match target {
         TargetRef::Coordinates {
             snapshot_id,
             display_id,
@@ -6541,23 +6591,7 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
                 && semantic_hash(&target.fingerprint_hash)
         }
         TargetRef::None => true,
-    };
-    if !valid_snapshot {
-        return Err(ProtocolError::InvalidRequest(
-            "invalid target provenance".to_string(),
-        ));
     }
-    let snapshot_id = match &request.target {
-        TargetRef::Coordinates { snapshot_id, .. } => Some(snapshot_id),
-        TargetRef::Element { target } => Some(&target.observation_id),
-        TargetRef::None => None,
-    };
-    if snapshot_id.is_some_and(|snapshot_id| !valid_protocol_snapshot_id(snapshot_id)) {
-        return Err(ProtocolError::InvalidRequest(
-            "invalid snapshot ID".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(all(target_os = "macos", feature = "skylight"))]

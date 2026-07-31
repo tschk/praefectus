@@ -1193,30 +1193,31 @@ fn new_actions_reject_target_kinds_they_cannot_fence() {
 }
 
 #[test]
-fn a_drag_destination_with_invalid_provenance_never_succeeds() {
+fn a_drag_destination_with_invalid_provenance_is_refused_before_any_claim() {
     let directory = tempfile::tempdir().expect("temp directory");
     let (executor, engine) = harness(&directory);
-    let report = engine
-        .execute(
-            &request(
-                "drag-destination-provenance",
-                Action::Drag {
-                    to: TargetRef::Coordinates {
-                        x: 1,
-                        y: 1,
-                        display_id: String::new(),
-                        display_geometry_hash: "x".to_string(),
-                        snapshot_id: String::new(),
-                        snapshot_content_hash: String::new(),
-                    },
-                    button: MouseButton::Left,
-                },
-                coordinate_target(),
-            ),
-            &CancellationToken::default(),
-        )
-        .expect("drag result");
+    let ledger = directory.path().join("operations.jsonl");
+    let attacked = request(
+        "drag-destination-provenance",
+        Action::Drag {
+            to: TargetRef::Coordinates {
+                x: 1,
+                y: 1,
+                display_id: String::new(),
+                display_geometry_hash: "x".to_string(),
+                snapshot_id: String::new(),
+                snapshot_content_hash: String::new(),
+            },
+            button: MouseButton::Left,
+        },
+        coordinate_target(),
+    );
 
-    assert!(!matches!(terminal(&report), Terminal::Succeeded { .. }));
+    assert!(matches!(
+        engine.execute(&attacked, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
     assert_eq!(executor.effects.load(Ordering::SeqCst), 0);
+    assert!(!ledger.exists());
 }

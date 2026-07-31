@@ -1,7 +1,7 @@
 use foreign_types::ForeignTypeRef;
 use screencapturekit::CGImage;
 use screencapturekit::prelude::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStreamConfiguration, SCWindow,
+    SCContentFilter, SCDisplay, SCShareableContent, SCStreamConfiguration,
 };
 use screencapturekit::screenshot_manager::SCScreenshotManager;
 use sha2::{Digest, Sha256};
@@ -33,19 +33,9 @@ fn displays() -> Result<Vec<SCDisplay>, CaptureError> {
         .displays())
 }
 
-fn windows() -> Result<Vec<SCWindow>, CaptureError> {
-    Ok(SCShareableContent::get()
-        .map_err(|_| CaptureError)?
-        .windows())
-}
-
 fn capture(filter: &SCContentFilter, width: u32, height: u32) -> Result<CGImage, CaptureError> {
     SCScreenshotManager::capture_image(filter, &configuration(width, height))
         .map_err(|_| CaptureError)
-}
-
-pub(crate) fn available() -> bool {
-    SCShareableContent::get().is_ok_and(|content| !content.displays().is_empty())
 }
 
 pub(crate) fn screen_content_hash() -> Result<String, CaptureError> {
@@ -64,19 +54,5 @@ pub(crate) fn screen_content_hash() -> Result<String, CaptureError> {
         hasher.update(display.display_id().to_be_bytes());
         image_digest(&image, &mut hasher);
     }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-pub(crate) fn window_content_hash(window_id: u32) -> Result<String, CaptureError> {
-    let window = windows()?
-        .into_iter()
-        .find(|window| window.window_id() == window_id)
-        .ok_or(CaptureError)?;
-    let frame = window.frame();
-    let filter = SCContentFilter::create().with_window(&window).build();
-    let image = capture(&filter, frame.size.width as u32, frame.size.height as u32)?;
-    let mut hasher = Sha256::new();
-    hasher.update(window_id.to_be_bytes());
-    image_digest(&image, &mut hasher);
     Ok(hex::encode(hasher.finalize()))
 }

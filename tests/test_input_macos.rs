@@ -22,6 +22,7 @@ mod mac_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn move_cursor_to_corner() {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let pos = CGPoint::new(200.0, 200.0);
@@ -33,6 +34,7 @@ mod mac_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn type_hello_world() {
         // Type "hello" — key codes: h=0x04, e=0x0E, l=0x25, l=0x25, o=0x1F
         let codes: &[(u16, char)] = &[
@@ -50,18 +52,21 @@ mod mac_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn press_escape() {
         post_key(0x35, 0);
         eprintln!("pressed Escape");
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn press_return() {
         post_key(0x24, 0);
         eprintln!("pressed Return");
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn hotkey_cmd_space() {
         // Cmd+Space — opens Spotlight on macOS
         let cmd_flag: u64 = 1 << 20;
@@ -74,6 +79,7 @@ mod mac_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn scroll_down() {
         unsafe extern "C" {
             fn CGEventCreateScrollWheelEvent(
@@ -103,6 +109,7 @@ mod mac_tests {
     }
 
     #[test]
+    #[ignore = "posts real keyboard and pointer events to the user's desktop"]
     fn left_click() {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
         let pos = CGPoint::new(300.0, 300.0);
