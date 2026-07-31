@@ -875,25 +875,20 @@ fn native_executor_refuses_new_actions_without_a_fenced_target() {
             "{}",
             action_name(&action)
         );
-        let advertised = native
-            .capabilities()
-            .expect("capabilities")
-            .supported_actions
-            .iter()
-            .any(|supported| supported == action_name(&action));
-        if advertised {
-            assert!(
-                matches!(error.code, FailureCode::InvalidRequest),
-                "{} must be refused by the fence, not by capability",
-                action_name(&action)
-            );
-        } else {
-            assert!(
-                matches!(error.code, FailureCode::Unsupported),
-                "{}",
-                action_name(&action)
-            );
-        }
+        assert!(
+            matches!(error.code, FailureCode::InvalidRequest),
+            "{} must be refused by the fence before any capability lookup",
+            action_name(&action)
+        );
+        assert!(
+            native
+                .capabilities()
+                .expect("capabilities")
+                .supported_actions
+                .iter()
+                .all(|supported| supported != action_name(&action))
+                || cfg!(target_os = "macos")
+        );
     }
 }
 
