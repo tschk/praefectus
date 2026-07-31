@@ -39,6 +39,7 @@ const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
 const MAX_SELECT_TEXT_RANGE: u32 = 1_048_576;
 #[cfg(target_os = "macos")]
 const MAX_DRAG_STEPS: i64 = 24;
+#[cfg(target_os = "macos")]
 const SECONDARY_ACTIVATION_ACTIONS: [&str; 5] = [
     "AXConfirm",
     "AXCancel",
@@ -901,7 +902,16 @@ impl Drop for MacDeliveryPidGuard {
 }
 
 #[cfg(target_os = "macos")]
-#[cfg(target_os = "macos")]
+fn secure_command(name: &str) -> Result<Command, NativeError> {
+    for directory in ["/usr/bin", "/usr/sbin", "/bin", "/sbin"] {
+        let path = std::path::PathBuf::from(directory).join(name);
+        if path.is_file() {
+            return Ok(Command::new(path));
+        }
+    }
+    Err(NativeError)
+}
+
 fn global_input_allowed() -> bool {
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ALLOWED.get_or_init(|| {
@@ -4798,7 +4808,8 @@ impl NativeExecutor {
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
                 #[cfg(target_os = "macos")]
                 {
-                    Command::new("screencapture")
+                    secure_command("screencapture")
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
                         .arg("-x")
                         .arg(path)
                         .status()
@@ -4813,12 +4824,14 @@ impl NativeExecutor {
                 {
                     match operation {
                         ApplicationOperation::Launch | ApplicationOperation::Switch => {
-                            Command::new("open")
+                            secure_command("open")
+                                .map_err(|_| ambiguous("desktop action dispatch failed"))?
                                 .args(["-a", name])
                                 .status()
                                 .map_err(|_| ambiguous("desktop action dispatch failed"))?
                         }
-                        ApplicationOperation::Quit => Command::new("osascript")
+                        ApplicationOperation::Quit => secure_command("osascript")
+                            .map_err(|_| ambiguous("desktop action dispatch failed"))?
                             .args([
                                 "-e",
                                 "on run argv",
@@ -4854,7 +4867,8 @@ impl NativeExecutor {
                             "set value of attribute \"AXMinimized\" of first window whose name is windowName to true"
                         }
                     };
-                    Command::new("osascript")
+                    secure_command("osascript")
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
                         .args([
                             "-e",
                             "on run argv",
@@ -4889,7 +4903,8 @@ impl NativeExecutor {
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
                 #[cfg(target_os = "macos")]
                 {
-                    let mut command = Command::new("open");
+                    let mut command = secure_command("open")
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?;
                     if let Some(app) = app {
                         command.args(["-a", app]);
                     }
@@ -4908,7 +4923,8 @@ impl NativeExecutor {
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
                 #[cfg(target_os = "macos")]
                 {
-                    let mut child = Command::new("pbcopy")
+                    let mut child = secure_command("pbcopy")
+                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
                         .stdin(Stdio::piped())
                         .spawn()
                         .map_err(|_| ambiguous("desktop action dispatch failed"))?;
@@ -5151,7 +5167,8 @@ impl NativeExecutor {
         check_protocol_boundary(cancellation, deadline_at_ms)?;
         #[cfg(target_os = "macos")]
         {
-            let output = Command::new("osascript")
+            let output = secure_command("osascript")
+                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?
                 .args([
                     "-e",
                     "tell application \"System Events\" to get name of every application process whose background only is false",
@@ -5197,7 +5214,9 @@ impl NativeExecutor {
         check_protocol_boundary(cancellation, deadline_at_ms)?;
         #[cfg(target_os = "macos")]
         {
-            let output = Command::new("pbpaste").output()?;
+            let output = secure_command("pbpaste")
+                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?
+                .output()?;
             check_protocol_boundary(cancellation, deadline_at_ms)?;
             if !output.status.success() || output.stdout.len() > 1024 * 1024 {
                 return Err(ProtocolError::Executor(
@@ -5783,9 +5802,18 @@ impl Executor for NativeExecutor {
                 "action is unavailable with current permissions or backend",
             ));
         }
-        #[cfg(target_os = "macos")]
+        let per_process_delivery = {
+            #[cfg(target_os = "macos")]
+            {
+                MAC_DELIVERY_PID.with(std::cell::Cell::get) > 0
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        };
         if !global_input_allowed()
-            && MAC_DELIVERY_PID.with(std::cell::Cell::get) <= 0
+            && !per_process_delivery
             && matches!(
                 action,
                 Action::Click { .. }
@@ -7593,7 +7621,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn global_input_is_refused_unless_a_host_opts_in() {
         assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
