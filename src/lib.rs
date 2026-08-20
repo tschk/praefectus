@@ -7925,12 +7925,57 @@ mod tests {
         FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
         NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
         SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, default_ledger_path, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        canonical_authority_bytes, default_ledger_path, element_fingerprint_hash, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify, ElementFingerprint, Rect,
     };
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
+
+    #[test]
+    fn test_element_fingerprint_hash() {
+        let mut fingerprint1 = ElementFingerprint {
+            backend: "x11".to_string(),
+            id: "123".to_string(),
+            app: "test-app".to_string(),
+            process_id: 456,
+            window: "main-window".to_string(),
+            role: "button".to_string(),
+            label: "Click Me".to_string(),
+            bounds: None,
+        };
+
+        let fingerprint2 = fingerprint1.clone();
+
+        let hash1 = element_fingerprint_hash(&fingerprint1).expect("hash successful");
+        let hash2 = element_fingerprint_hash(&fingerprint2).expect("hash successful");
+
+        // Identical fingerprints produce same hash
+        assert_eq!(hash1, hash2);
+
+        // Modifying a string field changes hash
+        fingerprint1.label = "Don't Click".to_string();
+        let hash3 = element_fingerprint_hash(&fingerprint1).expect("hash successful");
+        assert_ne!(hash1, hash3);
+
+        // Modifying an integer field changes hash
+        let mut fingerprint3 = fingerprint2.clone();
+        fingerprint3.process_id = 789;
+        let hash4 = element_fingerprint_hash(&fingerprint3).expect("hash successful");
+        assert_ne!(hash1, hash4);
+
+        // Modifying bounds from None to Some changes hash
+        let mut fingerprint4 = fingerprint2.clone();
+        fingerprint4.bounds = Some(Rect { x: 0, y: 0, width: 100, height: 100 });
+        let hash5 = element_fingerprint_hash(&fingerprint4).expect("hash successful");
+        assert_ne!(hash1, hash5);
+
+        // Modifying bounds values changes hash
+        let mut fingerprint5 = fingerprint4.clone();
+        fingerprint5.bounds = Some(Rect { x: 10, y: 0, width: 100, height: 100 });
+        let hash6 = element_fingerprint_hash(&fingerprint5).expect("hash successful");
+        assert_ne!(hash5, hash6);
+    }
 
     #[test]
     fn global_input_is_refused_unless_a_host_opts_in() {
