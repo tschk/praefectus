@@ -7328,7 +7328,7 @@ fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolErr
             "invalid snapshot ID".to_string(),
         ));
     }
-    Ok(observation_root()
+    Ok(observation_root(|k| std::env::var_os(k))
         .join("praefectus")
         .join("observations")
         .join(format!("{snapshot_id}.json")))
@@ -7349,16 +7349,16 @@ fn fallback_temp_dir() -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn observation_root() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+fn observation_root(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    get_env("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .or_else(|| get_env("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .unwrap_or_else(fallback_temp_dir)
 }
 
 #[cfg(windows)]
-fn observation_root() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
+fn observation_root(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    get_env("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(fallback_temp_dir)
 }
@@ -7369,7 +7369,7 @@ fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolErr
             "invalid observation ID".to_string(),
         ));
     }
-    Ok(observation_root()
+    Ok(observation_root(|k| std::env::var_os(k))
         .join("praefectus")
         .join("observations")
         .join(format!("semantic-{observation_id}.json")))
@@ -7377,7 +7377,7 @@ fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolErr
 
 fn private_storage_available() -> bool {
     ensure_directory(
-        &observation_root().join("praefectus").join("observations"),
+        &observation_root(|k| std::env::var_os(k)).join("praefectus").join("observations"),
         true,
     )
     .is_ok()
@@ -7901,18 +7901,12 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-#[cfg(not(windows))]
 pub fn default_ledger_path() -> PathBuf {
-    observation_root()
-        .join("praefectus")
-        .join("praefectus-operations.jsonl")
+    default_ledger_path_with_env(|k| std::env::var_os(k))
 }
 
-#[cfg(windows)]
-pub fn default_ledger_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(fallback_temp_dir)
+fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    observation_root(get_env)
         .join("praefectus")
         .join("praefectus-operations.jsonl")
 }
@@ -7928,6 +7922,7 @@ mod tests {
         canonical_authority_bytes, default_ledger_path, native_snapshot_id, target_capture_bounds,
         validate_matching_live_element, verify,
     };
+    use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
@@ -8020,6 +8015,78 @@ mod tests {
             let parent = path.parent().unwrap();
             assert_eq!(parent.file_name().unwrap(), "praefectus");
         }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_default_ledger_path_with_env() {
+        // Test XDG_STATE_HOME precedence
+        let path = super::default_ledger_path_with_env(|k| {
+            match k {
+                "XDG_STATE_HOME" => Some(std::ffi::OsString::from("/mock/xdg")),
+                "HOME" => Some(std::ffi::OsString::from("/mock/home")),
+                _ => None,
+            }
+        });
+        assert_eq!(
+            path,
+            PathBuf::from("/mock/xdg")
+                .join("praefectus")
+                .join("praefectus-operations.jsonl")
+        );
+
+        // Test HOME fallback
+        let path = super::default_ledger_path_with_env(|k| {
+            match k {
+                "HOME" => Some(std::ffi::OsString::from("/mock/home")),
+                _ => None,
+            }
+        });
+        assert_eq!(
+            path,
+            PathBuf::from("/mock/home")
+                .join(".local/state")
+                .join("praefectus")
+                .join("praefectus-operations.jsonl")
+        );
+
+        // Test fallback temp dir
+        let path = super::default_ledger_path_with_env(|_| None);
+        let fallback = super::fallback_temp_dir();
+        assert_eq!(
+            path,
+            fallback
+                .join("praefectus")
+                .join("praefectus-operations.jsonl")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_default_ledger_path_with_env() {
+        // Test LOCALAPPDATA precedence
+        let path = super::default_ledger_path_with_env(|k| {
+            match k {
+                "LOCALAPPDATA" => Some(std::ffi::OsString::from("C:\\Mock\\LocalAppData")),
+                _ => None,
+            }
+        });
+        assert_eq!(
+            path,
+            PathBuf::from("C:\\Mock\\LocalAppData")
+                .join("praefectus")
+                .join("praefectus-operations.jsonl")
+        );
+
+        // Test fallback temp dir
+        let path = super::default_ledger_path_with_env(|_| None);
+        let fallback = super::fallback_temp_dir();
+        assert_eq!(
+            path,
+            fallback
+                .join("praefectus")
+                .join("praefectus-operations.jsonl")
+        );
     }
 
     #[test]
