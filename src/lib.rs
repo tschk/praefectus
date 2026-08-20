@@ -39,14 +39,6 @@ const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
 const MAX_SELECT_TEXT_RANGE: u32 = 1_048_576;
 #[cfg(target_os = "macos")]
 const MAX_DRAG_STEPS: i64 = 24;
-#[cfg(target_os = "macos")]
-const SECONDARY_ACTIVATION_ACTIONS: [&str; 5] = [
-    "AXConfirm",
-    "AXCancel",
-    "AXPick",
-    "AXIncrement",
-    "AXDecrement",
-];
 pub const SECONDARY_ACTIONS: [&str; 8] = [
     "AXShowMenu",
     "AXShowDefaultUI",
@@ -2656,8 +2648,10 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
         Action::Invoke => base && actionability.invokable,
         Action::SetValue { .. } | Action::SelectText { .. } => base && actionability.editable,
         Action::PerformSecondaryAction { name } => {
-            base && (!SECONDARY_ACTIVATION_ACTIONS.contains(&name.as_str())
-                || actionability.invokable)
+            base && (!matches!(
+                name.as_str(),
+                "AXConfirm" | "AXCancel" | "AXPick" | "AXIncrement" | "AXDecrement"
+            ) || actionability.invokable)
         }
         Action::TypeText { .. }
         | Action::Press { .. }
