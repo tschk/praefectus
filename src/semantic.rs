@@ -535,4 +535,69 @@ mod tests {
             Err(SemanticError::InvalidObservation)
         );
     }
+
+    #[test]
+    fn test_opaque_element_id() {
+        let valid_obs_id = "1".repeat(64);
+        let valid_backend_id = "backend-node-1";
+
+        // Happy Path & Determinism
+        let result1 = opaque_element_id(&valid_obs_id, valid_backend_id).unwrap();
+        let result2 = opaque_element_id(&valid_obs_id, valid_backend_id).unwrap();
+        assert_eq!(result1, result2);
+        assert_eq!(result1.len(), 64);
+
+        // Distinctness
+        let result3 = opaque_element_id(&"2".repeat(64), valid_backend_id).unwrap();
+        assert_ne!(result1, result3);
+
+        let result4 = opaque_element_id(&valid_obs_id, "backend-node-2").unwrap();
+        assert_ne!(result1, result4);
+
+        // Invalid observation_id (wrong length)
+        assert_eq!(
+            opaque_element_id(&"1".repeat(63), valid_backend_id),
+            Err(SemanticError::InvalidObservation)
+        );
+        assert_eq!(
+            opaque_element_id(&"1".repeat(65), valid_backend_id),
+            Err(SemanticError::InvalidObservation)
+        );
+
+        // Invalid observation_id (non-hex chars)
+        let invalid_obs_id = "g".repeat(64);
+        assert_eq!(
+            opaque_element_id(&invalid_obs_id, valid_backend_id),
+            Err(SemanticError::InvalidObservation)
+        );
+
+        // Invalid backend_element_id (empty)
+        assert_eq!(
+            opaque_element_id(&valid_obs_id, ""),
+            Err(SemanticError::InvalidObservation)
+        );
+
+        // Invalid backend_element_id (too long > 2048)
+        let too_long_backend = "a".repeat(2049);
+        assert_eq!(
+            opaque_element_id(&valid_obs_id, &too_long_backend),
+            Err(SemanticError::InvalidObservation)
+        );
+
+        // Edge case backend_element_id (max length 2048)
+        let max_len_backend = "a".repeat(2048);
+        assert!(opaque_element_id(&valid_obs_id, &max_len_backend).is_ok());
+
+        // Invalid backend_element_id (control chars)
+        assert_eq!(
+            opaque_element_id(&valid_obs_id, "backend\nnode"),
+            Err(SemanticError::InvalidObservation)
+        );
+
+        // Invalid backend_element_id (empty trim)
+        assert_eq!(
+            opaque_element_id(&valid_obs_id, "   "),
+            Err(SemanticError::InvalidObservation)
+        );
+    }
 }
