@@ -5150,6 +5150,7 @@ impl NativeExecutor {
                                 "tell application (item 1 of argv) to quit",
                                 "-e",
                                 "end run",
+                                "--",
                                 name,
                             ])
                             .status()
@@ -5195,6 +5196,7 @@ impl NativeExecutor {
                             "end tell",
                             "-e",
                             "end run",
+                            "--",
                             app.as_deref().unwrap_or(""),
                             title.as_deref().unwrap_or(""),
                         ])
@@ -5223,6 +5225,7 @@ impl NativeExecutor {
                         command.arg("-g");
                     }
                     command
+                        .arg("--")
                         .arg(target)
                         .status()
                         .map_err(|_| ambiguous("desktop action dispatch failed"))?
