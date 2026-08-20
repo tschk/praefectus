@@ -387,6 +387,23 @@ mod tests {
     }
 
     #[test]
+    fn semantic_fingerprint_hashes_serializable_values() {
+        let first = semantic_fingerprint(&("button", "Save", 1)).unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let identical = semantic_fingerprint(&("button", "Save", 1)).unwrap();
+        assert_eq!(first, identical);
+
+        let different_type = semantic_fingerprint(&42).unwrap();
+        assert_eq!(different_type.len(), 64);
+        assert_ne!(first, different_type);
+
+        let different_value = semantic_fingerprint(&("button", "Cancel", 1)).unwrap();
+        assert_ne!(first, different_value);
+    }
+
+    #[test]
     fn host_opt_ins_are_bounded_sorted_and_bound_into_provenance() {
         let mut observation = observation();
         observation.provenance.host_opt_ins = vec!["AXEnhancedUserInterface".to_string()];
