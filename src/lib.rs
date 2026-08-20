@@ -823,6 +823,50 @@ fn mac_key_code(ch: char) -> Option<u16> {
     }
 }
 
+#[cfg(windows)]
+fn win_key_name_code(
+    name: &str,
+) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    match name {
+        "return" | "enter" => Some(VK_RETURN),
+        "tab" => Some(VK_TAB),
+        "escape" | "esc" => Some(VK_ESCAPE),
+        "backspace" => Some(VK_BACK),
+        "delete" | "del" => Some(VK_DELETE),
+        "space" => Some(VK_SPACE),
+        "up" => Some(VK_UP),
+        "down" => Some(VK_DOWN),
+        "left" => Some(VK_LEFT),
+        "right" => Some(VK_RIGHT),
+        "home" => Some(VK_HOME),
+        "end" => Some(VK_END),
+        "pageup" => Some(VK_PRIOR),
+        "pagedown" => Some(VK_NEXT),
+        "f1" => Some(VK_F1),
+        "f2" => Some(VK_F2),
+        "f3" => Some(VK_F3),
+        "f4" => Some(VK_F4),
+        "f5" => Some(VK_F5),
+        "f6" => Some(VK_F6),
+        "f7" => Some(VK_F7),
+        "f8" => Some(VK_F8),
+        "f9" => Some(VK_F9),
+        "f10" => Some(VK_F10),
+        "f11" => Some(VK_F11),
+        "f12" => Some(VK_F12),
+        k if k.len() == 1 => {
+            let ch = k.chars().next().unwrap().to_ascii_uppercase();
+            if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+                Some(VIRTUAL_KEY(ch as u16))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn mac_key_name_code(name: &str) -> Option<u16> {
     match name {
@@ -1212,43 +1256,7 @@ impl NativeRuntime {
         {
             use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-            let vk = match _key {
-                "return" | "enter" => VK_RETURN,
-                "tab" => VK_TAB,
-                "escape" | "esc" => VK_ESCAPE,
-                "backspace" => VK_BACK,
-                "delete" | "del" => VK_DELETE,
-                "space" => VK_SPACE,
-                "up" => VK_UP,
-                "down" => VK_DOWN,
-                "left" => VK_LEFT,
-                "right" => VK_RIGHT,
-                "home" => VK_HOME,
-                "end" => VK_END,
-                "pageup" => VK_PRIOR,
-                "pagedown" => VK_NEXT,
-                "f1" => VK_F1,
-                "f2" => VK_F2,
-                "f3" => VK_F3,
-                "f4" => VK_F4,
-                "f5" => VK_F5,
-                "f6" => VK_F6,
-                "f7" => VK_F7,
-                "f8" => VK_F8,
-                "f9" => VK_F9,
-                "f10" => VK_F10,
-                "f11" => VK_F11,
-                "f12" => VK_F12,
-                k if k.len() == 1 => {
-                    let ch = k.chars().next().unwrap().to_ascii_uppercase();
-                    if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
-                        VIRTUAL_KEY(ch as u16)
-                    } else {
-                        return Err(NativeError);
-                    }
-                }
-                _ => return Err(NativeError),
-            };
+            let vk = win_key_name_code(_key).ok_or(NativeError)?;
 
             for i in 0.._count {
                 if i > 0 {
