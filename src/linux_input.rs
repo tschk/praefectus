@@ -178,9 +178,8 @@ fn ensure_portal_session() -> Result<(String, zbus::blocking::Connection), Nativ
     let handle = portal_create_session(&connection)?;
     portal_authorize(&connection, &handle)?;
     portal_start(&connection, &handle)?;
-    let result = (handle.clone(), connection.clone());
-    *guard = Some(result.clone());
-    Ok(result)
+    *guard = Some((handle.clone(), connection.clone()));
+    Ok((handle, connection))
 }
 
 fn portal_notify_pointer_motion(
