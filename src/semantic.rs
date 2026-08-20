@@ -490,6 +490,40 @@ mod tests {
     }
 
     #[test]
+    fn route_action_returns_element_when_actionable() {
+        let mut observation = observation();
+        let target = observation.target(&observation.elements[0].tag).unwrap();
+        assert_eq!(
+            route_action(&Action::Invoke, &observation, &target, 2_000),
+            Ok(&observation.elements[0])
+        );
+
+        observation.elements[0].actionability.editable = true;
+        assert_eq!(
+            route_action(
+                &Action::SetValue {
+                    value: "secret".to_string()
+                },
+                &observation,
+                &target,
+                2_000
+            ),
+            Ok(&observation.elements[0])
+        );
+
+        // Also test a different action that is unsupported to cover that branch
+        assert_eq!(
+            route_action(
+                &Action::Move,
+                &observation,
+                &target,
+                2_000
+            ),
+            Err(SemanticError::UnsupportedAction)
+        );
+    }
+
+    #[test]
     fn semantic_tag_formats_and_bounds_index() {
         assert_eq!(semantic_tag(0), Ok("e0".to_string()));
         assert_eq!(semantic_tag(42), Ok("e42".to_string()));
