@@ -6195,10 +6195,7 @@ impl Executor for NativeExecutor {
                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                         return Err(ambiguous("click interrupted after partial dispatch"));
                     }
-                    self.runtime.click(
-                        native_target()?,
-                        button.as_str(),
-                    )?;
+                    self.runtime.click(native_target()?, button.as_str())?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
                     return Err(ambiguous("native input event delivery cannot be verified"));
