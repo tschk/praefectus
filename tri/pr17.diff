@@ -1,0 +1,76 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d525c83..4b1f7f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -539,11 +539,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+diff --git a/get_button_str_plan.md b/get_button_str_plan.md
+new file mode 100644
+index 0000000..f741ef2
+--- /dev/null
++++ b/get_button_str_plan.md
+@@ -0,0 +1,15 @@
++1. **Analyze the `MouseButton` enum**: It is defined as `enum MouseButton { Left, Right, Middle }`.
++2. **Examine the target match block**:
++    ```rust
++    match button {
++        MouseButton::Left => "left",
++        MouseButton::Right => "right",
++        MouseButton::Middle => "middle",
++    }
++    ```
++    This logic maps `MouseButton` to a `&'static str`.
++3. **Plan the refactoring**:
++    * Implement an `as_str()` method for the `MouseButton` enum to encapsulate this logic. This will simplify the code at `src/lib.rs:6190` and improve reuse.
++    * Modify `src/lib.rs` to implement `as_str()` for `MouseButton`.
++    * Replace the match block at `src/lib.rs:6190` with `button.as_str()`.
++4. **Pre commit step**: Ensure code formats correctly and passes tests by running `cargo check`, `cargo fmt`, `cargo test`.
+diff --git a/src/lib.rs b/src/lib.rs
+index 2ad44a1..691104d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -480,6 +480,16 @@ pub enum MouseButton {
+     Middle,
+ }
+ 
++impl MouseButton {
++    pub fn as_str(&self) -> &'static str {
++        match self {
++            Self::Left => "left",
++            Self::Right => "right",
++            Self::Middle => "middle",
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum Direction {
+@@ -6185,14 +6195,7 @@ impl Executor for NativeExecutor {
+                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+                         return Err(ambiguous("click interrupted after partial dispatch"));
+                     }
+-                    self.runtime.click(
+-                        native_target()?,
+-                        match button {
+-                            MouseButton::Left => "left",
+-                            MouseButton::Right => "right",
+-                            MouseButton::Middle => "middle",
+-                        },
+-                    )?;
++                    self.runtime.click(native_target()?, button.as_str())?;
+                 }
+                 if matches!(verification, VerificationPolicy::None) {
+                     return Err(ambiguous("native input event delivery cannot be verified"));

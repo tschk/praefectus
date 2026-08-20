@@ -1,0 +1,70 @@
+diff --git a/plugins/hermes/test_plugin.py b/plugins/hermes/test_plugin.py
+index c6efa21..f83eec9 100644
+--- a/plugins/hermes/test_plugin.py
++++ b/plugins/hermes/test_plugin.py
+@@ -360,6 +360,7 @@ def test_rejects_authority_legacy_actions_and_mismatched_verification_before_hos
+             },
+             {**invoke_request(), "interaction_mode": "host_isolated"},
+             {**invoke_request(), "interaction_mode": "unknown"},
++            {**click_request(), "interaction_mode": "background_only"},
+             {
+                 **invoke_request(),
+                 "action": {
+diff --git a/src/macos_capture.rs b/src/macos_capture.rs
+index f233240..629f05e 100644
+--- a/src/macos_capture.rs
++++ b/src/macos_capture.rs
+@@ -72,3 +72,24 @@ fn blocking_screen_content_hash() -> Result<String, CaptureError> {
+     }
+     Ok(hex::encode(hasher.finalize()))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn configuration_clamps_zero_dimensions_and_hides_the_cursor() {
++        let config = configuration(0, 0);
++        assert_eq!(config.width(), 1);
++        assert_eq!(config.height(), 1);
++        assert!(!config.shows_cursor());
++    }
++
++    #[test]
++    fn configuration_preserves_nonzero_dimensions() {
++        let config = configuration(1920, 1080);
++        assert_eq!(config.width(), 1920);
++        assert_eq!(config.height(), 1080);
++        assert!(!config.shows_cursor());
++    }
++}
+diff --git a/tests/protocol.rs b/tests/protocol.rs
+index 808d046..418d0ae 100644
+--- a/tests/protocol.rs
++++ b/tests/protocol.rs
+@@ -630,6 +630,24 @@ fn cancellation_and_timeout_stop_before_effect() {
+     assert!(matches!(terminal(&expired), Terminal::ExpiredBeforeEffect));
+ }
+ 
++#[test]
++fn cancellation_wins_over_an_already_expired_deadline() {
++    let directory = tempfile::tempdir().expect("temp directory");
++    let executor = MockExecutor::new();
++    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
++    let cancellation = CancellationToken::default();
++    cancellation.cancel();
++    let mut expired_request = request("cancelled-and-expired");
++    expired_request.deadline_at_ms = 1;
++    sign_request(&mut expired_request);
++    let report = engine
++        .execute(&expired_request, &cancellation)
++        .expect("cancelled result");
++
++    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
++    assert!(matches!(terminal(&report), Terminal::CancelledBeforeEffect));
++}
++
+ #[test]
+ fn ambiguous_dispatch_is_outcome_unknown_and_replayable() {
+     let directory = tempfile::tempdir().expect("temp directory");

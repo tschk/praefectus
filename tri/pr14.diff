@@ -1,0 +1,50 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d525c83..4b1f7f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -539,11 +539,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+diff --git a/src/lib.rs b/src/lib.rs
+index 2ad44a1..4e2cb5d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -39,14 +39,6 @@ const MAX_VERIFICATION_JSON_NODES: usize = 4_096;
+ const MAX_SELECT_TEXT_RANGE: u32 = 1_048_576;
+ #[cfg(target_os = "macos")]
+ const MAX_DRAG_STEPS: i64 = 24;
+-#[cfg(target_os = "macos")]
+-const SECONDARY_ACTIVATION_ACTIONS: [&str; 5] = [
+-    "AXConfirm",
+-    "AXCancel",
+-    "AXPick",
+-    "AXIncrement",
+-    "AXDecrement",
+-];
+ pub const SECONDARY_ACTIONS: [&str; 8] = [
+     "AXShowMenu",
+     "AXShowDefaultUI",
+@@ -2656,8 +2648,10 @@ fn mac_actionability_allows(action: &Action, actionability: &semantic::Actionabi
+         Action::Invoke => base && actionability.invokable,
+         Action::SetValue { .. } | Action::SelectText { .. } => base && actionability.editable,
+         Action::PerformSecondaryAction { name } => {
+-            base && (!SECONDARY_ACTIVATION_ACTIONS.contains(&name.as_str())
+-                || actionability.invokable)
++            base && (!matches!(
++                name.as_str(),
++                "AXConfirm" | "AXCancel" | "AXPick" | "AXIncrement" | "AXDecrement"
++            ) || actionability.invokable)
+         }
+         Action::TypeText { .. }
+         | Action::Press { .. }

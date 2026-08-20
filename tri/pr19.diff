@@ -1,0 +1,63 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d525c83..4b1f7f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -539,11 +539,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+diff --git a/src/linux_atspi.rs b/src/linux_atspi.rs
+index 571029d..3526807 100644
+--- a/src/linux_atspi.rs
++++ b/src/linux_atspi.rs
+@@ -257,10 +257,10 @@ impl StoredSnapshot {
+     }
+ }
+ 
+-fn focused_element_id(
+-    stored: &StoredSnapshot,
++fn focused_element_id<'a>(
++    stored: &'a StoredSnapshot,
+     focused: &StoredObject,
+-) -> Result<String, ProtocolError> {
++) -> Result<&'a String, ProtocolError> {
+     let expected = opaque_element_id(&stored.observation.observation_id, &focused.id()?)
+         .map_err(semantic_error)?;
+     let mut matches = stored
+@@ -269,7 +269,7 @@ fn focused_element_id(
+         .filter(|(element_id, target)| **element_id == expected && target.object == *focused);
+     let element_id = matches
+         .next()
+-        .map(|(element_id, _)| element_id.clone())
++        .map(|(element_id, _)| element_id)
+         .ok_or_else(desktop_state_unavailable)?;
+     if matches.next().is_some() {
+         return Err(desktop_state_unavailable());
+@@ -776,7 +776,7 @@ impl LinuxAtspiBackend {
+             .map_err(|_| desktop_state_unavailable())?
+             .clone()
+             .ok_or_else(desktop_state_unavailable)?;
+-        let element_id = focused_element_id(&stored, &focus.focused)?;
++        let element_id = focused_element_id(&stored, &focus.focused)?.clone();
+         let element = observation
+             .elements
+             .iter()
+@@ -2674,7 +2674,7 @@ mod tests {
+         };
+         assert_eq!(
+             focused_element_id(&stored, &focused).expect("focused target"),
+-            element_id
++            &element_id
+         );
+         let missing = StoredObject {
+             bus_name: ":1.42".to_string(),

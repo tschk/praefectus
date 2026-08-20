@@ -1,0 +1,151 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index c7dba65..35c8f13 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,7 +25,7 @@ jobs:
+           - ubuntu-latest
+           - windows-latest
+     steps:
+-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++      - uses: actions/checkout@v4
+         with:
+           persist-credentials: false
+       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+@@ -55,7 +55,7 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
+     steps:
+-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++      - uses: actions/checkout@v4
+         with:
+           persist-credentials: false
+       - run: rustup toolchain install 1.88.0 --profile minimal
+@@ -67,7 +67,7 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
+     steps:
+-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++      - uses: actions/checkout@v4
+         with:
+           persist-credentials: false
+       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+@@ -111,7 +111,7 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
+     steps:
+-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++      - uses: actions/checkout@v4
+         with:
+           persist-credentials: false
+       - run: rustup toolchain install stable --profile minimal
+diff --git a/Cargo.lock b/Cargo.lock
+index d525c83..4b1f7f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -539,11 +539,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+diff --git a/src/semantic.rs b/src/semantic.rs
+index 37b095c..526ebba 100644
+--- a/src/semantic.rs
++++ b/src/semantic.rs
+@@ -495,4 +495,69 @@ mod tests {
+             Err(SemanticError::InvalidObservation)
+         );
+     }
++
++    #[test]
++    fn test_opaque_element_id() {
++        let valid_obs_id = "1".repeat(64);
++        let valid_backend_id = "backend-node-1";
++
++        // Happy Path & Determinism
++        let result1 = opaque_element_id(&valid_obs_id, valid_backend_id).unwrap();
++        let result2 = opaque_element_id(&valid_obs_id, valid_backend_id).unwrap();
++        assert_eq!(result1, result2);
++        assert_eq!(result1.len(), 64);
++
++        // Distinctness
++        let result3 = opaque_element_id(&"2".repeat(64), valid_backend_id).unwrap();
++        assert_ne!(result1, result3);
++
++        let result4 = opaque_element_id(&valid_obs_id, "backend-node-2").unwrap();
++        assert_ne!(result1, result4);
++
++        // Invalid observation_id (wrong length)
++        assert_eq!(
++            opaque_element_id(&"1".repeat(63), valid_backend_id),
++            Err(SemanticError::InvalidObservation)
++        );
++        assert_eq!(
++            opaque_element_id(&"1".repeat(65), valid_backend_id),
++            Err(SemanticError::InvalidObservation)
++        );
++
++        // Invalid observation_id (non-hex chars)
++        let invalid_obs_id = "g".repeat(64);
++        assert_eq!(
++            opaque_element_id(&invalid_obs_id, valid_backend_id),
++            Err(SemanticError::InvalidObservation)
++        );
++
++        // Invalid backend_element_id (empty)
++        assert_eq!(
++            opaque_element_id(&valid_obs_id, ""),
++            Err(SemanticError::InvalidObservation)
++        );
++
++        // Invalid backend_element_id (too long > 2048)
++        let too_long_backend = "a".repeat(2049);
++        assert_eq!(
++            opaque_element_id(&valid_obs_id, &too_long_backend),
++            Err(SemanticError::InvalidObservation)
++        );
++
++        // Edge case backend_element_id (max length 2048)
++        let max_len_backend = "a".repeat(2048);
++        assert!(opaque_element_id(&valid_obs_id, &max_len_backend).is_ok());
++
++        // Invalid backend_element_id (control chars)
++        assert_eq!(
++            opaque_element_id(&valid_obs_id, "backend\nnode"),
++            Err(SemanticError::InvalidObservation)
++        );
++
++        // Invalid backend_element_id (empty trim)
++        assert_eq!(
++            opaque_element_id(&valid_obs_id, "   "),
++            Err(SemanticError::InvalidObservation)
++        );
++    }
+ }
+diff --git a/tests/cli.rs b/tests/cli.rs
+index 2c35b1d..f9bc2ce 100644
+--- a/tests/cli.rs
++++ b/tests/cli.rs
+@@ -9,12 +9,11 @@ fn run(arguments: &[&str], stdin: &str) -> std::process::Output {
+         .stderr(Stdio::piped())
+         .spawn()
+         .expect("spawn CLI");
+-    child
++    let _ = child
+         .stdin
+         .take()
+         .expect("stdin")
+-        .write_all(stdin.as_bytes())
+-        .expect("write stdin");
++        .write_all(stdin.as_bytes());
+     child.wait_with_output().expect("CLI output")
+ }
+ 

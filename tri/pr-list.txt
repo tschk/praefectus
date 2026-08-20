@@ -1,0 +1,17 @@
+27|test: cover capture, cancel, hermes click|head=test/macos-capture-protocol-hermes|base=main|draft=false|mrg=MERGEABLE|files=3|+40/-0
+26|🧹 [Code Health] Refactor Windows key mapping to helper function|head=jules-refactor-win-key-code-13185320559186064942|base=main|draft=false|mrg=MERGEABLE|files=3|+50/-46
+24|⚡ Optimize `root_backend_node_ids` lookups using HashSet|head=perf/use-hashset-for-root-backend-node-ids-53595851806536461|base=main|draft=false|mrg=MERGEABLE|files=2|+6/-7
+23|🔒 Fix option injection in osascript and open usages|head=jules-fix-osascript-option-injection-17034122253156784503|base=main|draft=false|mrg=MERGEABLE|files=2|+5/-3
+22|🧹 Refactor Windows key code mapping into helper function|head=refactor-windows-hotkey-8768426747333159642|base=main|draft=false|mrg=MERGEABLE|files=2|+46/-61
+21|🧪 Add comprehensive tests for default_ledger_path environment fallbacks|head=jules-test-default-ledger-path-8990085427880606892|base=main|draft=false|mrg=MERGEABLE|files=1|+80/-17
+20|⚡ Performance improvement: optimize selected_ids lookup|head=optimize-selected-ids-lookup-10885818844476833961|base=main|draft=false|mrg=MERGEABLE|files=2|+4/-5
+19|⚡ [performance] Optimize focused_element_id iterator map cloning|head=perf-optimize-focused-element-id-14414246807699020938|base=main|draft=false|mrg=MERGEABLE|files=2|+8/-9
+18|🧪 test(cli): add unit tests for parse_arguments|head=add-parse-arguments-tests-1246877429143876593|base=main|draft=false|mrg=MERGEABLE|files=2|+83/-3
+17|🧹 refactor(MouseButton): extract match block to as_str method|head=refactor-mouse-button-7123641635105294205|base=main|draft=false|mrg=MERGEABLE|files=3|+28/-11
+16|🧪 test: add happy path test for route_action|head=test-route-action-15960728013636193961|base=main|draft=false|mrg=CONFLICTING|files=2|+31/-3
+15|🧪 test: add normalized_action_hash tests|head=improve-testing-action-hash-2350848647914916416|base=main|draft=false|mrg=MERGEABLE|files=2|+151/-3
+14|⚡ perf: Optimize array search with .contains() in Action::PerformSecondaryAction|head=perf/optimize-secondary-action-contains-9235579460465399727|base=main|draft=false|mrg=MERGEABLE|files=2|+6/-13
+13|🧪 Add tests for action_delivery_route in src/lib.rs|head=test-action-delivery-route-9405272755257217171|base=main|draft=false|mrg=MERGEABLE|files=2|+70/-3
+12|🧪 test: add coverage for element_fingerprint_hash|head=test-element-fingerprint-hash-7803447087361238640|base=main|draft=false|mrg=MERGEABLE|files=2|+63/-8
+11|🧪 Add tests for opaque_element_id|head=test/opaque-element-id-264285560551405009|base=main|draft=false|mrg=MERGEABLE|files=4|+73/-10
+10|🧪 Add unit tests for boundary cancellation|head=tests/boundary-cancellation-15560732428308499200|base=main|draft=false|mrg=MERGEABLE|files=3|+28/-9
