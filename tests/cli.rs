@@ -9,12 +9,12 @@ fn run(arguments: &[&str], stdin: &str) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn CLI");
-    child
+    let _ = child
         .stdin
         .take()
         .expect("stdin")
         .write_all(stdin.as_bytes())
-        .expect("write stdin");
+        ;
     child.wait_with_output().expect("CLI output")
 }
 
