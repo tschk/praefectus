@@ -8043,7 +8043,10 @@ mod tests {
         let request = mock_action_request();
         let hash1 = normalized_action_hash(&request).unwrap();
         let hash2 = normalized_action_hash(&request).unwrap();
-        assert_eq!(hash1, hash2, "Hashing the same request should yield the same result");
+        assert_eq!(
+            hash1, hash2,
+            "Hashing the same request should yield the same result"
+        );
     }
 
     #[test]
@@ -8076,7 +8079,9 @@ mod tests {
         assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
 
         let mut req = base_request.clone();
-        req.action = Action::Paste { text: "hello".to_string() };
+        req.action = Action::Paste {
+            text: "hello".to_string(),
+        };
         assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
 
         let mut req = base_request.clone();
@@ -8128,12 +8133,20 @@ mod tests {
             deeply_nested = json!({ "nested": deeply_nested });
         }
 
-        request.verification = VerificationPolicy::TargetState { expected: deeply_nested };
+        request.verification = VerificationPolicy::TargetState {
+            expected: deeply_nested,
+        };
         let result = normalized_action_hash(&request);
-        assert!(result.is_err(), "Deeply nested verification policy should fail validation");
+        assert!(
+            result.is_err(),
+            "Deeply nested verification policy should fail validation"
+        );
 
         if let Err(super::ProtocolError::InvalidRequest(msg)) = result {
-            assert!(msg.contains("verification state is too large"), "Error message should match the actual error message for too large verification state");
+            assert!(
+                msg.contains("verification state is too large"),
+                "Error message should match the actual error message for too large verification state"
+            );
         } else {
             panic!("Expected ProtocolError::InvalidRequest for verification limit error");
         }
