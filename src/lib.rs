@@ -480,6 +480,16 @@ pub enum MouseButton {
     Middle,
 }
 
+impl MouseButton {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -6187,11 +6197,7 @@ impl Executor for NativeExecutor {
                     }
                     self.runtime.click(
                         native_target()?,
-                        match button {
-                            MouseButton::Left => "left",
-                            MouseButton::Right => "right",
-                            MouseButton::Middle => "middle",
-                        },
+                        button.as_str(),
                     )?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
