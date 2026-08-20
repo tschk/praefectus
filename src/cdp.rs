@@ -2353,6 +2353,7 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+
     use std::collections::VecDeque;
 
     use super::*;
@@ -2360,6 +2361,28 @@ mod tests {
         AckState, ActionRequest, AuthorityGrant, AuthorityVerifier, Engine, InteractionMode,
         SafetyClass, SignedAuthority, Terminal, VerifiedAuthority,
     };
+
+    #[test]
+    fn test_boundary_ok() {
+        let cancellation = CancellationToken::default();
+        assert!(matches!(boundary(&cancellation, i64::MAX), Ok(())));
+    }
+
+    #[test]
+    fn test_boundary_cancelled() {
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        assert!(matches!(
+            boundary(&cancellation, i64::MAX),
+            Err(CdpError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn test_boundary_expired() {
+        let cancellation = CancellationToken::default();
+        assert!(matches!(boundary(&cancellation, 0), Err(CdpError::Expired)));
+    }
 
     struct FakeChannel {
         endpoint: SocketAddr,
