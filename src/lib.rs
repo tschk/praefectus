@@ -8003,6 +8003,142 @@ mod tests {
         );
     }
 
+    use super::normalized_action_hash;
+
+    fn mock_action_request() -> ActionRequest {
+        ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            action_version: 1,
+            target_version: 1,
+            verification_version: 1,
+            operation_id: "test-op-id".to_string(),
+            subject: "test-subject".to_string(),
+            session_id: "test-session".to_string(),
+            authority: SignedAuthority {
+                grant: AuthorityGrant {
+                    protocol_version: PROTOCOL_VERSION,
+                    issuer: "test-issuer".to_string(),
+                    key_id: "test-key-id".to_string(),
+                    operation_id: "test-op-id".to_string(),
+                    subject: "test-subject".to_string(),
+                    session_id: "test-session".to_string(),
+                    risk: SafetyClass::Reversible,
+                    expires_at_ms: 1000,
+                    policy_generation: "gen1".to_string(),
+                    action_hash: "hash".to_string(),
+                },
+                signature: "sig".to_string(),
+            },
+            action: Action::Invoke,
+            target: TargetRef::None,
+            interaction_mode: InteractionMode::Interactive,
+            deadline_at_ms: 2000,
+            verification: VerificationPolicy::None,
+            safety: SafetyClass::Reversible,
+        }
+    }
+
+    #[test]
+    fn test_normalized_action_hash_consistency() {
+        let request = mock_action_request();
+        let hash1 = normalized_action_hash(&request).unwrap();
+        let hash2 = normalized_action_hash(&request).unwrap();
+        assert_eq!(hash1, hash2, "Hashing the same request should yield the same result");
+    }
+
+    #[test]
+    fn test_normalized_action_hash_changes_with_fields() {
+        let base_request = mock_action_request();
+        let base_hash = normalized_action_hash(&base_request).unwrap();
+
+        let mut req = base_request.clone();
+        req.protocol_version = 999;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.action_version = 999;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.target_version = 999;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.verification_version = 999;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.subject = "different-subject".to_string();
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.session_id = "different-session".to_string();
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.action = Action::Paste { text: "hello".to_string() };
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.target = TargetRef::Coordinates {
+            x: 10,
+            y: 20,
+            display_id: "d1".to_string(),
+            display_geometry_hash: "dg".to_string(),
+            snapshot_id: "s1".to_string(),
+            snapshot_content_hash: "sc".to_string(),
+        };
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.interaction_mode = InteractionMode::BackgroundOnly;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.deadline_at_ms = 9999;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.verification = VerificationPolicy::SnapshotChanged;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.safety = SafetyClass::Destructive;
+        assert_ne!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        // Fields that should NOT change the hash
+        let mut req = base_request.clone();
+        req.operation_id = "different-operation-id".to_string();
+        assert_eq!(normalized_action_hash(&req).unwrap(), base_hash);
+
+        let mut req = base_request.clone();
+        req.authority.signature = "different-signature".to_string();
+        assert_eq!(normalized_action_hash(&req).unwrap(), base_hash);
+    }
+
+    #[test]
+    fn test_normalized_action_hash_invalid_verification() {
+        use serde_json::json;
+
+        let mut request = mock_action_request();
+        // Create a deeply nested JSON object to trigger validation error
+        // Max depth is defined as 32 in MAX_VERIFICATION_JSON_DEPTH
+        let mut deeply_nested = json!({});
+        for _ in 0..35 {
+            deeply_nested = json!({ "nested": deeply_nested });
+        }
+
+        request.verification = VerificationPolicy::TargetState { expected: deeply_nested };
+        let result = normalized_action_hash(&request);
+        assert!(result.is_err(), "Deeply nested verification policy should fail validation");
+
+        if let Err(super::ProtocolError::InvalidRequest(msg)) = result {
+            assert!(msg.contains("verification state is too large"), "Error message should match the actual error message for too large verification state");
+        } else {
+            panic!("Expected ProtocolError::InvalidRequest for verification limit error");
+        }
+    }
+
     #[test]
     fn test_default_ledger_path() {
         let path = default_ledger_path();
