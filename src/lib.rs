@@ -7957,7 +7957,9 @@ mod tests {
 
     #[test]
     fn test_action_delivery_route() {
-        use super::{Action, ApplicationOperation, DeliveryRoute, WindowOperation, action_delivery_route};
+        use super::{
+            Action, ApplicationOperation, DeliveryRoute, WindowOperation, action_delivery_route,
+        };
         use std::path::PathBuf;
 
         assert_eq!(
@@ -7965,36 +7967,58 @@ mod tests {
             DeliveryRoute::TargetAddressed
         );
         assert_eq!(
-            action_delivery_route(&Action::SetValue { value: "test".to_string() }),
+            action_delivery_route(&Action::SetValue {
+                value: "test".to_string()
+            }),
             DeliveryRoute::TargetAddressed
         );
         assert_eq!(
-            action_delivery_route(&Action::SelectText { start: 0, length: 1 }),
+            action_delivery_route(&Action::SelectText {
+                start: 0,
+                length: 1
+            }),
             DeliveryRoute::TargetAddressed
         );
         assert_eq!(
-            action_delivery_route(&Action::PerformSecondaryAction { name: "test".to_string() }),
+            action_delivery_route(&Action::PerformSecondaryAction {
+                name: "test".to_string()
+            }),
             DeliveryRoute::TargetAddressed
         );
 
         assert_eq!(
-            action_delivery_route(&Action::Screenshot { path: PathBuf::new() }),
+            action_delivery_route(&Action::Screenshot {
+                path: PathBuf::new()
+            }),
             DeliveryRoute::Pointer
         );
         assert_eq!(
-            action_delivery_route(&Action::Application { operation: ApplicationOperation::Launch, name: "test".to_string() }),
+            action_delivery_route(&Action::Application {
+                operation: ApplicationOperation::Launch,
+                name: "test".to_string()
+            }),
             DeliveryRoute::Pointer
         );
         assert_eq!(
-            action_delivery_route(&Action::Window { operation: WindowOperation::Focus, app: None, title: None }),
+            action_delivery_route(&Action::Window {
+                operation: WindowOperation::Focus,
+                app: None,
+                title: None
+            }),
             DeliveryRoute::Pointer
         );
         assert_eq!(
-            action_delivery_route(&Action::Open { target: "test".to_string(), app: None, no_focus: false }),
+            action_delivery_route(&Action::Open {
+                target: "test".to_string(),
+                app: None,
+                no_focus: false
+            }),
             DeliveryRoute::Pointer
         );
         assert_eq!(
-            action_delivery_route(&Action::ClipboardWrite { text: "test".to_string() }),
+            action_delivery_route(&Action::ClipboardWrite {
+                text: "test".to_string()
+            }),
             DeliveryRoute::Pointer
         );
     }
