@@ -1437,7 +1437,7 @@ impl NativeRuntime {
             let action_key = _keys.last().ok_or(NativeError)?;
             let modifiers = &_keys[.._keys.len() - 1];
 
-            let action_vk = win_key_code(*action_key).ok_or(NativeError)?;
+            let action_vk = win_key_code(action_key).ok_or(NativeError)?;
             let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
                 .iter()
                 .map(|m| match *m {
