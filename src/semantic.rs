@@ -473,6 +473,29 @@ mod tests {
     }
 
     #[test]
+    fn semantic_tag_formats_and_bounds_index() {
+        assert_eq!(semantic_tag(0), Ok("e0".to_string()));
+        assert_eq!(semantic_tag(42), Ok("e42".to_string()));
+        assert_eq!(
+            semantic_tag(MAX_SEMANTIC_ELEMENTS - 1),
+            Ok(format!("e{}", MAX_SEMANTIC_ELEMENTS - 1))
+        );
+
+        assert_eq!(
+            semantic_tag(MAX_SEMANTIC_ELEMENTS),
+            Err(SemanticError::InvalidObservation)
+        );
+        assert_eq!(
+            semantic_tag(MAX_SEMANTIC_ELEMENTS + 1),
+            Err(SemanticError::InvalidObservation)
+        );
+        assert_eq!(
+            semantic_tag(usize::MAX),
+            Err(SemanticError::InvalidObservation)
+        );
+    }
+
+    #[test]
     fn duplicate_and_cyclic_elements_are_rejected() {
         let mut duplicate = observation();
         duplicate.elements.push(duplicate.elements[0].clone());
