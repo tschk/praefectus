@@ -513,12 +513,7 @@ mod tests {
 
         // Also test a different action that is unsupported to cover that branch
         assert_eq!(
-            route_action(
-                &Action::Move,
-                &observation,
-                &target,
-                2_000
-            ),
+            route_action(&Action::Move, &observation, &target, 2_000),
             Err(SemanticError::UnsupportedAction)
         );
     }
