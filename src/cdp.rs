@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1949,7 +1949,7 @@ fn live_process_generation(_process_id: u32) -> Result<String, CdpError> {
     Err(CdpError::Unsupported)
 }
 
-fn root_backend_node_ids(snapshot: &Value, root_frame_id: &str) -> Result<BTreeSet<u64>, CdpError> {
+fn root_backend_node_ids(snapshot: &Value, root_frame_id: &str) -> Result<HashSet<u64>, CdpError> {
     let strings = snapshot.get("strings").and_then(Value::as_array);
     let mut documents = snapshot
         .get("documents")
@@ -2060,7 +2060,7 @@ fn parse_ax_tree(
     tree: &Value,
     observation_id: &str,
     document_id: &str,
-    root_backend_node_ids: &BTreeSet<u64>,
+    root_backend_node_ids: &HashSet<u64>,
 ) -> Result<(Vec<SemanticElement>, BTreeMap<String, CdpNode>), CdpError> {
     let raw_nodes = tree
         .get("nodes")
@@ -3042,7 +3042,7 @@ mod tests {
                 "frame-1"
             )
             .expect("backend node IDs"),
-            BTreeSet::from([7, 9])
+            HashSet::from([7, 9])
         );
     }
 

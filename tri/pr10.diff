@@ -1,0 +1,79 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d525c83..4b1f7f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -539,11 +539,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+diff --git a/src/cdp.rs b/src/cdp.rs
+index 43a7f1c..b200302 100644
+--- a/src/cdp.rs
++++ b/src/cdp.rs
+@@ -2353,6 +2353,7 @@ fn now_ms() -> i64 {
+ 
+ #[cfg(test)]
+ mod tests {
++
+     use std::collections::VecDeque;
+ 
+     use super::*;
+@@ -2361,6 +2362,28 @@ mod tests {
+         SafetyClass, SignedAuthority, Terminal, VerifiedAuthority,
+     };
+ 
++    #[test]
++    fn test_boundary_ok() {
++        let cancellation = CancellationToken::default();
++        assert!(matches!(boundary(&cancellation, i64::MAX), Ok(())));
++    }
++
++    #[test]
++    fn test_boundary_cancelled() {
++        let cancellation = CancellationToken::default();
++        cancellation.cancel();
++        assert!(matches!(
++            boundary(&cancellation, i64::MAX),
++            Err(CdpError::Cancelled)
++        ));
++    }
++
++    #[test]
++    fn test_boundary_expired() {
++        let cancellation = CancellationToken::default();
++        assert!(matches!(boundary(&cancellation, 0), Err(CdpError::Expired)));
++    }
++
+     struct FakeChannel {
+         endpoint: SocketAddr,
+         target_id: String,
+diff --git a/tests/cli.rs b/tests/cli.rs
+index 2c35b1d..8c41f9c 100644
+--- a/tests/cli.rs
++++ b/tests/cli.rs
+@@ -9,12 +9,9 @@ fn run(arguments: &[&str], stdin: &str) -> std::process::Output {
+         .stderr(Stdio::piped())
+         .spawn()
+         .expect("spawn CLI");
+-    child
+-        .stdin
+-        .take()
+-        .expect("stdin")
+-        .write_all(stdin.as_bytes())
+-        .expect("write stdin");
++    if let Some(mut child_stdin) = child.stdin.take() {
++        let _ = child_stdin.write_all(stdin.as_bytes());
++    }
+     child.wait_with_output().expect("CLI output")
+ }
+ 
