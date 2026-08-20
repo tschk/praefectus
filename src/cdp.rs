@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2100,7 +2100,7 @@ fn parse_ax_tree(
     let selected_ids = selected
         .iter()
         .map(|(raw_id, ..)| raw_id.as_str())
-        .collect::<BTreeSet<_>>();
+        .collect::<HashSet<_>>();
     let mut opaque_ids = BTreeMap::new();
     for (raw_id, backend_node_id, ..) in &selected {
         let element_id = opaque_element_id(observation_id, &backend_node_id.to_string())
