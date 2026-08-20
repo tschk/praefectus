@@ -7377,7 +7377,9 @@ fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolErr
 
 fn private_storage_available() -> bool {
     ensure_directory(
-        &observation_root(|k| std::env::var_os(k)).join("praefectus").join("observations"),
+        &observation_root(|k| std::env::var_os(k))
+            .join("praefectus")
+            .join("observations"),
         true,
     )
     .is_ok()
@@ -8021,12 +8023,10 @@ mod tests {
     #[cfg(not(windows))]
     fn test_default_ledger_path_with_env() {
         // Test XDG_STATE_HOME precedence
-        let path = super::default_ledger_path_with_env(|k| {
-            match k {
-                "XDG_STATE_HOME" => Some(std::ffi::OsString::from("/mock/xdg")),
-                "HOME" => Some(std::ffi::OsString::from("/mock/home")),
-                _ => None,
-            }
+        let path = super::default_ledger_path_with_env(|k| match k {
+            "XDG_STATE_HOME" => Some(std::ffi::OsString::from("/mock/xdg")),
+            "HOME" => Some(std::ffi::OsString::from("/mock/home")),
+            _ => None,
         });
         assert_eq!(
             path,
@@ -8036,11 +8036,9 @@ mod tests {
         );
 
         // Test HOME fallback
-        let path = super::default_ledger_path_with_env(|k| {
-            match k {
-                "HOME" => Some(std::ffi::OsString::from("/mock/home")),
-                _ => None,
-            }
+        let path = super::default_ledger_path_with_env(|k| match k {
+            "HOME" => Some(std::ffi::OsString::from("/mock/home")),
+            _ => None,
         });
         assert_eq!(
             path,
@@ -8065,11 +8063,9 @@ mod tests {
     #[cfg(windows)]
     fn test_default_ledger_path_with_env() {
         // Test LOCALAPPDATA precedence
-        let path = super::default_ledger_path_with_env(|k| {
-            match k {
-                "LOCALAPPDATA" => Some(std::ffi::OsString::from("C:\\Mock\\LocalAppData")),
-                _ => None,
-            }
+        let path = super::default_ledger_path_with_env(|k| match k {
+            "LOCALAPPDATA" => Some(std::ffi::OsString::from("C:\\Mock\\LocalAppData")),
+            _ => None,
         });
         assert_eq!(
             path,
