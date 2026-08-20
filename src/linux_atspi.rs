@@ -257,10 +257,10 @@ impl StoredSnapshot {
     }
 }
 
-fn focused_element_id(
-    stored: &StoredSnapshot,
+fn focused_element_id<'a>(
+    stored: &'a StoredSnapshot,
     focused: &StoredObject,
-) -> Result<String, ProtocolError> {
+) -> Result<&'a String, ProtocolError> {
     let expected = opaque_element_id(&stored.observation.observation_id, &focused.id()?)
         .map_err(semantic_error)?;
     let mut matches = stored
@@ -269,7 +269,7 @@ fn focused_element_id(
         .filter(|(element_id, target)| **element_id == expected && target.object == *focused);
     let element_id = matches
         .next()
-        .map(|(element_id, _)| element_id.clone())
+        .map(|(element_id, _)| element_id)
         .ok_or_else(desktop_state_unavailable)?;
     if matches.next().is_some() {
         return Err(desktop_state_unavailable());
@@ -776,7 +776,7 @@ impl LinuxAtspiBackend {
             .map_err(|_| desktop_state_unavailable())?
             .clone()
             .ok_or_else(desktop_state_unavailable)?;
-        let element_id = focused_element_id(&stored, &focus.focused)?;
+        let element_id = focused_element_id(&stored, &focus.focused)?.clone();
         let element = observation
             .elements
             .iter()
@@ -2674,7 +2674,7 @@ mod tests {
         };
         assert_eq!(
             focused_element_id(&stored, &focused).expect("focused target"),
-            element_id
+            &element_id
         );
         let missing = StoredObject {
             bus_name: ":1.42".to_string(),
