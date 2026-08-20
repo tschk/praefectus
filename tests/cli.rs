@@ -13,8 +13,7 @@ fn run(arguments: &[&str], stdin: &str) -> std::process::Output {
         .stdin
         .take()
         .expect("stdin")
-        .write_all(stdin.as_bytes())
-        ;
+        .write_all(stdin.as_bytes());
     child.wait_with_output().expect("CLI output")
 }
 
