@@ -231,3 +231,84 @@ fn protocol(code: &'static str, _error: impl ToString) -> CliError {
         exit: EXIT_PROTOCOL,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_arguments_empty() {
+        let arguments = args(&["command"]);
+        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        assert_eq!(ledger, default_ledger_path());
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn parse_arguments_positional() {
+        let arguments = args(&["command", "value1", "value2"]);
+        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        assert_eq!(ledger, default_ledger_path());
+        assert_eq!(values, vec!["value1", "value2"]);
+    }
+
+    #[test]
+    fn parse_arguments_ledger() {
+        let arguments = args(&["command", "--ledger", "custom/path.json"]);
+        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        assert_eq!(ledger, PathBuf::from("custom/path.json"));
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn parse_arguments_mixed() {
+        let arguments = args(&[
+            "command",
+            "value1",
+            "--ledger",
+            "custom/path.json",
+            "value2",
+        ]);
+        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        assert_eq!(ledger, PathBuf::from("custom/path.json"));
+        assert_eq!(values, vec!["value1", "value2"]);
+    }
+
+    #[test]
+    fn parse_arguments_ledger_missing_path() {
+        let arguments = args(&["command", "--ledger"]);
+        let err = parse_arguments(&arguments).err().unwrap();
+        assert_eq!(err.message, "--ledger requires a path");
+    }
+
+    #[test]
+    fn parse_arguments_ledger_dash_path() {
+        let arguments = args(&["command", "--ledger", "--other"]);
+        let err = parse_arguments(&arguments).err().unwrap();
+        assert_eq!(err.message, "--ledger requires a path");
+    }
+
+    #[test]
+    fn parse_arguments_multiple_ledgers() {
+        let arguments = args(&[
+            "command",
+            "--ledger",
+            "path1.json",
+            "--ledger",
+            "path2.json",
+        ]);
+        let err = parse_arguments(&arguments).err().unwrap();
+        assert_eq!(err.message, "--ledger may only be specified once");
+    }
+
+    #[test]
+    fn parse_arguments_unknown_option() {
+        let arguments = args(&["command", "--unknown"]);
+        let err = parse_arguments(&arguments).err().unwrap();
+        assert_eq!(err.message, "unknown option: --unknown");
+    }
+}
