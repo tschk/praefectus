@@ -360,6 +360,7 @@ class PluginTest(unittest.TestCase):
             },
             {**invoke_request(), "interaction_mode": "host_isolated"},
             {**invoke_request(), "interaction_mode": "unknown"},
+            {**click_request(), "interaction_mode": "background_only"},
             {
                 **invoke_request(),
                 "action": {

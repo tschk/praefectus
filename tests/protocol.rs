@@ -631,6 +631,24 @@ fn cancellation_and_timeout_stop_before_effect() {
 }
 
 #[test]
+fn cancellation_wins_over_an_already_expired_deadline() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+    let mut expired_request = request("cancelled-and-expired");
+    expired_request.deadline_at_ms = 1;
+    sign_request(&mut expired_request);
+    let report = engine
+        .execute(&expired_request, &cancellation)
+        .expect("cancelled result");
+
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+    assert!(matches!(terminal(&report), Terminal::CancelledBeforeEffect));
+}
+
+#[test]
 fn ambiguous_dispatch_is_outcome_unknown_and_replayable() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();

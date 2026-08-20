@@ -72,3 +72,24 @@ fn blocking_screen_content_hash() -> Result<String, CaptureError> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_clamps_zero_dimensions_and_hides_the_cursor() {
+        let config = configuration(0, 0);
+        assert_eq!(config.width(), 1);
+        assert_eq!(config.height(), 1);
+        assert!(!config.shows_cursor());
+    }
+
+    #[test]
+    fn configuration_preserves_nonzero_dimensions() {
+        let config = configuration(1920, 1080);
+        assert_eq!(config.width(), 1920);
+        assert_eq!(config.height(), 1080);
+        assert!(!config.shows_cursor());
+    }
+}
