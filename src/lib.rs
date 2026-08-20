@@ -472,6 +472,16 @@ pub enum MouseButton {
     Middle,
 }
 
+impl MouseButton {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -6182,14 +6192,7 @@ impl Executor for NativeExecutor {
                     } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
                         return Err(ambiguous("click interrupted after partial dispatch"));
                     }
-                    self.runtime.click(
-                        native_target()?,
-                        match button {
-                            MouseButton::Left => "left",
-                            MouseButton::Right => "right",
-                            MouseButton::Middle => "middle",
-                        },
-                    )?;
+                    self.runtime.click(native_target()?, button.as_str())?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
                     return Err(ambiguous("native input event delivery cannot be verified"));
