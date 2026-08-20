@@ -7921,12 +7921,13 @@ pub fn default_ledger_path() -> PathBuf {
 mod tests {
     use super::{
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
-        ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, Evidence, Executor,
-        FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement, NativeExecutor,
-        NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, ResolvedTarget,
-        SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
-        canonical_authority_bytes, default_ledger_path, element_fingerprint_hash, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify, ElementFingerprint, Rect,
+        ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
+        Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
+        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
+        VerificationPolicy, canonical_authority_bytes, default_ledger_path,
+        element_fingerprint_hash, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
 
     #[cfg(target_os = "macos")]
@@ -7966,13 +7967,23 @@ mod tests {
 
         // Modifying bounds from None to Some changes hash
         let mut fingerprint4 = fingerprint2.clone();
-        fingerprint4.bounds = Some(Rect { x: 0, y: 0, width: 100, height: 100 });
+        fingerprint4.bounds = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        });
         let hash5 = element_fingerprint_hash(&fingerprint4).expect("hash successful");
         assert_ne!(hash1, hash5);
 
         // Modifying bounds values changes hash
         let mut fingerprint5 = fingerprint4.clone();
-        fingerprint5.bounds = Some(Rect { x: 10, y: 0, width: 100, height: 100 });
+        fingerprint5.bounds = Some(Rect {
+            x: 10,
+            y: 0,
+            width: 100,
+            height: 100,
+        });
         let hash6 = element_fingerprint_hash(&fingerprint5).expect("hash successful");
         assert_ne!(hash5, hash6);
     }
