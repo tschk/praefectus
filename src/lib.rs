@@ -4711,6 +4711,153 @@ impl Default for NativeExecutor {
 }
 
 impl NativeExecutor {
+    #[cfg(target_os = "linux")]
+    fn linux_capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        let mut backend = self
+            .linux_atspi
+            .lock()
+            .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
+        if backend.is_none() {
+            *backend = linux_atspi::LinuxAtspiBackend::connect().ok();
+        }
+        let display_geometry_hash = backend
+            .as_ref()
+            .and_then(|backend| backend.display_geometry_hash().ok());
+        let permissions = backend
+            .as_ref()
+            .map(|backend| {
+                backend.permissions(display_geometry_hash.is_some(), private_storage_available())
+            })
+            .unwrap_or_else(|| {
+                BTreeMap::from([
+                    ("accessibility".to_string(), false),
+                    ("atspi2".to_string(), false),
+                    ("coordinate_capture".to_string(), false),
+                    ("display_geometry".to_string(), false),
+                    ("private_state".to_string(), false),
+                    ("screen_recording".to_string(), false),
+                ])
+            });
+        let has_accessibility = permissions.get("accessibility").copied().unwrap_or(false);
+        let has_display_geometry = permissions
+            .get("display_geometry")
+            .copied()
+            .unwrap_or(false);
+        let has_private_state = permissions.get("private_state").copied().unwrap_or(false);
+        let mut supported_actions = Vec::new();
+        let mut action_capabilities = Vec::new();
+        if has_accessibility && has_display_geometry && has_private_state {
+            for action in ["invoke", "set_value"] {
+                supported_actions.push(action.to_string());
+                action_capabilities.push(ActionCapability {
+                    action: action.to_string(),
+                    delivery_route: DeliveryRoute::TargetAddressed,
+                    background_support: BackgroundSupport::Guarded,
+                });
+            }
+        }
+        let session = linux_input::session_type();
+        if session == "x11" || session == "wayland" {
+            for action in ["click", "type_text", "press", "paste", "hotkey", "move"] {
+                supported_actions.push(action.to_string());
+                action_capabilities.push(ActionCapability {
+                    action: action.to_string(),
+                    delivery_route: DeliveryRoute::Pointer,
+                    background_support: BackgroundSupport::Unavailable,
+                });
+            }
+            supported_actions.push("scroll".to_string());
+            action_capabilities.push(ActionCapability {
+                action: "scroll".to_string(),
+                delivery_route: DeliveryRoute::Pointer,
+                background_support: BackgroundSupport::Unavailable,
+            });
+        }
+        Ok(Capabilities {
+            platform: "linux".to_string(),
+            backend: "praefectus-linux".to_string(),
+            session_isolation: self.session_isolation,
+            action_capabilities,
+            supported_actions,
+            permissions,
+            display_geometry_hash: display_geometry_hash.unwrap_or_else(|| "0".repeat(64)),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn non_linux_capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        let permission_value = self.runtime.permissions();
+        let permissions: BTreeMap<String, bool> = permission_value
+            .as_object()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(key, value)| value.as_bool().map(|value| (key.clone(), value)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let screens = self
+            .runtime
+            .list_screens()
+            .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
+        let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
+        let mut supported_actions = Vec::new();
+        #[cfg(target_os = "macos")]
+        supported_actions.extend(macos_semantic_actions(accessibility));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let private_state = permissions.get("private_state").copied().unwrap_or(false);
+            if accessibility && private_state {
+                supported_actions.extend([
+                    "invoke",
+                    "set_value",
+                    "click",
+                    "type_text",
+                    "press",
+                    "paste",
+                    "hotkey",
+                    "move",
+                    "scroll",
+                ]);
+            }
+        }
+        let action_capabilities = supported_actions
+            .iter()
+            .map(|action| ActionCapability {
+                action: (*action).to_string(),
+                delivery_route: match *action {
+                    "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                        DeliveryRoute::TargetAddressed
+                    }
+                    "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
+                        native_pointer_delivery_route()
+                    }
+                    _ => DeliveryRoute::Pointer,
+                },
+                background_support: match *action {
+                    "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                        BackgroundSupport::Guarded
+                    }
+                    "scroll" | "type_text" | "press" | "paste" | "hotkey"
+                        if native_pointer_delivery_route() == DeliveryRoute::PerProcessEvent =>
+                    {
+                        BackgroundSupport::Guarded
+                    }
+                    _ => BackgroundSupport::Unavailable,
+                },
+            })
+            .collect();
+        Ok(Capabilities {
+            platform: std::env::consts::OS.to_string(),
+            backend: self.runtime.resolve_backend().to_string(),
+            session_isolation: self.session_isolation,
+            supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
+            action_capabilities,
+            permissions,
+            display_geometry_hash: hash_value(&screens)?,
+        })
+    }
+
     pub fn with_session_isolation(session_isolation: SessionIsolation) -> Self {
         Self {
             session_isolation,
@@ -5727,152 +5874,11 @@ impl Executor for NativeExecutor {
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
         #[cfg(target_os = "linux")]
         {
-            let mut backend = self
-                .linux_atspi
-                .lock()
-                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
-            if backend.is_none() {
-                *backend = linux_atspi::LinuxAtspiBackend::connect().ok();
-            }
-            let display_geometry_hash = backend
-                .as_ref()
-                .and_then(|backend| backend.display_geometry_hash().ok());
-            let permissions = backend
-                .as_ref()
-                .map(|backend| {
-                    backend
-                        .permissions(display_geometry_hash.is_some(), private_storage_available())
-                })
-                .unwrap_or_else(|| {
-                    BTreeMap::from([
-                        ("accessibility".to_string(), false),
-                        ("atspi2".to_string(), false),
-                        ("coordinate_capture".to_string(), false),
-                        ("display_geometry".to_string(), false),
-                        ("private_state".to_string(), false),
-                        ("screen_recording".to_string(), false),
-                    ])
-                });
-            let has_accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let has_display_geometry = permissions
-                .get("display_geometry")
-                .copied()
-                .unwrap_or(false);
-            let has_private_state = permissions.get("private_state").copied().unwrap_or(false);
-            let mut supported_actions = Vec::new();
-            let mut action_capabilities = Vec::new();
-            if has_accessibility && has_display_geometry && has_private_state {
-                for action in ["invoke", "set_value"] {
-                    supported_actions.push(action.to_string());
-                    action_capabilities.push(ActionCapability {
-                        action: action.to_string(),
-                        delivery_route: DeliveryRoute::TargetAddressed,
-                        background_support: BackgroundSupport::Guarded,
-                    });
-                }
-            }
-            let session = linux_input::session_type();
-            if session == "x11" || session == "wayland" {
-                for action in ["click", "type_text", "press", "paste", "hotkey", "move"] {
-                    supported_actions.push(action.to_string());
-                    action_capabilities.push(ActionCapability {
-                        action: action.to_string(),
-                        delivery_route: DeliveryRoute::Pointer,
-                        background_support: BackgroundSupport::Unavailable,
-                    });
-                }
-                supported_actions.push("scroll".to_string());
-                action_capabilities.push(ActionCapability {
-                    action: "scroll".to_string(),
-                    delivery_route: DeliveryRoute::Pointer,
-                    background_support: BackgroundSupport::Unavailable,
-                });
-            }
-            Ok(Capabilities {
-                platform: "linux".to_string(),
-                backend: "praefectus-linux".to_string(),
-                session_isolation: self.session_isolation,
-                action_capabilities,
-                supported_actions,
-                permissions,
-                display_geometry_hash: display_geometry_hash.unwrap_or_else(|| "0".repeat(64)),
-            })
+            self.linux_capabilities()
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let permission_value = self.runtime.permissions();
-            let permissions: BTreeMap<String, bool> = permission_value
-                .as_object()
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|(key, value)| {
-                            value.as_bool().map(|value| (key.clone(), value))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let screens = self
-                .runtime
-                .list_screens()
-                .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
-            let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let mut supported_actions = Vec::new();
-            #[cfg(target_os = "macos")]
-            supported_actions.extend(macos_semantic_actions(accessibility));
-            #[cfg(not(target_os = "macos"))]
-            {
-                let private_state = permissions.get("private_state").copied().unwrap_or(false);
-                if accessibility && private_state {
-                    supported_actions.extend([
-                        "invoke",
-                        "set_value",
-                        "click",
-                        "type_text",
-                        "press",
-                        "paste",
-                        "hotkey",
-                        "move",
-                        "scroll",
-                    ]);
-                }
-            }
-            let action_capabilities = supported_actions
-                .iter()
-                .map(|action| ActionCapability {
-                    action: (*action).to_string(),
-                    delivery_route: match *action {
-                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
-                            DeliveryRoute::TargetAddressed
-                        }
-                        "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
-                            native_pointer_delivery_route()
-                        }
-                        _ => DeliveryRoute::Pointer,
-                    },
-                    background_support: match *action {
-                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
-                            BackgroundSupport::Guarded
-                        }
-                        "scroll" | "type_text" | "press" | "paste" | "hotkey"
-                            if native_pointer_delivery_route()
-                                == DeliveryRoute::PerProcessEvent =>
-                        {
-                            BackgroundSupport::Guarded
-                        }
-                        _ => BackgroundSupport::Unavailable,
-                    },
-                })
-                .collect();
-            Ok(Capabilities {
-                platform: std::env::consts::OS.to_string(),
-                backend: self.runtime.resolve_backend().to_string(),
-                session_isolation: self.session_isolation,
-                supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
-                action_capabilities,
-                permissions,
-                display_geometry_hash: hash_value(&screens)?,
-            })
+            self.non_linux_capabilities()
         }
     }
 
