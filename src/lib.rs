@@ -769,6 +769,65 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
+fn win_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    if _keys.len() < 2 {
+        return Err(NativeError);
+    }
+    let action_key = _keys.last().ok_or(NativeError)?;
+    let modifiers = &_keys[.._keys.len() - 1];
+
+    let action_vk = win_key_code(action_key).ok_or(NativeError)?;
+    let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
+        .iter()
+        .map(|m| match *m {
+            "ctrl" => Ok(VK_CONTROL),
+            "alt" => Ok(VK_MENU),
+            "shift" => Ok(VK_SHIFT),
+            "win" => Ok(VK_LWIN),
+            _ => Err(NativeError),
+        })
+        .collect::<Result<_, _>>()?;
+
+    let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+
+    for vk in &modifier_vks {
+        let _ = unsafe {
+            SendInput(
+                &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+    }
+    let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
+    let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
+    let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+    for vk in modifier_vks.iter().rev() {
+        let _ = unsafe {
+            SendInput(
+                &[make_keybd(*vk, KEYEVENTF_KEYUP)],
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+    }
+    return Ok(());
+}
+
+#[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     match key {
@@ -1036,6 +1095,39 @@ fn mac_set_scroll_deltas(event: &core_graphics::event::CGEvent, wheel1: i32, whe
         event.set_integer_value_field(point_delta, pixel);
         event.set_double_value_field(fixed_delta, pixel as f64);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    let code = _keys
+        .last()
+        .and_then(|k| {
+            mac_key_name_code(k).or_else(|| {
+                k.chars()
+                    .next()
+                    .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+            })
+        })
+        .ok_or(NativeError)?;
+    let mut flags: u64 = 0;
+    for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
+        match mod_key {
+            "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
+            "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
+            "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
+            "shift" => flags |= MAC_FLAG_SHIFT,
+            _ => return Err(NativeError),
+        }
+    }
+    let _ = mac_post_key(code, flags);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1431,93 +1523,11 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-            if _keys.len() < 2 {
-                return Err(NativeError);
-            }
-            let action_key = _keys.last().ok_or(NativeError)?;
-            let modifiers = &_keys[.._keys.len() - 1];
-
-            let action_vk = win_key_code(action_key).ok_or(NativeError)?;
-            let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
-                .iter()
-                .map(|m| match *m {
-                    "ctrl" => Ok(VK_CONTROL),
-                    "alt" => Ok(VK_MENU),
-                    "shift" => Ok(VK_SHIFT),
-                    "win" => Ok(VK_LWIN),
-                    _ => Err(NativeError),
-                })
-                .collect::<Result<_, _>>()?;
-
-            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            };
-
-            for vk in &modifier_vks {
-                let _ = unsafe {
-                    SendInput(
-                        &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
-                        std::mem::size_of::<INPUT>() as i32,
-                    )
-                };
-            }
-            let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
-            let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
-            let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-            for vk in modifier_vks.iter().rev() {
-                let _ = unsafe {
-                    SendInput(
-                        &[make_keybd(*vk, KEYEVENTF_KEYUP)],
-                        std::mem::size_of::<INPUT>() as i32,
-                    )
-                };
-            }
-            return Ok(());
+            return win_hotkey(_keys);
         }
         #[cfg(target_os = "macos")]
         {
-            if !native_permissions()
-                .get("accessibility")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(NativeError);
-            }
-            let code = _keys
-                .last()
-                .and_then(|k| {
-                    mac_key_name_code(k).or_else(|| {
-                        k.chars()
-                            .next()
-                            .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
-                    })
-                })
-                .ok_or(NativeError)?;
-            let mut flags: u64 = 0;
-            for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
-                match mod_key {
-                    "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
-                    "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
-                    "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
-                    "shift" => flags |= MAC_FLAG_SHIFT,
-                    _ => return Err(NativeError),
-                }
-            }
-            let _ = mac_post_key(code, flags);
-            Ok(())
+            return mac_hotkey(_keys);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
