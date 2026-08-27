@@ -2041,14 +2041,14 @@ fn native_click_macos(point: &NativePoint, button: &str) -> Result<(), NativeErr
         _ => return Err(NativeError),
     };
     let position = CGPoint::new(point.x as f64, point.y as f64);
-    let down_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-        .map_err(|_| NativeError)?;
+    let down_source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
     let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
         .map_err(|_| NativeError)?;
-    let up_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-        .map_err(|_| NativeError)?;
-    let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
-        .map_err(|_| NativeError)?;
+    let up_source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
+    let up_event =
+        CGEvent::new_mouse_event(up_source, up, position, mouse_button).map_err(|_| NativeError)?;
     mac_post_event(&down_event)?;
     mac_post_event(&up_event)?;
     Ok(())
