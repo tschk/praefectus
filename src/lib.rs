@@ -1963,95 +1963,105 @@ fn native_drag(
     }
 }
 
+#[cfg(windows)]
+fn native_click_windows(point: &NativePoint, button: &str) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+
+    if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
+        return Err(NativeError);
+    }
+    let (down_flags, up_flags) = match button {
+        "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        _ => return Err(NativeError),
+    };
+    let down = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: down_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: up_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    if unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) } != 2 {
+        return Err(NativeError);
+    }
+    return Ok(());
+}
+
+#[cfg(target_os = "macos")]
+fn native_click_macos(point: &NativePoint, button: &str) -> Result<(), NativeError> {
+    use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    let (down, up, mouse_button) = match button {
+        "left" => (
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+            CGMouseButton::Left,
+        ),
+        "right" => (
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+            CGMouseButton::Right,
+        ),
+        "middle" => (
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGMouseButton::Center,
+        ),
+        _ => return Err(NativeError),
+    };
+    let position = CGPoint::new(point.x as f64, point.y as f64);
+    let down_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| NativeError)?;
+    let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
+        .map_err(|_| NativeError)?;
+    let up_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| NativeError)?;
+    let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
+        .map_err(|_| NativeError)?;
+    mac_post_event(&down_event)?;
+    mac_post_event(&up_event)?;
+    Ok(())
+}
+
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-        use core_graphics::geometry::CGPoint;
-
-        if !native_permissions()
-            .get("accessibility")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(NativeError);
-        }
-        let (down, up, mouse_button) = match button {
-            "left" => (
-                CGEventType::LeftMouseDown,
-                CGEventType::LeftMouseUp,
-                CGMouseButton::Left,
-            ),
-            "right" => (
-                CGEventType::RightMouseDown,
-                CGEventType::RightMouseUp,
-                CGMouseButton::Right,
-            ),
-            "middle" => (
-                CGEventType::OtherMouseDown,
-                CGEventType::OtherMouseUp,
-                CGMouseButton::Center,
-            ),
-            _ => return Err(NativeError),
-        };
-        let position = CGPoint::new(point.x as f64, point.y as f64);
-        let down_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-            .map_err(|_| NativeError)?;
-        let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
-            .map_err(|_| NativeError)?;
-        let up_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-            .map_err(|_| NativeError)?;
-        let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
-            .map_err(|_| NativeError)?;
-        mac_post_event(&down_event)?;
-        mac_post_event(&up_event)?;
-        Ok(())
+        return native_click_macos(point, button);
     }
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-
-        if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
-            return Err(NativeError);
-        }
-        let (down_flags, up_flags) = match button {
-            "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-            _ => return Err(NativeError),
-        };
-        let down = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: down_flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: up_flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        if unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) } != 2 {
-            return Err(NativeError);
-        }
-        return Ok(());
+        return native_click_windows(point, button);
     }
     #[cfg(target_os = "linux")]
     {
