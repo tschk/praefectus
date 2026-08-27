@@ -769,6 +769,35 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
+fn windows_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let (flags, delta) = match direction {
+        Direction::Up => (MOUSEEVENTF_WHEEL, 120u32),
+        Direction::Down => (MOUSEEVENTF_WHEEL, (-120i32) as u32),
+        Direction::Left => (MOUSEEVENTF_HWHEEL, (-120i32) as u32),
+        Direction::Right => (MOUSEEVENTF_HWHEEL, 120u32),
+    };
+    for _ in 0..amount {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: delta,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     match key {
@@ -1011,6 +1040,46 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
 
 #[cfg(target_os = "macos")]
 const MAC_SCROLL_PIXELS_PER_LINE: i64 = 40;
+
+#[cfg(target_os = "macos")]
+fn mac_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    unsafe extern "C" {
+        fn CGEventCreateScrollWheelEvent(
+            source: *const std::ffi::c_void,
+            units: u32,
+            wheel_count: u32,
+            wheel1: i32,
+            wheel2: i32,
+        ) -> *mut std::ffi::c_void;
+    }
+    const K_CGSCROLL_EVENT_UNIT_LINE: u32 = 1;
+    for _ in 0..amount {
+        let (w1, w2) = match direction {
+            Direction::Up => (1i32, 0i32),
+            Direction::Down => (-1i32, 0i32),
+            Direction::Left => (0i32, -1i32),
+            Direction::Right => (0i32, 1i32),
+        };
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| NativeError)?;
+        let source_ptr: *mut core_graphics::sys::CGEventSource =
+            unsafe { std::mem::transmute_copy(&source) };
+        let raw = unsafe {
+            CGEventCreateScrollWheelEvent(source_ptr.cast(), K_CGSCROLL_EVENT_UNIT_LINE, 2, w1, w2)
+        };
+        if raw.is_null() {
+            return Err(NativeError);
+        }
+        let event: core_graphics::event::CGEvent = unsafe { std::mem::transmute(raw) };
+        mac_set_scroll_deltas(&event, w1, w2);
+        if let Some((x, y)) = MAC_DELIVERY_POINT.with(std::cell::Cell::get) {
+            event.set_location(core_graphics::geometry::CGPoint::new(x, y));
+        }
+        mac_post_event(&event)?;
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 fn mac_set_scroll_deltas(event: &core_graphics::event::CGEvent, wheel1: i32, wheel2: i32) {
@@ -1530,76 +1599,11 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-            let (flags, delta) = match _direction {
-                Direction::Up => (MOUSEEVENTF_WHEEL, 120u32),
-                Direction::Down => (MOUSEEVENTF_WHEEL, (-120i32) as u32),
-                Direction::Left => (MOUSEEVENTF_HWHEEL, (-120i32) as u32),
-                Direction::Right => (MOUSEEVENTF_HWHEEL, 120u32),
-            };
-            for _ in 0.._amount {
-                let input = INPUT {
-                    r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT {
-                            dx: 0,
-                            dy: 0,
-                            mouseData: delta,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-            }
-            return Ok(());
+            return windows_scroll(_direction, _amount);
         }
         #[cfg(target_os = "macos")]
         {
-            use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-            unsafe extern "C" {
-                fn CGEventCreateScrollWheelEvent(
-                    source: *const std::ffi::c_void,
-                    units: u32,
-                    wheel_count: u32,
-                    wheel1: i32,
-                    wheel2: i32,
-                ) -> *mut std::ffi::c_void;
-            }
-            const K_CGSCROLL_EVENT_UNIT_LINE: u32 = 1;
-            for _ in 0.._amount {
-                let (w1, w2) = match _direction {
-                    Direction::Up => (1i32, 0i32),
-                    Direction::Down => (-1i32, 0i32),
-                    Direction::Left => (0i32, -1i32),
-                    Direction::Right => (0i32, 1i32),
-                };
-                let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-                    .map_err(|_| NativeError)?;
-                let source_ptr: *mut core_graphics::sys::CGEventSource =
-                    unsafe { std::mem::transmute_copy(&source) };
-                let raw = unsafe {
-                    CGEventCreateScrollWheelEvent(
-                        source_ptr.cast(),
-                        K_CGSCROLL_EVENT_UNIT_LINE,
-                        2,
-                        w1,
-                        w2,
-                    )
-                };
-                if raw.is_null() {
-                    return Err(NativeError);
-                }
-                let event: core_graphics::event::CGEvent = unsafe { std::mem::transmute(raw) };
-                mac_set_scroll_deltas(&event, w1, w2);
-                if let Some((x, y)) = MAC_DELIVERY_POINT.with(std::cell::Cell::get) {
-                    event.set_location(core_graphics::geometry::CGPoint::new(x, y));
-                }
-                mac_post_event(&event)?;
-            }
-            Ok(())
+            return mac_scroll(_direction, _amount);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
