@@ -7841,9 +7841,12 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-
 #[cfg(windows)]
-fn windows_native_press(_key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
+fn windows_native_press(
+    _key: &str,
+    _count: u32,
+    _delay_ms: Option<u64>,
+) -> Result<(), NativeError> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     let vk = win_key_code(_key).ok_or(NativeError)?;
