@@ -1422,7 +1422,7 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
     }
 }
 
-fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
+fn fetch_json_targets(config: &CdpConfig) -> Result<Value, CdpError> {
     let mut stream = TcpStream::connect_timeout(&config.endpoint(), MAX_IO_TIMEOUT)
         .map_err(|_| CdpError::Protocol)?;
     stream
@@ -1486,7 +1486,11 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     if body.len() != content_length {
         return Err(CdpError::Protocol);
     }
-    let targets: Value = serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)?;
+    serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)
+}
+
+fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
+    let targets = fetch_json_targets(config)?;
     let mut matches = targets
         .as_array()
         .ok_or(CdpError::Protocol)?
