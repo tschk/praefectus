@@ -1,3 +1,5 @@
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 #![allow(clippy::collapsible_if, clippy::needless_return)]
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
