@@ -2746,6 +2746,44 @@ mod tests {
     }
 
     #[test]
+    fn host_isolated_localhost_rejects_invalid_config() {
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+
+        assert!(matches!(
+            CdpConfig::host_isolated_localhost(0, "page-1", process_id, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::host_isolated_localhost(9222, "", process_id, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::host_isolated_localhost(
+                9222,
+                "page/1",
+                process_id,
+                process_generation.clone()
+            ),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::host_isolated_localhost(9222, "page-1", 0, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::host_isolated_localhost(
+                9222,
+                "page-1",
+                process_id,
+                format!("{}-stale", process_generation)
+            ),
+            Err(CdpError::InvalidConfig)
+        ));
+    }
+
+    #[test]
     fn only_exact_local_channel_is_accepted() {
         let process_id = std::process::id();
         let process_generation =
