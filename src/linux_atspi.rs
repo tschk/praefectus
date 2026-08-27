@@ -940,31 +940,16 @@ impl LinuxAtspiBackend {
             );
 
             let accessible = self.accessible(&object)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0 {
-                return Err(ProtocolError::Executor(
-                    "invalid accessibility tree".to_string(),
-                ));
-            }
+            let children = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
             if depth == MAX_DEPTH {
-                truncated |= child_count > 0;
+                truncated |= !children.is_empty();
                 continue;
             }
             let remaining = MAX_ELEMENTS.saturating_sub(elements.len() + queue.len());
-            let to_read = usize::try_from(child_count)
-                .unwrap_or(usize::MAX)
-                .min(remaining);
-            truncated |= usize::try_from(child_count).unwrap_or(usize::MAX) > to_read;
-            for index in 0..to_read {
+            let to_read = children.len().min(remaining);
+            truncated |= children.len() > to_read;
+            for child in children.into_iter().take(to_read) {
                 check_observation_boundary(cancellation, deadline_at_ms)?;
-                let child = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(i32::try_from(index).map_err(|_| {
-                        ProtocolError::Executor("invalid accessibility tree".to_string())
-                    })?)
-                )?;
                 if child.is_null() {
                     return Err(ProtocolError::StaleTarget(
                         "accessibility tree changed".to_string(),
@@ -1236,19 +1221,11 @@ impl LinuxAtspiBackend {
                 continue;
             }
             let accessible = self.accessible(&application)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0
-                || usize::try_from(child_count).unwrap_or(usize::MAX) > MAX_WINDOWS_PER_APPLICATION
-            {
+            let windows = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            if windows.len() > MAX_WINDOWS_PER_APPLICATION {
                 return Err(desktop_state_unavailable());
             }
-            for index in 0..child_count {
-                let window = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(index)
-                )?;
+            for window in windows {
                 if window.is_null() {
                     continue;
                 }
@@ -1345,26 +1322,13 @@ impl LinuxAtspiBackend {
                 }
             }
             let accessible = self.accessible(&object)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0 {
-                return Err(desktop_state_unavailable());
-            }
-            let child_count =
-                usize::try_from(child_count).map_err(|_| desktop_state_unavailable())?;
-            if depth == MAX_DEPTH && child_count > 0
-                || child_count > MAX_FOCUS_ELEMENTS.saturating_sub(seen.len() + queue.len())
+            let children = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            if depth == MAX_DEPTH && !children.is_empty()
+                || children.len() > MAX_FOCUS_ELEMENTS.saturating_sub(seen.len() + queue.len())
             {
                 return Err(desktop_state_unavailable());
             }
-            for index in 0..child_count {
-                let child = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(
-                        i32::try_from(index).map_err(|_| desktop_state_unavailable())?
-                    )
-                )?;
+            for child in children {
                 if child.is_null() {
                     return Err(desktop_state_unavailable());
                 }
@@ -1695,22 +1659,14 @@ impl LinuxAtspiBackend {
             let process_id = self.process_id(&application, cancellation, deadline_at_ms)?;
             let generation = process_generation(process_id)?;
             let accessible = self.accessible(&application)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0
-                || usize::try_from(child_count).unwrap_or(usize::MAX) > MAX_WINDOWS_PER_APPLICATION
-            {
+            let surface_windows = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            if surface_windows.len() > MAX_WINDOWS_PER_APPLICATION {
                 return Err(ProtocolError::Executor(
                     "accessibility window limit exceeded".to_string(),
                 ));
             }
-            for index in 0..child_count {
+            for window in surface_windows {
                 check_observation_boundary(cancellation, deadline_at_ms)?;
-                let window = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(index)
-                )?;
                 if window.is_null() {
                     continue;
                 }
