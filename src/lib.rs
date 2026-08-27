@@ -131,9 +131,9 @@ pub enum DeliveryRoute {
 impl DeliveryRoute {
     pub fn as_str(&self) -> &'static str {
         match self {
-            DeliveryRoute::TargetAddressed => "target_addressed",
+            DeliveryRoute::TargetAddressed => "targetAddressed",
             DeliveryRoute::Pointer => "pointer",
-            DeliveryRoute::PerProcessEvent => "per_process_event",
+            DeliveryRoute::PerProcessEvent => "perProcessEvent",
             DeliveryRoute::Unknown => "unknown",
         }
     }
@@ -8076,9 +8076,9 @@ mod tests {
     #[test]
     fn test_delivery_route_as_str() {
         use super::DeliveryRoute;
-        assert_eq!(DeliveryRoute::TargetAddressed.as_str(), "target_addressed");
+        assert_eq!(DeliveryRoute::TargetAddressed.as_str(), "targetAddressed");
         assert_eq!(DeliveryRoute::Pointer.as_str(), "pointer");
-        assert_eq!(DeliveryRoute::PerProcessEvent.as_str(), "per_process_event");
+        assert_eq!(DeliveryRoute::PerProcessEvent.as_str(), "perProcessEvent");
         assert_eq!(DeliveryRoute::Unknown.as_str(), "unknown");
     }
 
