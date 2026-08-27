@@ -1741,6 +1741,7 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
         if written >= descriptors.len() || written % 8 != 0 {
             return Err(CdpError::StaleTarget);
         }
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         for descriptor in descriptors[..written].chunks_exact(8) {
             let file_descriptor =
                 i32::from_ne_bytes(descriptor[..4].try_into().map_err(|_| CdpError::Protocol)?);
@@ -1851,6 +1852,7 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
         return Err(CdpError::Protocol);
     }
     let mut owners = BTreeSet::new();
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for row in table[4..].chunks_exact(TCP_ROW_BYTES).take(row_count) {
         if u32::from_ne_bytes(row[..4].try_into().map_err(|_| CdpError::Protocol)?) == TCP_LISTEN
             && row[4..8] == Ipv4Addr::LOCALHOST.octets()
