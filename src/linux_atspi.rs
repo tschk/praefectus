@@ -1659,8 +1659,7 @@ impl LinuxAtspiBackend {
             let process_id = self.process_id(&application, cancellation, deadline_at_ms)?;
             let generation = process_generation(process_id)?;
             let accessible = self.accessible(&application)?;
-            let surface_windows =
-                provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            let surface_windows = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
             if surface_windows.len() > MAX_WINDOWS_PER_APPLICATION {
                 return Err(ProtocolError::Executor(
                     "accessibility window limit exceeded".to_string(),
