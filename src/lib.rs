@@ -300,6 +300,82 @@ pub enum WindowOperation {
     Minimize,
 }
 
+impl Action {
+    fn fmt_click(
+        formatter: &mut std::fmt::Formatter<'_>,
+        button: &MouseButton,
+        count: &u32,
+        allow_coordinate_fallback: &bool,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Click")
+            .field("button", button)
+            .field("count", count)
+            .field("allow_coordinate_fallback", allow_coordinate_fallback)
+            .finish()
+    }
+
+    fn fmt_type_text(
+        formatter: &mut std::fmt::Formatter<'_>,
+        clear: &bool,
+        press_return: &bool,
+        delay_ms: &Option<u64>,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypeText")
+            .field("text", &"[redacted]")
+            .field("clear", clear)
+            .field("press_return", press_return)
+            .field("delay_ms", delay_ms)
+            .finish()
+    }
+
+    fn fmt_press(
+        formatter: &mut std::fmt::Formatter<'_>,
+        count: &u32,
+        delay_ms: &Option<u64>,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Press")
+            .field("key", &"[redacted]")
+            .field("count", count)
+            .field("delay_ms", delay_ms)
+            .finish()
+    }
+
+    fn fmt_application(
+        formatter: &mut std::fmt::Formatter<'_>,
+        operation: &ApplicationOperation,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Application")
+            .field("operation", operation)
+            .field("name", &"[redacted]")
+            .finish()
+    }
+
+    fn fmt_window(
+        formatter: &mut std::fmt::Formatter<'_>,
+        operation: &WindowOperation,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Window")
+            .field("operation", operation)
+            .field("app", &"[redacted]")
+            .field("title", &"[redacted]")
+            .finish()
+    }
+
+    fn fmt_open(formatter: &mut std::fmt::Formatter<'_>, no_focus: &bool) -> std::fmt::Result {
+        formatter
+            .debug_struct("Open")
+            .field("target", &"[redacted]")
+            .field("app", &"[redacted]")
+            .field("no_focus", no_focus)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for Action {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -308,32 +384,16 @@ impl std::fmt::Debug for Action {
                 button,
                 count,
                 allow_coordinate_fallback,
-            } => formatter
-                .debug_struct("Click")
-                .field("button", button)
-                .field("count", count)
-                .field("allow_coordinate_fallback", allow_coordinate_fallback)
-                .finish(),
+            } => Self::fmt_click(formatter, button, count, allow_coordinate_fallback),
             Self::TypeText {
                 clear,
                 press_return,
                 delay_ms,
                 ..
-            } => formatter
-                .debug_struct("TypeText")
-                .field("text", &"[redacted]")
-                .field("clear", clear)
-                .field("press_return", press_return)
-                .field("delay_ms", delay_ms)
-                .finish(),
+            } => Self::fmt_type_text(formatter, clear, press_return, delay_ms),
             Self::Press {
                 count, delay_ms, ..
-            } => formatter
-                .debug_struct("Press")
-                .field("key", &"[redacted]")
-                .field("count", count)
-                .field("delay_ms", delay_ms)
-                .finish(),
+            } => Self::fmt_press(formatter, count, delay_ms),
             Self::Paste { .. } => formatter
                 .debug_struct("Paste")
                 .field("text", &"[redacted]")
@@ -370,23 +430,9 @@ impl std::fmt::Debug for Action {
                 .debug_struct("Screenshot")
                 .field("path", path)
                 .finish(),
-            Self::Application { operation, .. } => formatter
-                .debug_struct("Application")
-                .field("operation", operation)
-                .field("name", &"[redacted]")
-                .finish(),
-            Self::Window { operation, .. } => formatter
-                .debug_struct("Window")
-                .field("operation", operation)
-                .field("app", &"[redacted]")
-                .field("title", &"[redacted]")
-                .finish(),
-            Self::Open { no_focus, .. } => formatter
-                .debug_struct("Open")
-                .field("target", &"[redacted]")
-                .field("app", &"[redacted]")
-                .field("no_focus", no_focus)
-                .finish(),
+            Self::Application { operation, .. } => Self::fmt_application(formatter, operation),
+            Self::Window { operation, .. } => Self::fmt_window(formatter, operation),
+            Self::Open { no_focus, .. } => Self::fmt_open(formatter, no_focus),
             Self::ClipboardWrite { .. } => formatter
                 .debug_struct("ClipboardWrite")
                 .field("text", &"[redacted]")
