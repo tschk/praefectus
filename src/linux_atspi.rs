@@ -1236,19 +1236,11 @@ impl LinuxAtspiBackend {
                 continue;
             }
             let accessible = self.accessible(&application)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0
-                || usize::try_from(child_count).unwrap_or(usize::MAX) > MAX_WINDOWS_PER_APPLICATION
-            {
+            let children = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            if children.len() > MAX_WINDOWS_PER_APPLICATION {
                 return Err(desktop_state_unavailable());
             }
-            for index in 0..child_count {
-                let window = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(index)
-                )?;
+            for window in children {
                 if window.is_null() {
                     continue;
                 }
@@ -1695,22 +1687,14 @@ impl LinuxAtspiBackend {
             let process_id = self.process_id(&application, cancellation, deadline_at_ms)?;
             let generation = process_generation(process_id)?;
             let accessible = self.accessible(&application)?;
-            let child_count =
-                provider_call!(cancellation, deadline_at_ms, accessible.child_count())?;
-            if child_count < 0
-                || usize::try_from(child_count).unwrap_or(usize::MAX) > MAX_WINDOWS_PER_APPLICATION
-            {
+            let children = provider_call!(cancellation, deadline_at_ms, accessible.get_children())?;
+            if children.len() > MAX_WINDOWS_PER_APPLICATION {
                 return Err(ProtocolError::Executor(
                     "accessibility window limit exceeded".to_string(),
                 ));
             }
-            for index in 0..child_count {
+            for window in children {
                 check_observation_boundary(cancellation, deadline_at_ms)?;
-                let window = provider_call!(
-                    cancellation,
-                    deadline_at_ms,
-                    accessible.get_child_at_index(index)
-                )?;
                 if window.is_null() {
                     continue;
                 }
