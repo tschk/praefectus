@@ -8369,7 +8369,29 @@ mod tests {
     }
 
     #[test]
-    fn protocol_debug_output_redacts_actions_and_authority() {
+    fn protocol_debug_output_redacts_authority() {
+        let authority = SignedAuthority {
+            grant: AuthorityGrant {
+                protocol_version: PROTOCOL_VERSION,
+                issuer: "secret-issuer".to_string(),
+                key_id: "secret-key".to_string(),
+                operation_id: "operation".to_string(),
+                subject: "secret-subject".to_string(),
+                session_id: "secret-session".to_string(),
+                risk: SafetyClass::Reversible,
+                expires_at_ms: 2,
+                policy_generation: "secret-policy".to_string(),
+                action_hash: "a".repeat(64),
+            },
+            signature: "secret-signature".to_string(),
+        };
+        let output = format!("{authority:?}");
+        assert!(output.contains("[redacted]"));
+        assert!(!output.contains("secret-"));
+    }
+
+    #[test]
+    fn protocol_debug_output_redacts_request() {
         let authority = SignedAuthority {
             grant: AuthorityGrant {
                 protocol_version: PROTOCOL_VERSION,
@@ -8408,37 +8430,31 @@ mod tests {
             },
             safety: SafetyClass::Reversible,
         };
-        let outputs = [
-            format!("{authority:?}"),
-            format!("{request:?}"),
-            format!(
-                "{:?}",
-                Action::Paste {
-                    text: "secret-paste".to_string(),
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::SetValue {
-                    value: "secret-value".to_string(),
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::Press {
-                    key: "secret-keypress".to_string(),
-                    count: 1,
-                    delay_ms: None,
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::Hotkey {
-                    keys: vec!["secret-hotkey".to_string()],
-                }
-            ),
+        let output = format!("{request:?}");
+        assert!(output.contains("[redacted]"));
+        assert!(!output.contains("secret-"));
+    }
+
+    #[test]
+    fn protocol_debug_output_redacts_actions() {
+        let actions = [
+            Action::Paste {
+                text: "secret-paste".to_string(),
+            },
+            Action::SetValue {
+                value: "secret-value".to_string(),
+            },
+            Action::Press {
+                key: "secret-keypress".to_string(),
+                count: 1,
+                delay_ms: None,
+            },
+            Action::Hotkey {
+                keys: vec!["secret-hotkey".to_string()],
+            },
         ];
-        for output in outputs {
+        for action in actions {
+            let output = format!("{:?}", action);
             assert!(output.contains("[redacted]"));
             assert!(!output.contains("secret-"));
         }
