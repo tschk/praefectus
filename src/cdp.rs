@@ -2923,7 +2923,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
-    fn capabilities_never_advertise_click_and_follow_live_ownership() {
+    fn capabilities_are_empty_before_observation() {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
         let port = listener.local_addr().expect("local address").port();
         let process_id = std::process::id();
@@ -2933,13 +2933,28 @@ mod tests {
             CdpConfig::localhost(port, "page-1", process_id, process_generation).expect("config");
         let mut channel = button_channel();
         channel.endpoint = config.endpoint();
-        let mut executor = CdpExecutor::new(config, channel).expect("executor");
+        let executor = CdpExecutor::new(config, channel).expect("executor");
         let capabilities = executor.capabilities().expect("capabilities");
         assert_eq!(capabilities.permissions.get("cdp"), Some(&false));
         assert_eq!(capabilities.permissions.get("root_frame_only"), Some(&true));
         assert!(capabilities.supported_actions.is_empty());
         assert!(capabilities.action_capabilities.is_empty());
         assert_eq!(capabilities.display_geometry_hash, "0".repeat(64));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn capabilities_never_advertise_click_after_observation() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let port = listener.local_addr().expect("local address").port();
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config =
+            CdpConfig::localhost(port, "page-1", process_id, process_generation).expect("config");
+        let mut channel = button_channel();
+        channel.endpoint = config.endpoint();
+        let executor = CdpExecutor::new(config, channel).expect("executor");
 
         let observation = executor
             .semantic_observation(&CancellationToken::default(), i64::MAX)
@@ -2980,6 +2995,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn capabilities_are_empty_when_observation_expires() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let port = listener.local_addr().expect("local address").port();
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config =
+            CdpConfig::localhost(port, "page-1", process_id, process_generation).expect("config");
+        let mut channel = button_channel();
+        channel.endpoint = config.endpoint();
+        let executor = CdpExecutor::new(config, channel).expect("executor");
+
+        executor
+            .semantic_observation(&CancellationToken::default(), i64::MAX)
+            .expect("observation");
 
         let expires_at_ms = {
             let mut latest = executor.latest.write().expect("observation");
@@ -2999,12 +3033,50 @@ mod tests {
             .expect("observation")
             .observation
             .expires_at_ms = expires_at_ms;
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn capabilities_are_empty_without_live_ownership() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let port = listener.local_addr().expect("local address").port();
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config =
+            CdpConfig::localhost(port, "page-1", process_id, process_generation).expect("config");
+        let mut channel = button_channel();
+        channel.endpoint = config.endpoint();
+        let executor = CdpExecutor::new(config, channel).expect("executor");
+
+        executor
+            .semantic_observation(&CancellationToken::default(), i64::MAX)
+            .expect("observation");
 
         drop(listener);
         let capabilities = executor.capabilities().expect("capabilities");
         assert_eq!(capabilities.permissions.get("cdp"), Some(&false));
         assert!(capabilities.supported_actions.is_empty());
         assert_eq!(capabilities.display_geometry_hash, "0".repeat(64));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn capabilities_are_empty_with_stale_process_generation() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let port = listener.local_addr().expect("local address").port();
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config =
+            CdpConfig::localhost(port, "page-1", process_id, process_generation).expect("config");
+        let mut channel = button_channel();
+        channel.endpoint = config.endpoint();
+        let mut executor = CdpExecutor::new(config, channel).expect("executor");
+
+        executor
+            .semantic_observation(&CancellationToken::default(), i64::MAX)
+            .expect("observation");
 
         executor.config.process_generation.push_str("-stale");
         let capabilities = executor.capabilities().expect("capabilities");
