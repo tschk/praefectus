@@ -8,37 +8,37 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use fs2::FileExt;
+use windows::core::{w, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL, LocalFree, WIN32_ERROR,
+    CloseHandle, LocalFree, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL, WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GetSecurityInfo, SE_FILE_OBJECT, SET_ACCESS,
-    SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    ConvertStringSidToSidW, GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo, EXPLICIT_ACCESS_W,
+    SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
-    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
-    GetSecurityDescriptorControl, GetSecurityDescriptorLength, GetTokenInformation,
-    INHERIT_ONLY_ACE, IsValidAcl, IsValidSecurityDescriptor, IsValidSid, IsWellKnownSid,
-    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorLength, GetTokenInformation, IsValidAcl, IsValidSecurityDescriptor,
+    IsValidSid, IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    ACCESS_ALLOWED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE,
+    DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
-    FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, FileRenameInfoEx,
-    GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, ReOpenFile,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    CreateFileW, FileRenameInfoEx, GetFileInformationByHandle, ReOpenFile,
+    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ADD_FILE,
+    FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_EXISTING,
+    READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
 };
-use windows::core::{PWSTR, w};
 
 struct OwnedHandle(HANDLE);
 
@@ -882,8 +882,11 @@ mod tests {
         assert!(ancestor_access_can_replace(GENERIC_WRITE.0, false, true));
     }
 
-    #[test]
-    fn synthetic_ancestor_acl_rejects_untrusted_modification() {
+    fn check_synthetic_ancestor_acl(
+        mask: u32,
+        ace_type: Option<u8>,
+        final_target: bool,
+    ) -> io::Result<()> {
         let user = CurrentUser::load().expect("current user");
         let mut sid = PSID::default();
         unsafe {
@@ -902,109 +905,63 @@ mod tests {
             windows::Win32::Security::AddAccessAllowedAce(
                 acl,
                 windows::Win32::Security::ACL_REVISION,
-                FILE_DELETE_CHILD.0,
+                mask,
                 sid,
             )
             .expect("add ace");
+            if let Some(ace_type) = ace_type {
+                let mut raw_ace = ptr::null_mut();
+                GetAce(acl, 0, &mut raw_ace).expect("get synthetic ace");
+                (*raw_ace.cast::<ACE_HEADER>()).AceType = ace_type;
+            }
         }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                false,
-            )
-            .expect_err("reject untrusted replacement grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        let mut raw_ace = ptr::null_mut();
-        unsafe {
-            GetAce(acl, 0, &mut raw_ace).expect("get synthetic ace");
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_WRITE_DATA.0;
-        }
-        validate_ancestor_acl(
+        let result = validate_ancestor_acl(
             acl,
             storage.as_ptr().cast(),
             storage.len() * std::mem::size_of::<usize>(),
             &user,
             false,
-            false,
-        )
-        .expect("allow untrusted create-only grant on trusted ancestor");
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final write grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_APPEND_DATA.0;
-        }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final append grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = GENERIC_WRITE.0;
-        }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final generic write grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = READ_CONTROL.0;
-        }
-        validate_ancestor_acl(
-            acl,
-            storage.as_ptr().cast(),
-            storage.len() * std::mem::size_of::<usize>(),
-            &user,
-            false,
-            true,
-        )
-        .expect("allow untrusted read-only ace");
-        unsafe { (*raw_ace.cast::<ACE_HEADER>()).AceType = u8::MAX };
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject unknown ace")
-            .kind(),
-            io::ErrorKind::PermissionDenied
+            final_target,
         );
         drop(allocation);
+        result
+    }
+
+    #[test]
+    fn synthetic_ancestor_acl_rejects_untrusted_modification() {
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_DELETE_CHILD.0, None, false)
+                .expect_err("reject untrusted replacement grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        check_synthetic_ancestor_acl(FILE_WRITE_DATA.0, None, false)
+            .expect("allow untrusted create-only grant on trusted ancestor");
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_WRITE_DATA.0, None, true)
+                .expect_err("reject untrusted final write grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_APPEND_DATA.0, None, true)
+                .expect_err("reject untrusted final append grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            check_synthetic_ancestor_acl(GENERIC_WRITE.0, None, true)
+                .expect_err("reject untrusted final generic write grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        check_synthetic_ancestor_acl(READ_CONTROL.0, None, true)
+            .expect("allow untrusted read-only ace");
+        assert_eq!(
+            check_synthetic_ancestor_acl(READ_CONTROL.0, Some(u8::MAX), true)
+                .expect_err("reject unknown ace")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
