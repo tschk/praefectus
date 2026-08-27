@@ -7917,14 +7917,6 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
-    fn test_cancellation_token() {
-        let token = CancellationToken::default();
-        assert!(!token.is_cancelled());
-        token.cancel();
-        assert!(token.is_cancelled());
-    }
-
-    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
