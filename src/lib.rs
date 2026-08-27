@@ -768,6 +768,98 @@ impl std::error::Error for NativeError {}
 
 struct NativeRuntime;
 
+#[cfg(target_os = "macos")]
+fn macos_native_paste(text: &str) -> Result<(), NativeError> {
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    use std::process::Command;
+    let status = Command::new("/usr/bin/pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            child.wait()
+        })
+        .map_err(|_| NativeError)?;
+    if !status.success() {
+        return Err(NativeError);
+    }
+    let _ = mac_post_key(0x09, MAC_FLAG_COMMAND);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_native_paste(text: &str) -> Result<(), NativeError> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::*;
+    use windows::Win32::System::Memory::*;
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let byte_size = wide.len() * std::mem::size_of::<u16>();
+
+    unsafe { OpenClipboard(None) }.map_err(|_| NativeError)?;
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+    let _guard = ClipboardGuard;
+    unsafe { EmptyClipboard() }.map_err(|_| NativeError)?;
+
+    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_size) }.map_err(|_| NativeError)?;
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return Err(NativeError);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
+        let _ = GlobalUnlock(hglobal);
+    }
+    if unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hglobal.0))) }.is_err() {
+        unsafe {
+            let _ = GlobalFree(Some(hglobal));
+        }
+        return Err(NativeError);
+    }
+    drop(_guard);
+
+    let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+    let ctrl_v = [
+        make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
+        make_keybd(VIRTUAL_KEY(0x56), KEYBD_EVENT_FLAGS::default()),
+        make_keybd(VIRTUAL_KEY(0x56), KEYEVENTF_KEYUP),
+        make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let _ = unsafe { SendInput(&ctrl_v, std::mem::size_of::<INPUT>() as i32) };
+    Ok(())
+}
+
 #[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -1329,96 +1421,11 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::Foundation::{GlobalFree, HANDLE};
-            use windows::Win32::System::DataExchange::*;
-            use windows::Win32::System::Memory::*;
-            use windows::Win32::System::Ole::CF_UNICODETEXT;
-            use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-            let wide: Vec<u16> = _text.encode_utf16().chain(std::iter::once(0)).collect();
-            let byte_size = wide.len() * std::mem::size_of::<u16>();
-
-            unsafe { OpenClipboard(None) }.map_err(|_| NativeError)?;
-            struct ClipboardGuard;
-            impl Drop for ClipboardGuard {
-                fn drop(&mut self) {
-                    unsafe {
-                        let _ = CloseClipboard();
-                    }
-                }
-            }
-            let _guard = ClipboardGuard;
-            unsafe { EmptyClipboard() }.map_err(|_| NativeError)?;
-
-            let hglobal =
-                unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_size) }.map_err(|_| NativeError)?;
-            let ptr = unsafe { GlobalLock(hglobal) };
-            if ptr.is_null() {
-                return Err(NativeError);
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
-                let _ = GlobalUnlock(hglobal);
-            }
-            if unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hglobal.0))) }
-                .is_err()
-            {
-                unsafe {
-                    let _ = GlobalFree(Some(hglobal));
-                }
-                return Err(NativeError);
-            }
-            drop(_guard);
-
-            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            };
-            let ctrl_v = [
-                make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
-                make_keybd(VIRTUAL_KEY(0x56), KEYBD_EVENT_FLAGS::default()),
-                make_keybd(VIRTUAL_KEY(0x56), KEYEVENTF_KEYUP),
-                make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
-            ];
-            let _ = unsafe { SendInput(&ctrl_v, std::mem::size_of::<INPUT>() as i32) };
-            return Ok(());
+            return windows_native_paste(_text);
         }
         #[cfg(target_os = "macos")]
         {
-            if !native_permissions()
-                .get("accessibility")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(NativeError);
-            }
-            use std::process::Command;
-            let status = Command::new("/usr/bin/pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    use std::io::Write;
-                    if let Some(ref mut stdin) = child.stdin {
-                        let _ = stdin.write_all(_text.as_bytes());
-                    }
-                    child.wait()
-                })
-                .map_err(|_| NativeError)?;
-            if !status.success() {
-                return Err(NativeError);
-            }
-            let _ = mac_post_key(0x09, MAC_FLAG_COMMAND);
-            Ok(())
+            return macos_native_paste(_text);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
