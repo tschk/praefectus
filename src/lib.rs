@@ -6583,41 +6583,16 @@ impl OperationLedger {
             return Ok(None);
         };
         let finished_at_ms = now_ms();
-        let delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
-        let session_isolation = session_isolation.unwrap_or(SessionIsolation::Unknown);
-        let interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
-        let acknowledgement = ActionAck {
-            protocol_version: PROTOCOL_VERSION,
-            operation_id: operation_id.to_string(),
-            sequence: 2,
-            action_hash: action_hash.clone(),
-            replayed: false,
-            state: AckState::Terminal {
-                terminal: Box::new(Terminal::OutcomeUnknown {
-                    receipt: Receipt {
-                        protocol_version: PROTOCOL_VERSION,
-                        action_name: action_name.unwrap_or_else(|| "unknown".to_string()),
-                        action_hash,
-                        started_at_ms: claimed_at_ms,
-                        finished_at_ms,
-                        backend: "unknown".to_string(),
-                        fallback_chain: Vec::new(),
-                        delivery_route,
-                        session_isolation,
-                        interaction_mode,
-                        context_preservation: recovered_context_preservation(
-                            interaction_mode,
-                            session_isolation,
-                        ),
-                        effect: Effect::Unknown,
-                        before: None,
-                        after: None,
-                        warnings: Vec::new(),
-                    },
-                    message: interrupted_outcome_message(),
-                }),
-            },
-        };
+        let acknowledgement = generate_interrupted_ack(
+            operation_id,
+            action_hash,
+            claimed_at_ms,
+            finished_at_ms,
+            action_name,
+            delivery_route,
+            session_isolation,
+            interaction_mode,
+        );
         self.finish(&acknowledgement)?;
         Ok(Some(acknowledgement))
     }
@@ -6779,6 +6754,54 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
         file.sync_all()?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_interrupted_ack(
+    operation_id: &str,
+    action_hash: String,
+    claimed_at_ms: i64,
+    finished_at_ms: i64,
+    action_name: Option<String>,
+    delivery_route: Option<DeliveryRoute>,
+    session_isolation: Option<SessionIsolation>,
+    interaction_mode: Option<InteractionMode>,
+) -> ActionAck {
+    let delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
+    let session_isolation = session_isolation.unwrap_or(SessionIsolation::Unknown);
+    let interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
+    ActionAck {
+        protocol_version: PROTOCOL_VERSION,
+        operation_id: operation_id.to_string(),
+        sequence: 2,
+        action_hash: action_hash.clone(),
+        replayed: false,
+        state: AckState::Terminal {
+            terminal: Box::new(Terminal::OutcomeUnknown {
+                receipt: Receipt {
+                    protocol_version: PROTOCOL_VERSION,
+                    action_name: action_name.unwrap_or_else(|| "unknown".to_string()),
+                    action_hash,
+                    started_at_ms: claimed_at_ms,
+                    finished_at_ms,
+                    backend: "unknown".to_string(),
+                    fallback_chain: Vec::new(),
+                    delivery_route,
+                    session_isolation,
+                    interaction_mode,
+                    context_preservation: recovered_context_preservation(
+                        interaction_mode,
+                        session_isolation,
+                    ),
+                    effect: Effect::Unknown,
+                    before: None,
+                    after: None,
+                    warnings: Vec::new(),
+                },
+                message: interrupted_outcome_message(),
+            }),
+        },
+    }
 }
 
 fn persistence_unknown_ack(mut acknowledgement: ActionAck) -> ActionAck {
