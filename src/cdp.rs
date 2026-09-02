@@ -1784,14 +1784,12 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
 }
 
 #[cfg(windows)]
-fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+fn get_extended_tcp_table() -> Result<Vec<u8>, CdpError> {
     const AF_INET: u32 = 2;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     const MAX_TABLE_BYTES: usize = 16 * 1024 * 1024;
     const NO_ERROR: u32 = 0;
-    const TCP_LISTEN: u32 = 2;
     const TCP_TABLE_OWNER_PID_LISTENER: i32 = 3;
-    const TCP_ROW_BYTES: usize = 24;
 
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
@@ -1842,6 +1840,16 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
     if written > table.len() || written < 4 {
         return Err(CdpError::Protocol);
     }
+    table.truncate(written);
+    Ok(table)
+}
+
+#[cfg(windows)]
+fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+    const TCP_LISTEN: u32 = 2;
+    const TCP_ROW_BYTES: usize = 24;
+
+    let table = get_extended_tcp_table()?;
     let row_count =
         u32::from_ne_bytes(table[..4].try_into().map_err(|_| CdpError::Protocol)?) as usize;
     if 4usize
@@ -1850,7 +1858,7 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
                 .checked_mul(TCP_ROW_BYTES)
                 .ok_or(CdpError::Protocol)?,
         )
-        .is_none_or(|required| required > written)
+        .is_none_or(|required| required > table.len())
     {
         return Err(CdpError::Protocol);
     }
