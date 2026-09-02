@@ -128,6 +128,17 @@ pub enum DeliveryRoute {
     Unknown,
 }
 
+impl DeliveryRoute {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliveryRoute::TargetAddressed => "targetAddressed",
+            DeliveryRoute::Pointer => "pointer",
+            DeliveryRoute::PerProcessEvent => "perProcessEvent",
+            DeliveryRoute::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundSupport {
@@ -6804,7 +6815,7 @@ impl Drop for LedgerLock {
     }
 }
 
-fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+fn validate_request_versions(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
@@ -6815,6 +6826,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "unsupported protocol version".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -6829,6 +6844,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
+    Ok(())
+}
+
+fn validate_request_action_and_target(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -6877,6 +6896,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "action requires a fenced semantic element target".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request_verification(request: &ActionRequest) -> Result<(), ProtocolError> {
     validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
@@ -6933,6 +6956,14 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid snapshot ID".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+    validate_request_versions(request)?;
+    validate_request_identifiers(request)?;
+    validate_request_action_and_target(request)?;
+    validate_request_verification(request)?;
     Ok(())
 }
 
@@ -8060,6 +8091,15 @@ mod tests {
             }),
             DeliveryRoute::Pointer
         );
+    }
+
+    #[test]
+    fn test_delivery_route_as_str() {
+        use super::DeliveryRoute;
+        assert_eq!(DeliveryRoute::TargetAddressed.as_str(), "targetAddressed");
+        assert_eq!(DeliveryRoute::Pointer.as_str(), "pointer");
+        assert_eq!(DeliveryRoute::PerProcessEvent.as_str(), "perProcessEvent");
+        assert_eq!(DeliveryRoute::Unknown.as_str(), "unknown");
     }
 
     #[cfg(target_os = "macos")]
