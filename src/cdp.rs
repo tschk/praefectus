@@ -2758,6 +2758,44 @@ mod tests {
         }
     }
 
+    fn interactive_request(
+        operation_id: &str,
+        action: Action,
+        target: TargetRef,
+        verification: VerificationPolicy,
+    ) -> ActionRequest {
+        ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            action_version: PROTOCOL_VERSION,
+            target_version: PROTOCOL_VERSION,
+            verification_version: PROTOCOL_VERSION,
+            operation_id: operation_id.to_string(),
+            subject: "subject".to_string(),
+            session_id: "session".to_string(),
+            authority: SignedAuthority {
+                grant: AuthorityGrant {
+                    protocol_version: PROTOCOL_VERSION,
+                    issuer: "host".to_string(),
+                    key_id: "key".to_string(),
+                    operation_id: operation_id.to_string(),
+                    subject: "subject".to_string(),
+                    session_id: "session".to_string(),
+                    risk: SafetyClass::Reversible,
+                    expires_at_ms: i64::MAX,
+                    policy_generation: "generation".to_string(),
+                    action_hash: "0".repeat(64),
+                },
+                signature: "0".repeat(128),
+            },
+            action,
+            target,
+            interaction_mode: crate::InteractionMode::Interactive,
+            deadline_at_ms: i64::MAX,
+            verification,
+            safety: SafetyClass::Reversible,
+        }
+    }
+
     #[test]
     fn only_exact_local_channel_is_accepted() {
         let process_id = std::process::id();
@@ -3795,38 +3833,14 @@ mod tests {
             )),
         ]);
         drop(channel);
-        let request = ActionRequest {
-            protocol_version: PROTOCOL_VERSION,
-            action_version: PROTOCOL_VERSION,
-            target_version: PROTOCOL_VERSION,
-            verification_version: PROTOCOL_VERSION,
-            operation_id: "cdp-set-value".to_string(),
-            subject: "subject".to_string(),
-            session_id: "session".to_string(),
-            authority: SignedAuthority {
-                grant: AuthorityGrant {
-                    protocol_version: PROTOCOL_VERSION,
-                    issuer: "host".to_string(),
-                    key_id: "key".to_string(),
-                    operation_id: "cdp-set-value".to_string(),
-                    subject: "subject".to_string(),
-                    session_id: "session".to_string(),
-                    risk: SafetyClass::Reversible,
-                    expires_at_ms: i64::MAX,
-                    policy_generation: "generation".to_string(),
-                    action_hash: "0".repeat(64),
-                },
-                signature: "0".repeat(128),
-            },
-            action: Action::SetValue {
+        let request = interactive_request(
+            "cdp-set-value",
+            Action::SetValue {
                 value: value.to_string(),
             },
-            target: TargetRef::Element { target },
-            interaction_mode: crate::InteractionMode::Interactive,
-            deadline_at_ms: i64::MAX,
-            verification: VerificationPolicy::TargetValueHash { sha256: value_hash },
-            safety: SafetyClass::Reversible,
-        };
+            TargetRef::Element { target },
+            VerificationPolicy::TargetValueHash { sha256: value_hash },
+        );
         let directory = tempfile::tempdir().expect("temporary directory");
         crate::restrict_directory(directory.path()).expect("restrict temporary directory");
         let report = Engine::new(
