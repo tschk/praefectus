@@ -882,8 +882,11 @@ mod tests {
         assert!(ancestor_access_can_replace(GENERIC_WRITE.0, false, true));
     }
 
-    #[test]
-    fn synthetic_ancestor_acl_rejects_untrusted_modification() {
+    fn check_synthetic_ancestor_acl(
+        mask: u32,
+        ace_type: Option<u8>,
+        final_target: bool,
+    ) -> io::Result<()> {
         let user = CurrentUser::load().expect("current user");
         let mut sid = PSID::default();
         unsafe {
@@ -902,109 +905,63 @@ mod tests {
             windows::Win32::Security::AddAccessAllowedAce(
                 acl,
                 windows::Win32::Security::ACL_REVISION,
-                FILE_DELETE_CHILD.0,
+                mask,
                 sid,
             )
             .expect("add ace");
+            if let Some(ace_type) = ace_type {
+                let mut raw_ace = ptr::null_mut();
+                GetAce(acl, 0, &mut raw_ace).expect("get synthetic ace");
+                (*raw_ace.cast::<ACE_HEADER>()).AceType = ace_type;
+            }
         }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                false,
-            )
-            .expect_err("reject untrusted replacement grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        let mut raw_ace = ptr::null_mut();
-        unsafe {
-            GetAce(acl, 0, &mut raw_ace).expect("get synthetic ace");
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_WRITE_DATA.0;
-        }
-        validate_ancestor_acl(
+        let result = validate_ancestor_acl(
             acl,
             storage.as_ptr().cast(),
             storage.len() * std::mem::size_of::<usize>(),
             &user,
             false,
-            false,
-        )
-        .expect("allow untrusted create-only grant on trusted ancestor");
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final write grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = FILE_APPEND_DATA.0;
-        }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final append grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = GENERIC_WRITE.0;
-        }
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject untrusted final generic write grant")
-            .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        unsafe {
-            (*raw_ace.cast::<ACCESS_ALLOWED_ACE>()).Mask = READ_CONTROL.0;
-        }
-        validate_ancestor_acl(
-            acl,
-            storage.as_ptr().cast(),
-            storage.len() * std::mem::size_of::<usize>(),
-            &user,
-            false,
-            true,
-        )
-        .expect("allow untrusted read-only ace");
-        unsafe { (*raw_ace.cast::<ACE_HEADER>()).AceType = u8::MAX };
-        assert_eq!(
-            validate_ancestor_acl(
-                acl,
-                storage.as_ptr().cast(),
-                storage.len() * std::mem::size_of::<usize>(),
-                &user,
-                false,
-                true,
-            )
-            .expect_err("reject unknown ace")
-            .kind(),
-            io::ErrorKind::PermissionDenied
+            final_target,
         );
         drop(allocation);
+        result
+    }
+
+    #[test]
+    fn synthetic_ancestor_acl_rejects_untrusted_modification() {
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_DELETE_CHILD.0, None, false)
+                .expect_err("reject untrusted replacement grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        check_synthetic_ancestor_acl(FILE_WRITE_DATA.0, None, false)
+            .expect("allow untrusted create-only grant on trusted ancestor");
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_WRITE_DATA.0, None, true)
+                .expect_err("reject untrusted final write grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            check_synthetic_ancestor_acl(FILE_APPEND_DATA.0, None, true)
+                .expect_err("reject untrusted final append grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            check_synthetic_ancestor_acl(GENERIC_WRITE.0, None, true)
+                .expect_err("reject untrusted final generic write grant")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        check_synthetic_ancestor_acl(READ_CONTROL.0, None, true)
+            .expect("allow untrusted read-only ace");
+        assert_eq!(
+            check_synthetic_ancestor_acl(READ_CONTROL.0, Some(u8::MAX), true)
+                .expect_err("reject unknown ace")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
