@@ -29,6 +29,8 @@ pub mod semantic;
 #[cfg(target_os = "windows")]
 mod windows_acl;
 #[cfg(target_os = "windows")]
+mod windows_capture;
+#[cfg(target_os = "windows")]
 mod windows_uia;
 
 pub const PROTOCOL_VERSION: u16 = 2;
@@ -815,6 +817,65 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
+fn win_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    if _keys.len() < 2 {
+        return Err(NativeError);
+    }
+    let action_key = _keys.last().ok_or(NativeError)?;
+    let modifiers = &_keys[.._keys.len() - 1];
+
+    let action_vk = win_key_code(action_key).ok_or(NativeError)?;
+    let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
+        .iter()
+        .map(|m| match *m {
+            "ctrl" => Ok(VK_CONTROL),
+            "alt" => Ok(VK_MENU),
+            "shift" => Ok(VK_SHIFT),
+            "win" => Ok(VK_LWIN),
+            _ => Err(NativeError),
+        })
+        .collect::<Result<_, _>>()?;
+
+    let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+
+    for vk in &modifier_vks {
+        let _ = unsafe {
+            SendInput(
+                &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+    }
+    let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
+    let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
+    let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+    for vk in modifier_vks.iter().rev() {
+        let _ = unsafe {
+            SendInput(
+                &[make_keybd(*vk, KEYEVENTF_KEYUP)],
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn windows_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
@@ -1082,6 +1143,39 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
         }
         InputDelivery::Refused => Err(NativeError),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    let code = _keys
+        .last()
+        .and_then(|k| {
+            mac_key_name_code(k).or_else(|| {
+                k.chars()
+                    .next()
+                    .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+            })
+        })
+        .ok_or(NativeError)?;
+    let mut flags: u64 = 0;
+    for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
+        match mod_key {
+            "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
+            "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
+            "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
+            "shift" => flags |= MAC_FLAG_SHIFT,
+            _ => return Err(NativeError),
+        }
+    }
+    let _ = mac_post_key(code, flags);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1546,93 +1640,11 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-            if _keys.len() < 2 {
-                return Err(NativeError);
-            }
-            let action_key = _keys.last().ok_or(NativeError)?;
-            let modifiers = &_keys[.._keys.len() - 1];
-
-            let action_vk = win_key_code(action_key).ok_or(NativeError)?;
-            let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
-                .iter()
-                .map(|m| match *m {
-                    "ctrl" => Ok(VK_CONTROL),
-                    "alt" => Ok(VK_MENU),
-                    "shift" => Ok(VK_SHIFT),
-                    "win" => Ok(VK_LWIN),
-                    _ => Err(NativeError),
-                })
-                .collect::<Result<_, _>>()?;
-
-            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            };
-
-            for vk in &modifier_vks {
-                let _ = unsafe {
-                    SendInput(
-                        &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
-                        std::mem::size_of::<INPUT>() as i32,
-                    )
-                };
-            }
-            let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
-            let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
-            let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-            for vk in modifier_vks.iter().rev() {
-                let _ = unsafe {
-                    SendInput(
-                        &[make_keybd(*vk, KEYEVENTF_KEYUP)],
-                        std::mem::size_of::<INPUT>() as i32,
-                    )
-                };
-            }
-            return Ok(());
+            return win_hotkey(_keys);
         }
         #[cfg(target_os = "macos")]
         {
-            if !native_permissions()
-                .get("accessibility")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(NativeError);
-            }
-            let code = _keys
-                .last()
-                .and_then(|k| {
-                    mac_key_name_code(k).or_else(|| {
-                        k.chars()
-                            .next()
-                            .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
-                    })
-                })
-                .ok_or(NativeError)?;
-            let mut flags: u64 = 0;
-            for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
-                match mod_key {
-                    "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
-                    "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
-                    "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
-                    "shift" => flags |= MAC_FLAG_SHIFT,
-                    _ => return Err(NativeError),
-                }
-            }
-            let _ = mac_post_key(code, flags);
-            Ok(())
+            return mac_hotkey(_keys);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
@@ -1779,85 +1791,7 @@ fn native_screen_content_hash() -> Result<String, NativeError> {
     }
     #[cfg(windows)]
     {
-        use windows::Win32::Graphics::Gdi::*;
-        use windows::Win32::UI::WindowsAndMessaging::*;
-
-        let cx = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-        let cy = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-        let ox = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-        let oy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-        if cx <= 0 || cy <= 0 {
-            return Err(NativeError);
-        }
-        let screen_dc = unsafe { GetDC(None) };
-        if screen_dc.0.is_null() {
-            return Err(NativeError);
-        }
-        let mem_dc = unsafe { CreateCompatibleDC(Some(screen_dc)) };
-        if mem_dc.0.is_null() {
-            unsafe {
-                let _ = ReleaseDC(None, screen_dc);
-            }
-            return Err(NativeError);
-        }
-        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, cx, cy) };
-        if bitmap.0.is_null() {
-            unsafe {
-                let _ = DeleteDC(mem_dc);
-                let _ = ReleaseDC(None, screen_dc);
-            }
-            return Err(NativeError);
-        }
-        let old_bmp = unsafe { SelectObject(mem_dc, bitmap.into()) };
-        let blt_ok =
-            unsafe { BitBlt(mem_dc, 0, 0, cx, cy, Some(screen_dc), ox, oy, SRCCOPY) }.is_ok();
-        unsafe {
-            let _ = SelectObject(mem_dc, old_bmp);
-        }
-        if !blt_ok {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(bitmap.0));
-                let _ = DeleteDC(mem_dc);
-                let _ = ReleaseDC(None, screen_dc);
-            }
-            return Err(NativeError);
-        }
-        let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
-        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = cx;
-        bmi.bmiHeader.biHeight = -cy;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = 0;
-        let buf_len = (cx as usize) * (cy as usize) * 4;
-        let mut pixels = vec![0u8; buf_len];
-        let n = unsafe {
-            GetDIBits(
-                mem_dc,
-                bitmap,
-                0,
-                cy as u32,
-                Some(pixels.as_mut_ptr().cast()),
-                &mut bmi,
-                DIB_RGB_COLORS,
-            )
-        };
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(None, screen_dc);
-        }
-        if n <= 0 {
-            return Err(NativeError);
-        }
-        let used = (n as usize) * (cx as usize) * 4;
-        let mut hasher = Sha256::new();
-        hasher.update((ox as i64).to_be_bytes());
-        hasher.update((oy as i64).to_be_bytes());
-        hasher.update((cx as i64).to_be_bytes());
-        hasher.update((cy as i64).to_be_bytes());
-        hasher.update(&pixels[..used]);
-        return Ok(hex::encode(hasher.finalize()));
+        return windows_capture::native_screen_content_hash();
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     Err(NativeError)
@@ -2013,95 +1947,105 @@ fn native_drag(
     }
 }
 
+#[cfg(windows)]
+fn native_click_windows(point: &NativePoint, button: &str) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+
+    if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
+        return Err(NativeError);
+    }
+    let (down_flags, up_flags) = match button {
+        "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        _ => return Err(NativeError),
+    };
+    let down = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: down_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: up_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    if unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) } != 2 {
+        return Err(NativeError);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn native_click_macos(point: &NativePoint, button: &str) -> Result<(), NativeError> {
+    use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    let (down, up, mouse_button) = match button {
+        "left" => (
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+            CGMouseButton::Left,
+        ),
+        "right" => (
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+            CGMouseButton::Right,
+        ),
+        "middle" => (
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGMouseButton::Center,
+        ),
+        _ => return Err(NativeError),
+    };
+    let position = CGPoint::new(point.x as f64, point.y as f64);
+    let down_source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
+    let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
+        .map_err(|_| NativeError)?;
+    let up_source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState).map_err(|_| NativeError)?;
+    let up_event =
+        CGEvent::new_mouse_event(up_source, up, position, mouse_button).map_err(|_| NativeError)?;
+    mac_post_event(&down_event)?;
+    mac_post_event(&up_event)?;
+    Ok(())
+}
+
 fn native_click(point: &NativePoint, button: &str) -> Result<(), NativeError> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-        use core_graphics::geometry::CGPoint;
-
-        if !native_permissions()
-            .get("accessibility")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(NativeError);
-        }
-        let (down, up, mouse_button) = match button {
-            "left" => (
-                CGEventType::LeftMouseDown,
-                CGEventType::LeftMouseUp,
-                CGMouseButton::Left,
-            ),
-            "right" => (
-                CGEventType::RightMouseDown,
-                CGEventType::RightMouseUp,
-                CGMouseButton::Right,
-            ),
-            "middle" => (
-                CGEventType::OtherMouseDown,
-                CGEventType::OtherMouseUp,
-                CGMouseButton::Center,
-            ),
-            _ => return Err(NativeError),
-        };
-        let position = CGPoint::new(point.x as f64, point.y as f64);
-        let down_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-            .map_err(|_| NativeError)?;
-        let down_event = CGEvent::new_mouse_event(down_source, down, position, mouse_button)
-            .map_err(|_| NativeError)?;
-        let up_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-            .map_err(|_| NativeError)?;
-        let up_event = CGEvent::new_mouse_event(up_source, up, position, mouse_button)
-            .map_err(|_| NativeError)?;
-        mac_post_event(&down_event)?;
-        mac_post_event(&up_event)?;
-        Ok(())
+        return native_click_macos(point, button);
     }
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-
-        if unsafe { SetCursorPos(point.x as i32, point.y as i32) }.is_err() {
-            return Err(NativeError);
-        }
-        let (down_flags, up_flags) = match button {
-            "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-            _ => return Err(NativeError),
-        };
-        let down = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: down_flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: up_flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        if unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) } != 2 {
-            return Err(NativeError);
-        }
-        return Ok(());
+        return native_click_windows(point, button);
     }
     #[cfg(target_os = "linux")]
     {
@@ -4761,6 +4705,153 @@ impl Default for NativeExecutor {
 }
 
 impl NativeExecutor {
+    #[cfg(target_os = "linux")]
+    fn linux_capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        let mut backend = self
+            .linux_atspi
+            .lock()
+            .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
+        if backend.is_none() {
+            *backend = linux_atspi::LinuxAtspiBackend::connect().ok();
+        }
+        let display_geometry_hash = backend
+            .as_ref()
+            .and_then(|backend| backend.display_geometry_hash().ok());
+        let permissions = backend
+            .as_ref()
+            .map(|backend| {
+                backend.permissions(display_geometry_hash.is_some(), private_storage_available())
+            })
+            .unwrap_or_else(|| {
+                BTreeMap::from([
+                    ("accessibility".to_string(), false),
+                    ("atspi2".to_string(), false),
+                    ("coordinate_capture".to_string(), false),
+                    ("display_geometry".to_string(), false),
+                    ("private_state".to_string(), false),
+                    ("screen_recording".to_string(), false),
+                ])
+            });
+        let has_accessibility = permissions.get("accessibility").copied().unwrap_or(false);
+        let has_display_geometry = permissions
+            .get("display_geometry")
+            .copied()
+            .unwrap_or(false);
+        let has_private_state = permissions.get("private_state").copied().unwrap_or(false);
+        let mut supported_actions = Vec::new();
+        let mut action_capabilities = Vec::new();
+        if has_accessibility && has_display_geometry && has_private_state {
+            for action in ["invoke", "set_value"] {
+                supported_actions.push(action.to_string());
+                action_capabilities.push(ActionCapability {
+                    action: action.to_string(),
+                    delivery_route: DeliveryRoute::TargetAddressed,
+                    background_support: BackgroundSupport::Guarded,
+                });
+            }
+        }
+        let session = linux_input::session_type();
+        if session == "x11" || session == "wayland" {
+            for action in ["click", "type_text", "press", "paste", "hotkey", "move"] {
+                supported_actions.push(action.to_string());
+                action_capabilities.push(ActionCapability {
+                    action: action.to_string(),
+                    delivery_route: DeliveryRoute::Pointer,
+                    background_support: BackgroundSupport::Unavailable,
+                });
+            }
+            supported_actions.push("scroll".to_string());
+            action_capabilities.push(ActionCapability {
+                action: "scroll".to_string(),
+                delivery_route: DeliveryRoute::Pointer,
+                background_support: BackgroundSupport::Unavailable,
+            });
+        }
+        Ok(Capabilities {
+            platform: "linux".to_string(),
+            backend: "praefectus-linux".to_string(),
+            session_isolation: self.session_isolation,
+            action_capabilities,
+            supported_actions,
+            permissions,
+            display_geometry_hash: display_geometry_hash.unwrap_or_else(|| "0".repeat(64)),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn non_linux_capabilities(&self) -> Result<Capabilities, ProtocolError> {
+        let permission_value = self.runtime.permissions();
+        let permissions: BTreeMap<String, bool> = permission_value
+            .as_object()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(key, value)| value.as_bool().map(|value| (key.clone(), value)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let screens = self
+            .runtime
+            .list_screens()
+            .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
+        let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
+        let mut supported_actions = Vec::new();
+        #[cfg(target_os = "macos")]
+        supported_actions.extend(macos_semantic_actions(accessibility));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let private_state = permissions.get("private_state").copied().unwrap_or(false);
+            if accessibility && private_state {
+                supported_actions.extend([
+                    "invoke",
+                    "set_value",
+                    "click",
+                    "type_text",
+                    "press",
+                    "paste",
+                    "hotkey",
+                    "move",
+                    "scroll",
+                ]);
+            }
+        }
+        let action_capabilities = supported_actions
+            .iter()
+            .map(|action| ActionCapability {
+                action: (*action).to_string(),
+                delivery_route: match *action {
+                    "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                        DeliveryRoute::TargetAddressed
+                    }
+                    "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
+                        native_pointer_delivery_route()
+                    }
+                    _ => DeliveryRoute::Pointer,
+                },
+                background_support: match *action {
+                    "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
+                        BackgroundSupport::Guarded
+                    }
+                    "scroll" | "type_text" | "press" | "paste" | "hotkey"
+                        if native_pointer_delivery_route() == DeliveryRoute::PerProcessEvent =>
+                    {
+                        BackgroundSupport::Guarded
+                    }
+                    _ => BackgroundSupport::Unavailable,
+                },
+            })
+            .collect();
+        Ok(Capabilities {
+            platform: std::env::consts::OS.to_string(),
+            backend: self.runtime.resolve_backend().to_string(),
+            session_isolation: self.session_isolation,
+            supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
+            action_capabilities,
+            permissions,
+            display_geometry_hash: hash_value(&screens)?,
+        })
+    }
+
     pub fn with_session_isolation(session_isolation: SessionIsolation) -> Self {
         Self {
             session_isolation,
@@ -5777,152 +5868,11 @@ impl Executor for NativeExecutor {
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
         #[cfg(target_os = "linux")]
         {
-            let mut backend = self
-                .linux_atspi
-                .lock()
-                .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
-            if backend.is_none() {
-                *backend = linux_atspi::LinuxAtspiBackend::connect().ok();
-            }
-            let display_geometry_hash = backend
-                .as_ref()
-                .and_then(|backend| backend.display_geometry_hash().ok());
-            let permissions = backend
-                .as_ref()
-                .map(|backend| {
-                    backend
-                        .permissions(display_geometry_hash.is_some(), private_storage_available())
-                })
-                .unwrap_or_else(|| {
-                    BTreeMap::from([
-                        ("accessibility".to_string(), false),
-                        ("atspi2".to_string(), false),
-                        ("coordinate_capture".to_string(), false),
-                        ("display_geometry".to_string(), false),
-                        ("private_state".to_string(), false),
-                        ("screen_recording".to_string(), false),
-                    ])
-                });
-            let has_accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let has_display_geometry = permissions
-                .get("display_geometry")
-                .copied()
-                .unwrap_or(false);
-            let has_private_state = permissions.get("private_state").copied().unwrap_or(false);
-            let mut supported_actions = Vec::new();
-            let mut action_capabilities = Vec::new();
-            if has_accessibility && has_display_geometry && has_private_state {
-                for action in ["invoke", "set_value"] {
-                    supported_actions.push(action.to_string());
-                    action_capabilities.push(ActionCapability {
-                        action: action.to_string(),
-                        delivery_route: DeliveryRoute::TargetAddressed,
-                        background_support: BackgroundSupport::Guarded,
-                    });
-                }
-            }
-            let session = linux_input::session_type();
-            if session == "x11" || session == "wayland" {
-                for action in ["click", "type_text", "press", "paste", "hotkey", "move"] {
-                    supported_actions.push(action.to_string());
-                    action_capabilities.push(ActionCapability {
-                        action: action.to_string(),
-                        delivery_route: DeliveryRoute::Pointer,
-                        background_support: BackgroundSupport::Unavailable,
-                    });
-                }
-                supported_actions.push("scroll".to_string());
-                action_capabilities.push(ActionCapability {
-                    action: "scroll".to_string(),
-                    delivery_route: DeliveryRoute::Pointer,
-                    background_support: BackgroundSupport::Unavailable,
-                });
-            }
-            Ok(Capabilities {
-                platform: "linux".to_string(),
-                backend: "praefectus-linux".to_string(),
-                session_isolation: self.session_isolation,
-                action_capabilities,
-                supported_actions,
-                permissions,
-                display_geometry_hash: display_geometry_hash.unwrap_or_else(|| "0".repeat(64)),
-            })
+            return self.linux_capabilities();
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let permission_value = self.runtime.permissions();
-            let permissions: BTreeMap<String, bool> = permission_value
-                .as_object()
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|(key, value)| {
-                            value.as_bool().map(|value| (key.clone(), value))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let screens = self
-                .runtime
-                .list_screens()
-                .map_err(|error| ProtocolError::Executor(redact_message(&error.to_string())))?;
-            let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
-            let mut supported_actions = Vec::new();
-            #[cfg(target_os = "macos")]
-            supported_actions.extend(macos_semantic_actions(accessibility));
-            #[cfg(not(target_os = "macos"))]
-            {
-                let private_state = permissions.get("private_state").copied().unwrap_or(false);
-                if accessibility && private_state {
-                    supported_actions.extend([
-                        "invoke",
-                        "set_value",
-                        "click",
-                        "type_text",
-                        "press",
-                        "paste",
-                        "hotkey",
-                        "move",
-                        "scroll",
-                    ]);
-                }
-            }
-            let action_capabilities = supported_actions
-                .iter()
-                .map(|action| ActionCapability {
-                    action: (*action).to_string(),
-                    delivery_route: match *action {
-                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
-                            DeliveryRoute::TargetAddressed
-                        }
-                        "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
-                            native_pointer_delivery_route()
-                        }
-                        _ => DeliveryRoute::Pointer,
-                    },
-                    background_support: match *action {
-                        "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
-                            BackgroundSupport::Guarded
-                        }
-                        "scroll" | "type_text" | "press" | "paste" | "hotkey"
-                            if native_pointer_delivery_route()
-                                == DeliveryRoute::PerProcessEvent =>
-                        {
-                            BackgroundSupport::Guarded
-                        }
-                        _ => BackgroundSupport::Unavailable,
-                    },
-                })
-                .collect();
-            Ok(Capabilities {
-                platform: std::env::consts::OS.to_string(),
-                backend: self.runtime.resolve_backend().to_string(),
-                session_isolation: self.session_isolation,
-                supported_actions: supported_actions.into_iter().map(str::to_string).collect(),
-                action_capabilities,
-                permissions,
-                display_geometry_hash: hash_value(&screens)?,
-            })
+            return self.non_linux_capabilities();
         }
     }
 
@@ -6633,41 +6583,16 @@ impl OperationLedger {
             return Ok(None);
         };
         let finished_at_ms = now_ms();
-        let delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
-        let session_isolation = session_isolation.unwrap_or(SessionIsolation::Unknown);
-        let interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
-        let acknowledgement = ActionAck {
-            protocol_version: PROTOCOL_VERSION,
-            operation_id: operation_id.to_string(),
-            sequence: 2,
-            action_hash: action_hash.clone(),
-            replayed: false,
-            state: AckState::Terminal {
-                terminal: Box::new(Terminal::OutcomeUnknown {
-                    receipt: Receipt {
-                        protocol_version: PROTOCOL_VERSION,
-                        action_name: action_name.unwrap_or_else(|| "unknown".to_string()),
-                        action_hash,
-                        started_at_ms: claimed_at_ms,
-                        finished_at_ms,
-                        backend: "unknown".to_string(),
-                        fallback_chain: Vec::new(),
-                        delivery_route,
-                        session_isolation,
-                        interaction_mode,
-                        context_preservation: recovered_context_preservation(
-                            interaction_mode,
-                            session_isolation,
-                        ),
-                        effect: Effect::Unknown,
-                        before: None,
-                        after: None,
-                        warnings: Vec::new(),
-                    },
-                    message: interrupted_outcome_message(),
-                }),
-            },
-        };
+        let acknowledgement = generate_interrupted_ack(
+            operation_id,
+            action_hash,
+            claimed_at_ms,
+            finished_at_ms,
+            action_name,
+            delivery_route,
+            session_isolation,
+            interaction_mode,
+        );
         self.finish(&acknowledgement)?;
         Ok(Some(acknowledgement))
     }
@@ -6829,6 +6754,54 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
         file.sync_all()?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_interrupted_ack(
+    operation_id: &str,
+    action_hash: String,
+    claimed_at_ms: i64,
+    finished_at_ms: i64,
+    action_name: Option<String>,
+    delivery_route: Option<DeliveryRoute>,
+    session_isolation: Option<SessionIsolation>,
+    interaction_mode: Option<InteractionMode>,
+) -> ActionAck {
+    let delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
+    let session_isolation = session_isolation.unwrap_or(SessionIsolation::Unknown);
+    let interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
+    ActionAck {
+        protocol_version: PROTOCOL_VERSION,
+        operation_id: operation_id.to_string(),
+        sequence: 2,
+        action_hash: action_hash.clone(),
+        replayed: false,
+        state: AckState::Terminal {
+            terminal: Box::new(Terminal::OutcomeUnknown {
+                receipt: Receipt {
+                    protocol_version: PROTOCOL_VERSION,
+                    action_name: action_name.unwrap_or_else(|| "unknown".to_string()),
+                    action_hash,
+                    started_at_ms: claimed_at_ms,
+                    finished_at_ms,
+                    backend: "unknown".to_string(),
+                    fallback_chain: Vec::new(),
+                    delivery_route,
+                    session_isolation,
+                    interaction_mode,
+                    context_preservation: recovered_context_preservation(
+                        interaction_mode,
+                        session_isolation,
+                    ),
+                    effect: Effect::Unknown,
+                    before: None,
+                    after: None,
+                    warnings: Vec::new(),
+                },
+                message: interrupted_outcome_message(),
+            }),
+        },
+    }
 }
 
 fn persistence_unknown_ack(mut acknowledgement: ActionAck) -> ActionAck {
@@ -7967,6 +7940,14 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
+    fn test_cancellation_token() {
+        let token = CancellationToken::default();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
@@ -8419,7 +8400,29 @@ mod tests {
     }
 
     #[test]
-    fn protocol_debug_output_redacts_actions_and_authority() {
+    fn protocol_debug_output_redacts_authority() {
+        let authority = SignedAuthority {
+            grant: AuthorityGrant {
+                protocol_version: PROTOCOL_VERSION,
+                issuer: "secret-issuer".to_string(),
+                key_id: "secret-key".to_string(),
+                operation_id: "operation".to_string(),
+                subject: "secret-subject".to_string(),
+                session_id: "secret-session".to_string(),
+                risk: SafetyClass::Reversible,
+                expires_at_ms: 2,
+                policy_generation: "secret-policy".to_string(),
+                action_hash: "a".repeat(64),
+            },
+            signature: "secret-signature".to_string(),
+        };
+        let output = format!("{authority:?}");
+        assert!(output.contains("[redacted]"));
+        assert!(!output.contains("secret-"));
+    }
+
+    #[test]
+    fn protocol_debug_output_redacts_request() {
         let authority = SignedAuthority {
             grant: AuthorityGrant {
                 protocol_version: PROTOCOL_VERSION,
@@ -8458,37 +8461,31 @@ mod tests {
             },
             safety: SafetyClass::Reversible,
         };
-        let outputs = [
-            format!("{authority:?}"),
-            format!("{request:?}"),
-            format!(
-                "{:?}",
-                Action::Paste {
-                    text: "secret-paste".to_string(),
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::SetValue {
-                    value: "secret-value".to_string(),
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::Press {
-                    key: "secret-keypress".to_string(),
-                    count: 1,
-                    delay_ms: None,
-                }
-            ),
-            format!(
-                "{:?}",
-                Action::Hotkey {
-                    keys: vec!["secret-hotkey".to_string()],
-                }
-            ),
+        let output = format!("{request:?}");
+        assert!(output.contains("[redacted]"));
+        assert!(!output.contains("secret-"));
+    }
+
+    #[test]
+    fn protocol_debug_output_redacts_actions() {
+        let actions = [
+            Action::Paste {
+                text: "secret-paste".to_string(),
+            },
+            Action::SetValue {
+                value: "secret-value".to_string(),
+            },
+            Action::Press {
+                key: "secret-keypress".to_string(),
+                count: 1,
+                delay_ms: None,
+            },
+            Action::Hotkey {
+                keys: vec!["secret-hotkey".to_string()],
+            },
         ];
-        for output in outputs {
+        for action in actions {
+            let output = format!("{action:?}");
             assert!(output.contains("[redacted]"));
             assert!(!output.contains("secret-"));
         }
