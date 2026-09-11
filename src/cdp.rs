@@ -1422,7 +1422,7 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
     }
 }
 
-fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
+fn fetch_json_targets(config: &CdpConfig) -> Result<Value, CdpError> {
     let mut stream = TcpStream::connect_timeout(&config.endpoint(), MAX_IO_TIMEOUT)
         .map_err(|_| CdpError::Protocol)?;
     stream
@@ -1486,7 +1486,11 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     if body.len() != content_length {
         return Err(CdpError::Protocol);
     }
-    let targets: Value = serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)?;
+    serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)
+}
+
+fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
+    let targets = fetch_json_targets(config)?;
     let mut matches = targets
         .as_array()
         .ok_or(CdpError::Protocol)?
@@ -1741,8 +1745,7 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
         if written >= descriptors.len() || written % 8 != 0 {
             return Err(CdpError::StaleTarget);
         }
-        #[allow(clippy::chunks_exact_to_as_chunks)]
-        for descriptor in descriptors[..written].chunks_exact(8) {
+        for descriptor in descriptors[..written].as_chunks::<8>().0 {
             let file_descriptor =
                 i32::from_ne_bytes(descriptor[..4].try_into().map_err(|_| CdpError::Protocol)?);
             let descriptor_type = u32::from_ne_bytes(
@@ -1781,14 +1784,12 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
 }
 
 #[cfg(windows)]
-fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+fn get_extended_tcp_table() -> Result<Vec<u8>, CdpError> {
     const AF_INET: u32 = 2;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     const MAX_TABLE_BYTES: usize = 16 * 1024 * 1024;
     const NO_ERROR: u32 = 0;
-    const TCP_LISTEN: u32 = 2;
     const TCP_TABLE_OWNER_PID_LISTENER: i32 = 3;
-    const TCP_ROW_BYTES: usize = 24;
 
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
@@ -1839,6 +1840,16 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
     if written > table.len() || written < 4 {
         return Err(CdpError::Protocol);
     }
+    table.truncate(written);
+    Ok(table)
+}
+
+#[cfg(windows)]
+fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+    const TCP_LISTEN: u32 = 2;
+    const TCP_ROW_BYTES: usize = 24;
+
+    let table = get_extended_tcp_table()?;
     let row_count =
         u32::from_ne_bytes(table[..4].try_into().map_err(|_| CdpError::Protocol)?) as usize;
     if 4usize
@@ -1847,13 +1858,17 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
                 .checked_mul(TCP_ROW_BYTES)
                 .ok_or(CdpError::Protocol)?,
         )
-        .is_none_or(|required| required > written)
+        .is_none_or(|required| required > table.len())
     {
         return Err(CdpError::Protocol);
     }
     let mut owners = BTreeSet::new();
-    #[allow(clippy::chunks_exact_to_as_chunks)]
-    for row in table[4..].chunks_exact(TCP_ROW_BYTES).take(row_count) {
+    for row in table[4..]
+        .as_chunks::<TCP_ROW_BYTES>()
+        .0
+        .iter()
+        .take(row_count)
+    {
         if u32::from_ne_bytes(row[..4].try_into().map_err(|_| CdpError::Protocol)?) == TCP_LISTEN
             && row[4..8] == Ipv4Addr::LOCALHOST.octets()
             && u16::from_be_bytes(row[8..10].try_into().map_err(|_| CdpError::Protocol)?) == port
@@ -2741,6 +2756,44 @@ mod tests {
                 },
             },
             interaction_mode: InteractionMode::BackgroundOnly,
+            deadline_at_ms: i64::MAX,
+            verification,
+            safety: SafetyClass::Reversible,
+        }
+    }
+
+    fn interactive_request(
+        operation_id: &str,
+        action: Action,
+        target: TargetRef,
+        verification: VerificationPolicy,
+    ) -> ActionRequest {
+        ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            action_version: PROTOCOL_VERSION,
+            target_version: PROTOCOL_VERSION,
+            verification_version: PROTOCOL_VERSION,
+            operation_id: operation_id.to_string(),
+            subject: "subject".to_string(),
+            session_id: "session".to_string(),
+            authority: SignedAuthority {
+                grant: AuthorityGrant {
+                    protocol_version: PROTOCOL_VERSION,
+                    issuer: "host".to_string(),
+                    key_id: "key".to_string(),
+                    operation_id: operation_id.to_string(),
+                    subject: "subject".to_string(),
+                    session_id: "session".to_string(),
+                    risk: SafetyClass::Reversible,
+                    expires_at_ms: i64::MAX,
+                    policy_generation: "generation".to_string(),
+                    action_hash: "0".repeat(64),
+                },
+                signature: "0".repeat(128),
+            },
+            action,
+            target,
+            interaction_mode: crate::InteractionMode::Interactive,
             deadline_at_ms: i64::MAX,
             verification,
             safety: SafetyClass::Reversible,
@@ -3784,38 +3837,14 @@ mod tests {
             )),
         ]);
         drop(channel);
-        let request = ActionRequest {
-            protocol_version: PROTOCOL_VERSION,
-            action_version: PROTOCOL_VERSION,
-            target_version: PROTOCOL_VERSION,
-            verification_version: PROTOCOL_VERSION,
-            operation_id: "cdp-set-value".to_string(),
-            subject: "subject".to_string(),
-            session_id: "session".to_string(),
-            authority: SignedAuthority {
-                grant: AuthorityGrant {
-                    protocol_version: PROTOCOL_VERSION,
-                    issuer: "host".to_string(),
-                    key_id: "key".to_string(),
-                    operation_id: "cdp-set-value".to_string(),
-                    subject: "subject".to_string(),
-                    session_id: "session".to_string(),
-                    risk: SafetyClass::Reversible,
-                    expires_at_ms: i64::MAX,
-                    policy_generation: "generation".to_string(),
-                    action_hash: "0".repeat(64),
-                },
-                signature: "0".repeat(128),
-            },
-            action: Action::SetValue {
+        let request = interactive_request(
+            "cdp-set-value",
+            Action::SetValue {
                 value: value.to_string(),
             },
-            target: TargetRef::Element { target },
-            interaction_mode: crate::InteractionMode::Interactive,
-            deadline_at_ms: i64::MAX,
-            verification: VerificationPolicy::TargetValueHash { sha256: value_hash },
-            safety: SafetyClass::Reversible,
-        };
+            TargetRef::Element { target },
+            VerificationPolicy::TargetValueHash { sha256: value_hash },
+        );
         let directory = tempfile::tempdir().expect("temporary directory");
         crate::restrict_directory(directory.path()).expect("restrict temporary directory");
         let report = Engine::new(
