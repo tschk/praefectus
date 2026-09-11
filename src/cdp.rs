@@ -1422,7 +1422,7 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
     }
 }
 
-fn fetch_json_targets(config: &CdpConfig) -> Result<Value, CdpError> {
+fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     let mut stream = TcpStream::connect_timeout(&config.endpoint(), MAX_IO_TIMEOUT)
         .map_err(|_| CdpError::Protocol)?;
     stream
@@ -1486,11 +1486,7 @@ fn fetch_json_targets(config: &CdpConfig) -> Result<Value, CdpError> {
     if body.len() != content_length {
         return Err(CdpError::Protocol);
     }
-    serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)
-}
-
-fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
-    let targets = fetch_json_targets(config)?;
+    let targets: Value = serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)?;
     let mut matches = targets
         .as_array()
         .ok_or(CdpError::Protocol)?
@@ -1681,14 +1677,8 @@ fn endpoint_owner_process_ids(port: u16, process_id: u32) -> Result<BTreeSet<u32
 }
 
 #[cfg(target_os = "macos")]
-fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+fn list_all_process_ids() -> Result<Vec<i32>, CdpError> {
     const MAX_PROCESS_COUNT: usize = 1024 * 1024;
-    const MAX_DESCRIPTOR_BYTES: usize = 16 * 1024 * 1024;
-    const SOCKET_INFO_BYTES: usize = 792;
-    const PROC_PIDFDSOCKETINFO: i32 = 3;
-    const SOCKINFO_TCP: i32 = 2;
-    const TCP_LISTEN: i32 = 1;
-
     let capacity = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     let capacity = usize::try_from(capacity)
         .ok()
@@ -1707,89 +1697,111 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
         .ok()
         .filter(|count| *count < process_ids.len())
         .ok_or(CdpError::StaleTarget)?;
-    let mut owners = BTreeSet::new();
-    for process_id in process_ids.into_iter().take(count).filter(|id| *id > 0) {
-        let descriptor_bytes = unsafe {
-            libc::proc_pidinfo(
-                process_id,
-                libc::PROC_PIDLISTFDS,
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        let Ok(descriptor_bytes) = usize::try_from(descriptor_bytes) else {
-            continue;
-        };
-        if descriptor_bytes == 0 || descriptor_bytes > MAX_DESCRIPTOR_BYTES {
+    process_ids.truncate(count);
+    Ok(process_ids)
+}
+
+#[cfg(target_os = "macos")]
+fn process_has_tcp_listen_socket(process_id: i32, port: u16) -> Result<bool, CdpError> {
+    const MAX_DESCRIPTOR_BYTES: usize = 16 * 1024 * 1024;
+    const SOCKET_INFO_BYTES: usize = 792;
+    const PROC_PIDFDSOCKETINFO: i32 = 3;
+    const SOCKINFO_TCP: i32 = 2;
+    const TCP_LISTEN: i32 = 1;
+
+    let descriptor_bytes = unsafe {
+        libc::proc_pidinfo(
+            process_id,
+            libc::PROC_PIDLISTFDS,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let Ok(descriptor_bytes) = usize::try_from(descriptor_bytes) else {
+        return Ok(false);
+    };
+    if descriptor_bytes == 0 || descriptor_bytes > MAX_DESCRIPTOR_BYTES {
+        return Ok(false);
+    }
+    let descriptor_capacity = descriptor_bytes
+        .checked_add(64 * 8)
+        .filter(|bytes| *bytes <= MAX_DESCRIPTOR_BYTES)
+        .ok_or(CdpError::StaleTarget)?;
+    let mut descriptors = vec![0u8; descriptor_capacity];
+    let requested = i32::try_from(descriptors.len()).map_err(|_| CdpError::StaleTarget)?;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            process_id,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            requested,
+        )
+    };
+    let Ok(written) = usize::try_from(written) else {
+        return Ok(false);
+    };
+    if written >= descriptors.len() || written % 8 != 0 {
+        return Err(CdpError::StaleTarget);
+    }
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    for descriptor in descriptors[..written].chunks_exact(8) {
+        let file_descriptor =
+            i32::from_ne_bytes(descriptor[..4].try_into().map_err(|_| CdpError::Protocol)?);
+        let descriptor_type = u32::from_ne_bytes(
+            descriptor[4..8]
+                .try_into()
+                .map_err(|_| CdpError::Protocol)?,
+        );
+        if descriptor_type != libc::PROX_FDTYPE_SOCKET as u32 {
             continue;
         }
-        let descriptor_capacity = descriptor_bytes
-            .checked_add(64 * 8)
-            .filter(|bytes| *bytes <= MAX_DESCRIPTOR_BYTES)
-            .ok_or(CdpError::StaleTarget)?;
-        let mut descriptors = vec![0u8; descriptor_capacity];
-        let requested = i32::try_from(descriptors.len()).map_err(|_| CdpError::StaleTarget)?;
+        let mut socket = [0u8; SOCKET_INFO_BYTES];
         let written = unsafe {
-            libc::proc_pidinfo(
+            libc::proc_pidfdinfo(
                 process_id,
-                libc::PROC_PIDLISTFDS,
-                0,
-                descriptors.as_mut_ptr().cast(),
-                requested,
+                file_descriptor,
+                PROC_PIDFDSOCKETINFO,
+                socket.as_mut_ptr().cast(),
+                SOCKET_INFO_BYTES as i32,
             )
         };
-        let Ok(written) = usize::try_from(written) else {
+        if written != SOCKET_INFO_BYTES as i32
+            || i32::from_ne_bytes(socket[256..260].try_into().unwrap_or_default()) != SOCKINFO_TCP
+            || i32::from_ne_bytes(socket[344..348].try_into().unwrap_or_default()) != TCP_LISTEN
+            || socket[288] & 1 == 0
+            || socket[324..328] != Ipv4Addr::LOCALHOST.octets()
+            || u16::from_be_bytes(socket[268..270].try_into().unwrap_or_default()) != port
+        {
             continue;
-        };
-        if written >= descriptors.len() || written % 8 != 0 {
-            return Err(CdpError::StaleTarget);
         }
-        for descriptor in descriptors[..written].as_chunks::<8>().0 {
-            let file_descriptor =
-                i32::from_ne_bytes(descriptor[..4].try_into().map_err(|_| CdpError::Protocol)?);
-            let descriptor_type = u32::from_ne_bytes(
-                descriptor[4..8]
-                    .try_into()
-                    .map_err(|_| CdpError::Protocol)?,
-            );
-            if descriptor_type != libc::PROX_FDTYPE_SOCKET as u32 {
-                continue;
-            }
-            let mut socket = [0u8; SOCKET_INFO_BYTES];
-            let written = unsafe {
-                libc::proc_pidfdinfo(
-                    process_id,
-                    file_descriptor,
-                    PROC_PIDFDSOCKETINFO,
-                    socket.as_mut_ptr().cast(),
-                    SOCKET_INFO_BYTES as i32,
-                )
-            };
-            if written != SOCKET_INFO_BYTES as i32
-                || i32::from_ne_bytes(socket[256..260].try_into().unwrap_or_default())
-                    != SOCKINFO_TCP
-                || i32::from_ne_bytes(socket[344..348].try_into().unwrap_or_default()) != TCP_LISTEN
-                || socket[288] & 1 == 0
-                || socket[324..328] != Ipv4Addr::LOCALHOST.octets()
-                || u16::from_be_bytes(socket[268..270].try_into().unwrap_or_default()) != port
-            {
-                continue;
-            }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
+    let process_ids = list_all_process_ids()?;
+    let mut owners = BTreeSet::new();
+    for process_id in process_ids.into_iter().filter(|id| *id > 0) {
+        if process_has_tcp_listen_socket(process_id, port)? {
             owners.insert(u32::try_from(process_id).map_err(|_| CdpError::Protocol)?);
-            break;
         }
     }
     Ok(owners)
 }
 
 #[cfg(windows)]
-fn get_extended_tcp_table() -> Result<Vec<u8>, CdpError> {
+fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
     const AF_INET: u32 = 2;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     const MAX_TABLE_BYTES: usize = 16 * 1024 * 1024;
     const NO_ERROR: u32 = 0;
+    const TCP_LISTEN: u32 = 2;
     const TCP_TABLE_OWNER_PID_LISTENER: i32 = 3;
+    const TCP_ROW_BYTES: usize = 24;
 
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
@@ -1840,16 +1852,6 @@ fn get_extended_tcp_table() -> Result<Vec<u8>, CdpError> {
     if written > table.len() || written < 4 {
         return Err(CdpError::Protocol);
     }
-    table.truncate(written);
-    Ok(table)
-}
-
-#[cfg(windows)]
-fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u32>, CdpError> {
-    const TCP_LISTEN: u32 = 2;
-    const TCP_ROW_BYTES: usize = 24;
-
-    let table = get_extended_tcp_table()?;
     let row_count =
         u32::from_ne_bytes(table[..4].try_into().map_err(|_| CdpError::Protocol)?) as usize;
     if 4usize
@@ -1858,17 +1860,13 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
                 .checked_mul(TCP_ROW_BYTES)
                 .ok_or(CdpError::Protocol)?,
         )
-        .is_none_or(|required| required > table.len())
+        .is_none_or(|required| required > written)
     {
         return Err(CdpError::Protocol);
     }
     let mut owners = BTreeSet::new();
-    for row in table[4..]
-        .as_chunks::<TCP_ROW_BYTES>()
-        .0
-        .iter()
-        .take(row_count)
-    {
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    for row in table[4..].chunks_exact(TCP_ROW_BYTES).take(row_count) {
         if u32::from_ne_bytes(row[..4].try_into().map_err(|_| CdpError::Protocol)?) == TCP_LISTEN
             && row[4..8] == Ipv4Addr::LOCALHOST.octets()
             && u16::from_be_bytes(row[8..10].try_into().map_err(|_| CdpError::Protocol)?) == port
@@ -2756,44 +2754,6 @@ mod tests {
                 },
             },
             interaction_mode: InteractionMode::BackgroundOnly,
-            deadline_at_ms: i64::MAX,
-            verification,
-            safety: SafetyClass::Reversible,
-        }
-    }
-
-    fn interactive_request(
-        operation_id: &str,
-        action: Action,
-        target: TargetRef,
-        verification: VerificationPolicy,
-    ) -> ActionRequest {
-        ActionRequest {
-            protocol_version: PROTOCOL_VERSION,
-            action_version: PROTOCOL_VERSION,
-            target_version: PROTOCOL_VERSION,
-            verification_version: PROTOCOL_VERSION,
-            operation_id: operation_id.to_string(),
-            subject: "subject".to_string(),
-            session_id: "session".to_string(),
-            authority: SignedAuthority {
-                grant: AuthorityGrant {
-                    protocol_version: PROTOCOL_VERSION,
-                    issuer: "host".to_string(),
-                    key_id: "key".to_string(),
-                    operation_id: operation_id.to_string(),
-                    subject: "subject".to_string(),
-                    session_id: "session".to_string(),
-                    risk: SafetyClass::Reversible,
-                    expires_at_ms: i64::MAX,
-                    policy_generation: "generation".to_string(),
-                    action_hash: "0".repeat(64),
-                },
-                signature: "0".repeat(128),
-            },
-            action,
-            target,
-            interaction_mode: crate::InteractionMode::Interactive,
             deadline_at_ms: i64::MAX,
             verification,
             safety: SafetyClass::Reversible,
@@ -3837,14 +3797,38 @@ mod tests {
             )),
         ]);
         drop(channel);
-        let request = interactive_request(
-            "cdp-set-value",
-            Action::SetValue {
+        let request = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            action_version: PROTOCOL_VERSION,
+            target_version: PROTOCOL_VERSION,
+            verification_version: PROTOCOL_VERSION,
+            operation_id: "cdp-set-value".to_string(),
+            subject: "subject".to_string(),
+            session_id: "session".to_string(),
+            authority: SignedAuthority {
+                grant: AuthorityGrant {
+                    protocol_version: PROTOCOL_VERSION,
+                    issuer: "host".to_string(),
+                    key_id: "key".to_string(),
+                    operation_id: "cdp-set-value".to_string(),
+                    subject: "subject".to_string(),
+                    session_id: "session".to_string(),
+                    risk: SafetyClass::Reversible,
+                    expires_at_ms: i64::MAX,
+                    policy_generation: "generation".to_string(),
+                    action_hash: "0".repeat(64),
+                },
+                signature: "0".repeat(128),
+            },
+            action: Action::SetValue {
                 value: value.to_string(),
             },
-            TargetRef::Element { target },
-            VerificationPolicy::TargetValueHash { sha256: value_hash },
-        );
+            target: TargetRef::Element { target },
+            interaction_mode: crate::InteractionMode::Interactive,
+            deadline_at_ms: i64::MAX,
+            verification: VerificationPolicy::TargetValueHash { sha256: value_hash },
+            safety: SafetyClass::Reversible,
+        };
         let directory = tempfile::tempdir().expect("temporary directory");
         crate::restrict_directory(directory.path()).expect("restrict temporary directory");
         let report = Engine::new(
