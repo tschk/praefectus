@@ -15,6 +15,7 @@ include = [
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
+    "/examples/**",
     "/LICENSE",
     "/ACKNOWLEDGEMENTS.md",
     "/THIRD_PARTY_LICENSES.md",
@@ -33,6 +34,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "praefectus"
 path = "src/main.rs"
+
+[[example]]
+name = "capabilities"
+path = "examples/capabilities.rs"
 
 [dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
