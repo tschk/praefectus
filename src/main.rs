@@ -90,94 +90,107 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
         "execute" => Err(usage(
             "execute is library-only and requires a host-injected trusted AuthorityVerifier",
         )),
-        "status" => {
-            let operation_id = match positional.as_slice() {
-                [operation_id] => operation_id,
-                [] => return Err(usage("status requires an operation ID")),
-                _ => return Err(usage("status accepts exactly one operation ID")),
-            };
-            let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
-            Ok((
-                serialize(
-                    engine
-                        .status(operation_id)
-                        .map_err(|error| protocol("protocol_error", error))?,
-                )?,
-                0,
-            ))
-        }
-        "capabilities" => {
-            if !positional.is_empty() {
-                return Err(usage("capabilities does not accept positional arguments"));
-            }
-            let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
-            Ok((
-                serialize(
-                    engine
-                        .capabilities()
-                        .map_err(|error| protocol("protocol_error", error))?,
-                )?,
-                0,
-            ))
-        }
-        "observe" => {
-            if !positional.is_empty() {
-                return Err(usage("observe does not accept positional arguments"));
-            }
-            let executor = NativeExecutor::default();
-            Ok((
-                serialize(
-                    executor
-                        .observe_semantic(
-                            &CancellationToken::default(),
-                            now_ms().saturating_add(30_000),
-                        )
-                        .map_err(|error| protocol("observation_error", error))?,
-                )?,
-                0,
-            ))
-        }
-        "surfaces" => {
-            if !positional.is_empty() {
-                return Err(usage("surfaces does not accept positional arguments"));
-            }
-            let executor = NativeExecutor::default();
-            Ok((
-                serialize(
-                    executor
-                        .list_surfaces(
-                            &CancellationToken::default(),
-                            now_ms().saturating_add(30_000),
-                        )
-                        .map_err(|error| protocol("observation_error", error))?,
-                )?,
-                0,
-            ))
-        }
-        "observe-surface" => {
-            let surface_id = match positional.as_slice() {
-                [surface_id] => surface_id,
-                [] => return Err(usage("observe-surface requires a surface ID")),
-                _ => return Err(usage("observe-surface accepts exactly one surface ID")),
-            };
-            let executor = NativeExecutor::default();
-            Ok((
-                serialize(
-                    executor
-                        .observe_surface(
-                            &SurfaceRef {
-                                id: (*surface_id).to_string(),
-                            },
-                            &CancellationToken::default(),
-                            now_ms().saturating_add(30_000),
-                        )
-                        .map_err(|error| protocol("observation_error", error))?,
-                )?,
-                0,
-            ))
-        }
+        "status" => run_status(positional, ledger),
+        "capabilities" => run_capabilities(positional, ledger),
+        "observe" => run_observe(positional),
+        "surfaces" => run_surfaces(positional),
+        "observe-surface" => run_observe_surface(positional),
         _ => Err(usage(format!("unknown command: {command}"))),
     }
+}
+
+fn run_status(positional: Vec<&str>, ledger: PathBuf) -> Result<(serde_json::Value, u8), CliError> {
+    let operation_id = match positional.as_slice() {
+        [operation_id] => operation_id,
+        [] => return Err(usage("status requires an operation ID")),
+        _ => return Err(usage("status accepts exactly one operation ID")),
+    };
+    let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
+    Ok((
+        serialize(
+            engine
+                .status(operation_id)
+                .map_err(|error| protocol("protocol_error", error))?,
+        )?,
+        0,
+    ))
+}
+
+fn run_capabilities(
+    positional: Vec<&str>,
+    ledger: PathBuf,
+) -> Result<(serde_json::Value, u8), CliError> {
+    if !positional.is_empty() {
+        return Err(usage("capabilities does not accept positional arguments"));
+    }
+    let engine = Engine::new(NativeExecutor::default(), ledger, DenyAuthority);
+    Ok((
+        serialize(
+            engine
+                .capabilities()
+                .map_err(|error| protocol("protocol_error", error))?,
+        )?,
+        0,
+    ))
+}
+
+fn run_observe(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    if !positional.is_empty() {
+        return Err(usage("observe does not accept positional arguments"));
+    }
+    let executor = NativeExecutor::default();
+    Ok((
+        serialize(
+            executor
+                .observe_semantic(
+                    &CancellationToken::default(),
+                    now_ms().saturating_add(30_000),
+                )
+                .map_err(|error| protocol("observation_error", error))?,
+        )?,
+        0,
+    ))
+}
+
+fn run_surfaces(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    if !positional.is_empty() {
+        return Err(usage("surfaces does not accept positional arguments"));
+    }
+    let executor = NativeExecutor::default();
+    Ok((
+        serialize(
+            executor
+                .list_surfaces(
+                    &CancellationToken::default(),
+                    now_ms().saturating_add(30_000),
+                )
+                .map_err(|error| protocol("observation_error", error))?,
+        )?,
+        0,
+    ))
+}
+
+fn run_observe_surface(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    let surface_id = match positional.as_slice() {
+        [surface_id] => surface_id,
+        [] => return Err(usage("observe-surface requires a surface ID")),
+        _ => return Err(usage("observe-surface accepts exactly one surface ID")),
+    };
+    let executor = NativeExecutor::default();
+    Ok((
+        serialize(
+            executor
+                .observe_surface(
+                    &SurfaceRef {
+                        id: (*surface_id).to_string(),
+                    },
+                    &CancellationToken::default(),
+                    now_ms().saturating_add(30_000),
+                )
+                .map_err(|error| protocol("observation_error", error))?,
+        )?,
+        0,
+    ))
 }
 
 fn now_ms() -> i64 {
