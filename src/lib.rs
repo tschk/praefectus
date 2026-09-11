@@ -1,5 +1,3 @@
-#![allow(unknown_lints)]
-#![allow(clippy::chunks_exact_to_as_chunks)]
 #![allow(clippy::collapsible_if, clippy::needless_return)]
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -128,17 +126,6 @@ pub enum DeliveryRoute {
     Pointer,
     PerProcessEvent,
     Unknown,
-}
-
-impl DeliveryRoute {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DeliveryRoute::TargetAddressed => "targetAddressed",
-            DeliveryRoute::Pointer => "pointer",
-            DeliveryRoute::PerProcessEvent => "perProcessEvent",
-            DeliveryRoute::Unknown => "unknown",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -782,65 +769,6 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
-fn win_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-    if _keys.len() < 2 {
-        return Err(NativeError);
-    }
-    let action_key = _keys.last().ok_or(NativeError)?;
-    let modifiers = &_keys[.._keys.len() - 1];
-
-    let action_vk = win_key_code(action_key).ok_or(NativeError)?;
-    let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
-        .iter()
-        .map(|m| match *m {
-            "ctrl" => Ok(VK_CONTROL),
-            "alt" => Ok(VK_MENU),
-            "shift" => Ok(VK_SHIFT),
-            "win" => Ok(VK_LWIN),
-            _ => Err(NativeError),
-        })
-        .collect::<Result<_, _>>()?;
-
-    let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    };
-
-    for vk in &modifier_vks {
-        let _ = unsafe {
-            SendInput(
-                &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-    }
-    let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
-    let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
-    let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-    for vk in modifier_vks.iter().rev() {
-        let _ = unsafe {
-            SendInput(
-                &[make_keybd(*vk, KEYEVENTF_KEYUP)],
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-    }
-    return Ok(());
-}
-
-#[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     match key {
@@ -1111,39 +1039,6 @@ fn mac_set_scroll_deltas(event: &core_graphics::event::CGEvent, wheel1: i32, whe
 }
 
 #[cfg(target_os = "macos")]
-fn mac_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
-    if !native_permissions()
-        .get("accessibility")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(NativeError);
-    }
-    let code = _keys
-        .last()
-        .and_then(|k| {
-            mac_key_name_code(k).or_else(|| {
-                k.chars()
-                    .next()
-                    .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
-            })
-        })
-        .ok_or(NativeError)?;
-    let mut flags: u64 = 0;
-    for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
-        match mod_key {
-            "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
-            "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
-            "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
-            "shift" => flags |= MAC_FLAG_SHIFT,
-            _ => return Err(NativeError),
-        }
-    }
-    let _ = mac_post_key(code, flags);
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
 fn mac_post_key(code: u16, flags: u64) -> Result<(), NativeError> {
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -1359,11 +1254,69 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            return windows_native_press(_key, _count, _delay_ms);
+            use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+            let vk = win_key_code(_key).ok_or(NativeError)?;
+
+            for i in 0.._count {
+                if i > 0 {
+                    if let Some(delay) = _delay_ms {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                }
+                let down = INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: KEYBD_EVENT_FLAGS::default(),
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                };
+                let up = INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                };
+                let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+            }
+            return Ok(());
         }
         #[cfg(target_os = "macos")]
         {
-            return macos_native_press(_key, _count, _delay_ms);
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            let code = mac_key_name_code(_key)
+                .or_else(|| {
+                    _key.chars()
+                        .next()
+                        .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+                })
+                .ok_or(NativeError)?;
+            for i in 0.._count {
+                if i > 0
+                    && let Some(delay) = _delay_ms
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+                let _ = mac_post_key(code, 0);
+            }
+            Ok(())
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
@@ -1478,11 +1431,93 @@ impl NativeRuntime {
         }
         #[cfg(windows)]
         {
-            return win_hotkey(_keys);
+            use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+            if _keys.len() < 2 {
+                return Err(NativeError);
+            }
+            let action_key = _keys.last().ok_or(NativeError)?;
+            let modifiers = &_keys[.._keys.len() - 1];
+
+            let action_vk = win_key_code(action_key).ok_or(NativeError)?;
+            let modifier_vks: Vec<VIRTUAL_KEY> = modifiers
+                .iter()
+                .map(|m| match *m {
+                    "ctrl" => Ok(VK_CONTROL),
+                    "alt" => Ok(VK_MENU),
+                    "shift" => Ok(VK_SHIFT),
+                    "win" => Ok(VK_LWIN),
+                    _ => Err(NativeError),
+                })
+                .collect::<Result<_, _>>()?;
+
+            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                }
+            };
+
+            for vk in &modifier_vks {
+                let _ = unsafe {
+                    SendInput(
+                        &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                };
+            }
+            let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
+            let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
+            let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+            for vk in modifier_vks.iter().rev() {
+                let _ = unsafe {
+                    SendInput(
+                        &[make_keybd(*vk, KEYEVENTF_KEYUP)],
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                };
+            }
+            return Ok(());
         }
         #[cfg(target_os = "macos")]
         {
-            return mac_hotkey(_keys);
+            if !native_permissions()
+                .get("accessibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            let code = _keys
+                .last()
+                .and_then(|k| {
+                    mac_key_name_code(k).or_else(|| {
+                        k.chars()
+                            .next()
+                            .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+                    })
+                })
+                .ok_or(NativeError)?;
+            let mut flags: u64 = 0;
+            for &mod_key in &_keys[.._keys.len().saturating_sub(1)] {
+                match mod_key {
+                    "cmd" | "command" | "super" => flags |= MAC_FLAG_COMMAND,
+                    "ctrl" | "control" => flags |= MAC_FLAG_CONTROL,
+                    "alt" | "option" | "opt" => flags |= MAC_FLAG_ALTERNATE,
+                    "shift" => flags |= MAC_FLAG_SHIFT,
+                    _ => return Err(NativeError),
+                }
+            }
+            let _ = mac_post_key(code, flags);
+            Ok(())
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Err(NativeError)
@@ -6769,7 +6804,7 @@ impl Drop for LedgerLock {
     }
 }
 
-fn validate_request_versions(request: &ActionRequest) -> Result<(), ProtocolError> {
+fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
@@ -6780,10 +6815,6 @@ fn validate_request_versions(request: &ActionRequest) -> Result<(), ProtocolErro
             "unsupported protocol version".to_string(),
         ));
     }
-    Ok(())
-}
-
-fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -6798,10 +6829,6 @@ fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolE
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
-    Ok(())
-}
-
-fn validate_request_action_and_target(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -6850,10 +6877,6 @@ fn validate_request_action_and_target(request: &ActionRequest) -> Result<(), Pro
             "action requires a fenced semantic element target".to_string(),
         ));
     }
-    Ok(())
-}
-
-fn validate_request_verification(request: &ActionRequest) -> Result<(), ProtocolError> {
     validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
@@ -6910,14 +6933,6 @@ fn validate_request_verification(request: &ActionRequest) -> Result<(), Protocol
             "invalid snapshot ID".to_string(),
         ));
     }
-    Ok(())
-}
-
-fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
-    validate_request_versions(request)?;
-    validate_request_identifiers(request)?;
-    validate_request_action_and_target(request)?;
-    validate_request_verification(request)?;
     Ok(())
 }
 
@@ -7884,78 +7899,6 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(windows)]
-fn windows_native_press(
-    _key: &str,
-    _count: u32,
-    _delay_ms: Option<u64>,
-) -> Result<(), NativeError> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-    let vk = win_key_code(_key).ok_or(NativeError)?;
-
-    for i in 0.._count {
-        if i > 0 {
-            if let Some(delay) = _delay_ms {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-            }
-        }
-        let down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS::default(),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn macos_native_press(_key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
-    if !native_permissions()
-        .get("accessibility")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(NativeError);
-    }
-    let code = mac_key_name_code(_key)
-        .or_else(|| {
-            _key.chars()
-                .next()
-                .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
-        })
-        .ok_or(NativeError)?;
-    for i in 0.._count {
-        if i > 0
-            && let Some(delay) = _delay_ms
-        {
-            std::thread::sleep(std::time::Duration::from_millis(delay));
-        }
-        let _ = mac_post_key(code, 0);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -8117,15 +8060,6 @@ mod tests {
             }),
             DeliveryRoute::Pointer
         );
-    }
-
-    #[test]
-    fn test_delivery_route_as_str() {
-        use super::DeliveryRoute;
-        assert_eq!(DeliveryRoute::TargetAddressed.as_str(), "targetAddressed");
-        assert_eq!(DeliveryRoute::Pointer.as_str(), "pointer");
-        assert_eq!(DeliveryRoute::PerProcessEvent.as_str(), "perProcessEvent");
-        assert_eq!(DeliveryRoute::Unknown.as_str(), "unknown");
     }
 
     #[cfg(target_os = "macos")]
