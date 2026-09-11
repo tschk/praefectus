@@ -1,6 +1,25 @@
 # Praefectus
 
-Praefectus 0.7.0 implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
+**Policy-neutral Rust library and JSON CLI for host-authorized computer-use execution.**
+
+## Quick Start
+
+```sh
+cargo build
+cargo test
+cargo run -- capabilities
+cargo run -- surfaces
+cargo run -- status --ledger ./operations.jsonl OPERATION_ID
+cargo run --example capabilities
+```
+
+`capabilities` returns the native executor's advertised platform, backend, session isolation, and actions. `surfaces` lists bounded opaque native surface references when observation is available. `status` returns the durable terminal acknowledgement when one exists. The library hello in [`examples/capabilities.rs`](examples/capabilities.rs) constructs `Engine` with `NativeExecutor` and `DenyAuthority` and does not execute an action.
+
+The standalone CLI has no `execute` command: a same-user process cannot establish an independent host-authority boundary from a caller-selected file. Trusted hosts execute through the library with an injected `Ed25519AuthorityVerifier`.
+
+## Trust model
+
+Praefectus implements protocol v2 as a policy-neutral Rust library and JSON CLI for computer-use execution. Models propose strict `ActionRequest` values; the host retains planning, identity, approval, permissions, and policy ownership. The host signs one bounded `AuthorityGrant` with Ed25519, and Praefectus verifies it against a host-pinned issuer key before it claims or dispatches an operation.
 
 The protocol provides durable at-most-once dispatch. Desktop and browser APIs are not transactional, so a crash, cancellation, or verification failure after dispatch can produce `outcome_unknown`; Praefectus never reports those cases as safely cancelled or retries them automatically.
 
@@ -79,6 +98,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --all-targets --all-features
 cargo build --release
+cargo run --example capabilities
 cargo package
 ```
 
