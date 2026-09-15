@@ -2792,7 +2792,7 @@ mod tests {
                 9222,
                 "page-1",
                 process_id,
-                format!("{}-stale", process_generation)
+                format!("{process_generation}-stale")
             ),
             Err(CdpError::InvalidConfig)
         ));
