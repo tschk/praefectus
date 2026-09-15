@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '[setup] %s\n' "$*"
+}
+
+time_step() {
+  local label="$1"
+  shift
+  local start
+  start="$(date +%s)"
+  log "start: ${label}"
+  "$@"
+  log "done: ${label} ($(( $(date +%s) - start ))s)"
+}
+
+need_apt=0
+packages=(
+  build-essential
+  ca-certificates
+  curl
+  pkg-config
+  libdbus-1-dev
+  libatspi2.0-dev
+  python3
+  python3-venv
+  python3-pip
+)
+for package in "${packages[@]}"; do
+  if ! dpkg -s "${package}" >/dev/null 2>&1; then
+    need_apt=1
+    break
+  fi
+done
+
+if [[ "${need_apt}" -eq 1 ]]; then
+  time_step "apt-get update" sudo apt-get update -y
+  time_step "apt-get install" sudo apt-get install -y --no-install-recommends "${packages[@]}"
+else
+  log "system packages already present"
+fi
+
+export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+export PATH="${CARGO_HOME}/bin:${PATH}"
+
+if [[ ! -x "${CARGO_HOME}/bin/rustup" ]]; then
+  time_step "install rustup" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal'
+fi
+
+# shellcheck disable=SC1091
+source "${CARGO_HOME}/env"
+
+time_step "rust toolchain" rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy --no-self-update
+time_step "stable toolchain" rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+time_step "default rust 1.88.0" rustup default 1.88.0
+
+if [[ -f Cargo.lock ]]; then
+  time_step "cargo fetch" cargo fetch --locked
+else
+  time_step "cargo fetch" cargo fetch
+fi
+
+if command -v bun >/dev/null 2>&1 && [[ -f plugins/openclaw/bun.lock ]]; then
+  time_step "openclaw bun install" bun install --frozen-lockfile --cwd plugins/openclaw
+else
+  log "skip openclaw bun install"
+fi
+
+if command -v python3 >/dev/null 2>&1 && [[ -f plugins/hermes/requirements-dev.txt ]]; then
+  venv_dir="${HOME}/.cache/praefectus-hermes-venv"
+  if [[ ! -x "${venv_dir}/bin/python" ]]; then
+    time_step "hermes venv" python3 -m venv "${venv_dir}"
+  else
+    log "hermes venv already present"
+  fi
+  time_step "hermes pip" "${venv_dir}/bin/python" -m pip install --upgrade pip
+  time_step "hermes requirements" "${venv_dir}/bin/python" -m pip install --requirement plugins/hermes/requirements-dev.txt
+else
+  log "skip hermes python install"
+fi
+
+log "rustc=$(command -v rustc) $(rustc --version)"
+log "cargo=$(command -v cargo) $(cargo --version)"
+log "bun=$(command -v bun || true)"
+log "python3=$(command -v python3) $(python3 --version)"
