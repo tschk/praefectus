@@ -66,6 +66,7 @@ CLI path: `src/main.rs`, binary name `praefectus`. Existing commands:
 - `surfaces`
 - `observe`
 - `observe-surface SURFACE_ID`
+- `allow-global-input` `[allow|deny]`
 
 The CLI writes one JSON envelope to stdout: `{"ok":true,"data":...}` or `{"ok":false,"error":{"code":...,"message":...}}`. Exit `0` success, `2` usage, `3` protocol/observation/serialization, `1` envelope write failure.
 

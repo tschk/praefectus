@@ -68,6 +68,14 @@ fn capabilities_and_status_reject_extra_or_unknown_arguments() {
             &["observe-surface", "one", "two"][..],
             "observe-surface accepts exactly one surface ID",
         ),
+        (
+            &["allow-global-input", "extra"][..],
+            "allow-global-input accepts no arguments, allow, or deny",
+        ),
+        (
+            &["allow-global-input", "allow", "extra"][..],
+            "allow-global-input accepts no arguments, allow, or deny",
+        ),
     ] {
         let output = run(arguments, "");
         assert_eq!(output.status.code(), Some(2));
@@ -88,6 +96,59 @@ fn success_uses_the_stable_json_envelope() {
     assert_eq!(value["ok"], true);
     assert!(value["data"].is_object());
     assert_eq!(value["data"]["session_isolation"], "shared_desktop");
+}
+
+#[test]
+fn allow_global_input_persists_host_opt_in() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let previous = std::env::var_os("XDG_STATE_HOME");
+    let previous_home = std::env::var_os("HOME");
+    let previous_local = std::env::var_os("LOCALAPPDATA");
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", directory.path());
+        std::env::set_var("HOME", directory.path());
+        std::env::set_var("LOCALAPPDATA", directory.path());
+        std::env::remove_var("PRAEFECTUS_ALLOW_GLOBAL_INPUT");
+    }
+
+    let denied = run(&["allow-global-input"], "");
+    assert_eq!(denied.status.code(), Some(0));
+    let denied_value: serde_json::Value =
+        serde_json::from_slice(&denied.stdout).expect("JSON success envelope");
+    assert_eq!(denied_value["ok"], true);
+    assert_eq!(denied_value["data"]["allowed"], false);
+    assert_eq!(denied_value["data"]["persisted"], false);
+
+    let allowed = run(&["allow-global-input", "allow"], "");
+    assert_eq!(allowed.status.code(), Some(0));
+    let allowed_value: serde_json::Value =
+        serde_json::from_slice(&allowed.stdout).expect("JSON success envelope");
+    assert_eq!(allowed_value["ok"], true);
+    assert_eq!(allowed_value["data"]["allowed"], true);
+    assert_eq!(allowed_value["data"]["persisted"], true);
+
+    let restored = run(&["allow-global-input", "deny"], "");
+    assert_eq!(restored.status.code(), Some(0));
+    let restored_value: serde_json::Value =
+        serde_json::from_slice(&restored.stdout).expect("JSON success envelope");
+    assert_eq!(restored_value["ok"], true);
+    assert_eq!(restored_value["data"]["allowed"], false);
+    assert_eq!(restored_value["data"]["persisted"], false);
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_local {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+    }
 }
 
 #[test]

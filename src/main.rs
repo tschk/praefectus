@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use praefectus::{
     CancellationToken, DenyAuthority, Engine, NativeExecutor, SurfaceRef, default_ledger_path,
+    global_input_allowance, persist_global_input_allowance,
 };
 use serde::Serialize;
 
@@ -82,7 +83,7 @@ impl<'a> ErrorEnvelope<'a> {
 fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
     let Some(command) = arguments.first().map(String::as_str) else {
         return Err(usage(
-            "usage: praefectus execute|status|capabilities|surfaces|observe|observe-surface",
+            "usage: praefectus execute|status|capabilities|surfaces|observe|observe-surface|allow-global-input",
         ));
     };
     let (ledger, positional) = parse_arguments(&arguments)?;
@@ -95,6 +96,7 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
         "observe" => run_observe(positional),
         "surfaces" => run_surfaces(positional),
         "observe-surface" => run_observe_surface(positional),
+        "allow-global-input" => run_allow_global_input(positional),
         _ => Err(usage(format!("unknown command: {command}"))),
     }
 }
@@ -191,6 +193,29 @@ fn run_observe_surface(positional: Vec<&str>) -> Result<(serde_json::Value, u8),
         )?,
         0,
     ))
+}
+
+fn run_allow_global_input(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    match positional.as_slice() {
+        [] => Ok((serialize(global_input_allowance())?, 0)),
+        ["allow"] => Ok((
+            serialize(
+                persist_global_input_allowance(true)
+                    .map_err(|error| protocol("protocol_error", error))?,
+            )?,
+            0,
+        )),
+        ["deny"] => Ok((
+            serialize(
+                persist_global_input_allowance(false)
+                    .map_err(|error| protocol("protocol_error", error))?,
+            )?,
+            0,
+        )),
+        _ => Err(usage(
+            "allow-global-input accepts no arguments, allow, or deny",
+        )),
+    }
 }
 
 fn now_ms() -> i64 {
