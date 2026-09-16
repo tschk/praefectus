@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use praefectus::{
     CancellationToken, DenyAuthority, Engine, NativeExecutor, SurfaceRef, default_ledger_path,
+    global_input_allowance, persist_no_yolo,
 };
 use serde::Serialize;
 
@@ -80,9 +81,23 @@ impl<'a> ErrorEnvelope<'a> {
 }
 
 fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
+    let mut arguments = arguments;
+    let mut no_yolo = false;
+    while arguments
+        .first()
+        .is_some_and(|argument| argument.starts_with('-'))
+    {
+        match arguments.remove(0).as_str() {
+            "--no-yolo" => no_yolo = true,
+            other => return Err(usage(format!("unknown option: {other}"))),
+        }
+    }
+    if no_yolo {
+        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
+    }
     let Some(command) = arguments.first().map(String::as_str) else {
         return Err(usage(
-            "usage: praefectus execute|status|capabilities|surfaces|observe|observe-surface",
+            "usage: praefectus [--no-yolo] execute|status|capabilities|surfaces|observe|observe-surface|allow-global-input",
         ));
     };
     let (ledger, positional) = parse_arguments(&arguments)?;
@@ -95,6 +110,7 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
         "observe" => run_observe(positional),
         "surfaces" => run_surfaces(positional),
         "observe-surface" => run_observe_surface(positional),
+        "allow-global-input" => run_allow_global_input(positional),
         _ => Err(usage(format!("unknown command: {command}"))),
     }
 }
@@ -193,6 +209,23 @@ fn run_observe_surface(positional: Vec<&str>) -> Result<(serde_json::Value, u8),
     ))
 }
 
+fn run_allow_global_input(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    match positional.as_slice() {
+        [] => Ok((serialize(global_input_allowance())?, 0)),
+        ["allow"] => Ok((
+            serialize(persist_no_yolo(false).map_err(|error| protocol("protocol_error", error))?)?,
+            0,
+        )),
+        ["deny"] | ["--no-yolo"] => Ok((
+            serialize(persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?)?,
+            0,
+        )),
+        _ => Err(usage(
+            "allow-global-input accepts no arguments, allow, deny, or --no-yolo",
+        )),
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -207,6 +240,7 @@ fn serialize(value: impl Serialize) -> Result<serde_json::Value, CliError> {
 fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliError> {
     let mut values = Vec::new();
     let mut ledger = None;
+    let mut no_yolo = false;
     let mut index = 1;
     while index < arguments.len() {
         if arguments[index] == "--ledger" {
@@ -219,12 +253,18 @@ fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliErro
                 .ok_or_else(|| usage("--ledger requires a path"))?;
             ledger = Some(PathBuf::from(path));
             index += 2;
+        } else if arguments[index] == "--no-yolo" {
+            no_yolo = true;
+            index += 1;
         } else if arguments[index].starts_with('-') {
             return Err(usage(format!("unknown option: {}", arguments[index])));
         } else {
             values.push(arguments[index].as_str());
             index += 1;
         }
+    }
+    if no_yolo {
+        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
     }
     Ok((ledger.unwrap_or_else(default_ledger_path), values))
 }
@@ -323,5 +363,39 @@ mod tests {
         let arguments = args(&["command", "--unknown"]);
         let err = parse_arguments(&arguments).err().unwrap();
         assert_eq!(err.message, "unknown option: --unknown");
+    }
+
+    #[test]
+    fn parse_arguments_accepts_no_yolo() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_local = std::env::var_os("LOCALAPPDATA");
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", directory.path());
+            std::env::set_var("HOME", directory.path());
+            std::env::set_var("LOCALAPPDATA", directory.path());
+            std::env::remove_var("PRAEFECTUS_ALLOW_GLOBAL_INPUT");
+            std::env::remove_var("PRAEFECTUS_NO_YOLO");
+        }
+        let arguments = args(&["capabilities", "--no-yolo"]);
+        let (_, values) = parse_arguments(&arguments).ok().unwrap();
+        assert!(values.is_empty());
+        assert!(!praefectus::global_input_allowed());
+        assert!(praefectus::global_input_allowance().persisted);
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match previous_local {
+                Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+        }
     }
 }

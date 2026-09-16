@@ -1098,11 +1098,109 @@ fn secure_command(name: &str) -> Result<Command, NativeError> {
     Err(NativeError)
 }
 
-pub(crate) fn global_input_allowed() -> bool {
-    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ALLOWED.get_or_init(|| {
-        std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_ok_and(|value| value == "1")
-    })
+fn global_input_env_restriction() -> Option<bool> {
+    match std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT") {
+        Ok(value) if value == "1" => return Some(false),
+        Ok(value) if value == "0" => return Some(true),
+        _ => {}
+    }
+    match std::env::var("PRAEFECTUS_NO_YOLO") {
+        Ok(value) if value == "1" => Some(true),
+        Ok(value) if value == "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn no_yolo_path() -> PathBuf {
+    observation_root(|key| std::env::var_os(key))
+        .join("praefectus")
+        .join("no-yolo")
+}
+
+fn restriction_file_is_present(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => !metadata.file_type().is_symlink() && metadata.is_file(),
+        Err(_) => false,
+    }
+}
+
+fn persistent_no_yolo() -> bool {
+    let path = no_yolo_path();
+    #[cfg(windows)]
+    let _path_guard = match windows_acl::lock_path(&path) {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    restriction_file_is_present(&path)
+}
+
+pub fn global_input_allowed() -> bool {
+    !match global_input_env_restriction() {
+        Some(restricted) => restricted,
+        None => persistent_no_yolo(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GlobalInputAllowance {
+    pub allowed: bool,
+    pub no_yolo: bool,
+    pub persisted: bool,
+    pub environment: bool,
+}
+
+pub fn global_input_allowance() -> GlobalInputAllowance {
+    let environment = global_input_env_restriction() == Some(true);
+    let persisted = persistent_no_yolo();
+    GlobalInputAllowance {
+        allowed: global_input_allowed(),
+        no_yolo: !global_input_allowed(),
+        persisted,
+        environment,
+    }
+}
+
+pub fn persist_no_yolo(restricted: bool) -> Result<GlobalInputAllowance, ProtocolError> {
+    persist_no_yolo_at(&no_yolo_path(), restricted)?;
+    Ok(global_input_allowance())
+}
+
+fn persist_no_yolo_at(path: &Path, restricted: bool) -> Result<(), ProtocolError> {
+    if restricted {
+        if let Some(parent) = path.parent() {
+            ensure_directory(parent, false)?;
+        }
+        #[cfg(windows)]
+        let _path_guard = windows_acl::lock_path(path)?;
+        match private_open_options()
+            .create_new(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => {
+                restrict_file(&file)?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !restriction_file_is_present(path) {
+                    return Err(ProtocolError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Praefectus state directory is not private",
+                    )));
+                }
+                let file = private_open_options().read(true).write(true).open(path)?;
+                restrict_file(&file)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        sync_parent(path)?;
+    } else if restriction_file_is_present(path) {
+        #[cfg(windows)]
+        let _path_guard = windows_acl::lock_path(path)?;
+        std::fs::remove_file(path)?;
+        sync_parent(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -4734,6 +4832,7 @@ impl NativeExecutor {
                     ("atspi2".to_string(), false),
                     ("coordinate_capture".to_string(), false),
                     ("display_geometry".to_string(), false),
+                    ("global_input".to_string(), global_input_allowed()),
                     ("private_state".to_string(), false),
                     ("screen_recording".to_string(), false),
                 ])
@@ -8029,9 +8128,30 @@ mod tests {
     }
 
     #[test]
-    fn global_input_is_refused_unless_a_host_opts_in() {
+    fn global_input_is_allowed_unless_no_yolo() {
         assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
-        assert!(!super::global_input_allowed());
+        assert!(std::env::var("PRAEFECTUS_NO_YOLO").is_err());
+        assert!(!super::persistent_no_yolo());
+        assert!(super::global_input_allowed());
+    }
+
+    #[test]
+    fn persist_no_yolo_creates_a_regular_private_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("no-yolo");
+        super::persist_no_yolo_at(&path, true).expect("persist restriction");
+        let metadata = std::fs::symlink_metadata(&path).expect("restriction metadata");
+        assert!(metadata.is_file());
+        assert!(!metadata.file_type().is_symlink());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        super::persist_no_yolo_at(&path, true).expect("idempotent persist");
+        super::persist_no_yolo_at(&path, false).expect("clear restriction");
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        super::persist_no_yolo_at(&path, false).expect("idempotent clear");
     }
 
     #[test]
