@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use praefectus::{
     CancellationToken, DenyAuthority, Engine, NativeExecutor, SurfaceRef, default_ledger_path,
+    global_input_allowance, persist_no_yolo,
 };
 use serde::Serialize;
 
@@ -80,12 +81,29 @@ impl<'a> ErrorEnvelope<'a> {
 }
 
 fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
+    let mut arguments = arguments;
+    let mut no_yolo = false;
+    while arguments
+        .first()
+        .is_some_and(|argument| argument.starts_with('-'))
+    {
+        match arguments.remove(0).as_str() {
+            "--no-yolo" => no_yolo = true,
+            other => return Err(usage(format!("unknown option: {other}"))),
+        }
+    }
+    if no_yolo {
+        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
+    }
     let Some(command) = arguments.first().map(String::as_str) else {
         return Err(usage(
-            "usage: praefectus execute|status|capabilities|surfaces|observe|observe-surface",
+            "usage: praefectus [--no-yolo] execute|status|capabilities|surfaces|observe|observe-surface|allow-global-input",
         ));
     };
-    let (ledger, positional) = parse_arguments(&arguments)?;
+    let (ledger, positional, parsed_no_yolo) = parse_arguments(&arguments)?;
+    if parsed_no_yolo {
+        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
+    }
     match command {
         "execute" => Err(usage(
             "execute is library-only and requires a host-injected trusted AuthorityVerifier",
@@ -95,6 +113,7 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
         "observe" => run_observe(positional),
         "surfaces" => run_surfaces(positional),
         "observe-surface" => run_observe_surface(positional),
+        "allow-global-input" => run_allow_global_input(positional),
         _ => Err(usage(format!("unknown command: {command}"))),
     }
 }
@@ -193,6 +212,23 @@ fn run_observe_surface(positional: Vec<&str>) -> Result<(serde_json::Value, u8),
     ))
 }
 
+fn run_allow_global_input(positional: Vec<&str>) -> Result<(serde_json::Value, u8), CliError> {
+    match positional.as_slice() {
+        [] => Ok((serialize(global_input_allowance())?, 0)),
+        ["allow"] => Ok((
+            serialize(persist_no_yolo(false).map_err(|error| protocol("protocol_error", error))?)?,
+            0,
+        )),
+        ["deny"] | ["--no-yolo"] => Ok((
+            serialize(persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?)?,
+            0,
+        )),
+        _ => Err(usage(
+            "allow-global-input accepts no arguments, allow, deny, or --no-yolo",
+        )),
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -204,9 +240,10 @@ fn serialize(value: impl Serialize) -> Result<serde_json::Value, CliError> {
     serde_json::to_value(value).map_err(|error| protocol("serialization_error", error))
 }
 
-fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliError> {
+fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>, bool), CliError> {
     let mut values = Vec::new();
     let mut ledger = None;
+    let mut no_yolo = false;
     let mut index = 1;
     while index < arguments.len() {
         if arguments[index] == "--ledger" {
@@ -219,6 +256,9 @@ fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliErro
                 .ok_or_else(|| usage("--ledger requires a path"))?;
             ledger = Some(PathBuf::from(path));
             index += 2;
+        } else if arguments[index] == "--no-yolo" {
+            no_yolo = true;
+            index += 1;
         } else if arguments[index].starts_with('-') {
             return Err(usage(format!("unknown option: {}", arguments[index])));
         } else {
@@ -226,7 +266,7 @@ fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliErro
             index += 1;
         }
     }
-    Ok((ledger.unwrap_or_else(default_ledger_path), values))
+    Ok((ledger.unwrap_or_else(default_ledger_path), values, no_yolo))
 }
 
 fn usage(message: impl Into<String>) -> CliError {
@@ -256,25 +296,28 @@ mod tests {
     #[test]
     fn parse_arguments_empty() {
         let arguments = args(&["command"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, default_ledger_path());
         assert!(values.is_empty());
+        assert!(!no_yolo);
     }
 
     #[test]
     fn parse_arguments_positional() {
         let arguments = args(&["command", "value1", "value2"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, default_ledger_path());
         assert_eq!(values, vec!["value1", "value2"]);
+        assert!(!no_yolo);
     }
 
     #[test]
     fn parse_arguments_ledger() {
         let arguments = args(&["command", "--ledger", "custom/path.json"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, PathBuf::from("custom/path.json"));
         assert!(values.is_empty());
+        assert!(!no_yolo);
     }
 
     #[test]
@@ -286,9 +329,10 @@ mod tests {
             "custom/path.json",
             "value2",
         ]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, PathBuf::from("custom/path.json"));
         assert_eq!(values, vec!["value1", "value2"]);
+        assert!(!no_yolo);
     }
 
     #[test]
@@ -323,5 +367,13 @@ mod tests {
         let arguments = args(&["command", "--unknown"]);
         let err = parse_arguments(&arguments).err().unwrap();
         assert_eq!(err.message, "unknown option: --unknown");
+    }
+
+    #[test]
+    fn parse_arguments_accepts_no_yolo() {
+        let arguments = args(&["capabilities", "--no-yolo"]);
+        let (_, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
+        assert!(values.is_empty());
+        assert!(no_yolo);
     }
 }

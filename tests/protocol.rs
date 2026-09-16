@@ -1043,9 +1043,8 @@ fn native_executor_routes_coordinate_effects() {
             i64::MAX,
         )
         .expect_err("unverifiable coordinate effect");
-    let global_input_enabled =
-        std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_ok_and(|value| value == "1");
-    if move_available && !global_input_enabled && cfg!(target_os = "macos") {
+    let global_input_restricted = !praefectus::global_input_allowed();
+    if move_available && global_input_restricted && cfg!(target_os = "macos") {
         assert_eq!(error.effect, EffectKnowledge::NoEffect);
         assert!(matches!(error.code, FailureCode::InvalidRequest));
     } else if move_available {

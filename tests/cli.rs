@@ -2,13 +2,31 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn run(arguments: &[&str], stdin: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_praefectus"))
+    run_with_env(arguments, stdin, &[])
+}
+
+fn run_with_env(
+    arguments: &[&str],
+    stdin: &str,
+    env: &[(&str, Option<&std::path::Path>)],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_praefectus"));
+    command
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn CLI");
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        match value {
+            Some(path) => {
+                command.env(key, path);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+    let mut child = command.spawn().expect("spawn CLI");
     if let Some(mut child_stdin) = child.stdin.take() {
         let _ = child_stdin.write_all(stdin.as_bytes());
     }
@@ -68,6 +86,10 @@ fn capabilities_and_status_reject_extra_or_unknown_arguments() {
             &["observe-surface", "one", "two"][..],
             "observe-surface accepts exactly one surface ID",
         ),
+        (
+            &["allow-global-input", "extra"][..],
+            "allow-global-input accepts no arguments, allow, deny, or --no-yolo",
+        ),
     ] {
         let output = run(arguments, "");
         assert_eq!(output.status.code(), Some(2));
@@ -88,6 +110,44 @@ fn success_uses_the_stable_json_envelope() {
     assert_eq!(value["ok"], true);
     assert!(value["data"].is_object());
     assert_eq!(value["data"]["session_isolation"], "shared_desktop");
+    assert_eq!(value["data"]["permissions"]["global_input"], true);
+}
+
+#[test]
+fn no_yolo_persists_global_input_restriction() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let env = [
+        ("XDG_STATE_HOME", Some(directory.path())),
+        ("HOME", Some(directory.path())),
+        ("LOCALAPPDATA", Some(directory.path())),
+        ("PRAEFECTUS_ALLOW_GLOBAL_INPUT", None),
+        ("PRAEFECTUS_NO_YOLO", None),
+    ];
+
+    let unrestricted = run_with_env(&["allow-global-input"], "", &env);
+    assert_eq!(unrestricted.status.code(), Some(0));
+    let unrestricted_value: serde_json::Value =
+        serde_json::from_slice(&unrestricted.stdout).expect("JSON success envelope");
+    assert_eq!(unrestricted_value["ok"], true);
+    assert_eq!(unrestricted_value["data"]["allowed"], true);
+    assert_eq!(unrestricted_value["data"]["no_yolo"], false);
+
+    let restricted = run_with_env(&["allow-global-input", "--no-yolo"], "", &env);
+    assert_eq!(restricted.status.code(), Some(0));
+    let restricted_value: serde_json::Value =
+        serde_json::from_slice(&restricted.stdout).expect("JSON success envelope");
+    assert_eq!(restricted_value["ok"], true);
+    assert_eq!(restricted_value["data"]["allowed"], false);
+    assert_eq!(restricted_value["data"]["no_yolo"], true);
+    assert_eq!(restricted_value["data"]["persisted"], true);
+
+    let restored = run_with_env(&["allow-global-input", "allow"], "", &env);
+    assert_eq!(restored.status.code(), Some(0));
+    let restored_value: serde_json::Value =
+        serde_json::from_slice(&restored.stdout).expect("JSON success envelope");
+    assert_eq!(restored_value["ok"], true);
+    assert_eq!(restored_value["data"]["allowed"], true);
+    assert_eq!(restored_value["data"]["persisted"], false);
 }
 
 #[test]
