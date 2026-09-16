@@ -1168,7 +1168,10 @@ pub fn persist_no_yolo(restricted: bool) -> Result<GlobalInputAllowance, Protoco
 fn persist_no_yolo_at(path: &Path, restricted: bool) -> Result<(), ProtocolError> {
     if restricted {
         if let Some(parent) = path.parent() {
-            ensure_directory(parent, false)?;
+            match std::fs::symlink_metadata(parent) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                _ => ensure_directory(parent, false)?,
+            }
         }
         #[cfg(windows)]
         let _path_guard = windows_acl::lock_path(path)?;
