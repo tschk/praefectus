@@ -59,7 +59,7 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-07-21. This 
 - `foreign-types-macros` 0.2.3 — MIT/Apache-2.0
 - `foreign-types-shared` 0.3.1 — MIT/Apache-2.0
 - `foreign-types` 0.5.0 — MIT/Apache-2.0
-- `fs2` 0.4.3 — MIT/Apache-2.0
+- `fs4` 1.1.0 — MIT OR Apache-2.0
 - `futures-core` 0.3.33 — MIT OR Apache-2.0
 - `futures-io` 0.3.33 — MIT OR Apache-2.0
 - `futures-lite` 2.6.1 — Apache-2.0 OR MIT
