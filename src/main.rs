@@ -100,7 +100,10 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
             "usage: praefectus [--no-yolo] execute|status|capabilities|surfaces|observe|observe-surface|allow-global-input",
         ));
     };
-    let (ledger, positional) = parse_arguments(&arguments)?;
+    let (ledger, positional, parsed_no_yolo) = parse_arguments(&arguments)?;
+    if parsed_no_yolo {
+        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
+    }
     match command {
         "execute" => Err(usage(
             "execute is library-only and requires a host-injected trusted AuthorityVerifier",
@@ -237,7 +240,7 @@ fn serialize(value: impl Serialize) -> Result<serde_json::Value, CliError> {
     serde_json::to_value(value).map_err(|error| protocol("serialization_error", error))
 }
 
-fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliError> {
+fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>, bool), CliError> {
     let mut values = Vec::new();
     let mut ledger = None;
     let mut no_yolo = false;
@@ -263,10 +266,7 @@ fn parse_arguments(arguments: &[String]) -> Result<(PathBuf, Vec<&str>), CliErro
             index += 1;
         }
     }
-    if no_yolo {
-        persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
-    }
-    Ok((ledger.unwrap_or_else(default_ledger_path), values))
+    Ok((ledger.unwrap_or_else(default_ledger_path), values, no_yolo))
 }
 
 fn usage(message: impl Into<String>) -> CliError {
@@ -296,25 +296,28 @@ mod tests {
     #[test]
     fn parse_arguments_empty() {
         let arguments = args(&["command"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, default_ledger_path());
         assert!(values.is_empty());
+        assert!(!no_yolo);
     }
 
     #[test]
     fn parse_arguments_positional() {
         let arguments = args(&["command", "value1", "value2"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, default_ledger_path());
         assert_eq!(values, vec!["value1", "value2"]);
+        assert!(!no_yolo);
     }
 
     #[test]
     fn parse_arguments_ledger() {
         let arguments = args(&["command", "--ledger", "custom/path.json"]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, PathBuf::from("custom/path.json"));
         assert!(values.is_empty());
+        assert!(!no_yolo);
     }
 
     #[test]
@@ -326,9 +329,10 @@ mod tests {
             "custom/path.json",
             "value2",
         ]);
-        let (ledger, values) = parse_arguments(&arguments).ok().unwrap();
+        let (ledger, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert_eq!(ledger, PathBuf::from("custom/path.json"));
         assert_eq!(values, vec!["value1", "value2"]);
+        assert!(!no_yolo);
     }
 
     #[test]
@@ -367,35 +371,9 @@ mod tests {
 
     #[test]
     fn parse_arguments_accepts_no_yolo() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let previous = std::env::var_os("XDG_STATE_HOME");
-        let previous_home = std::env::var_os("HOME");
-        let previous_local = std::env::var_os("LOCALAPPDATA");
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", directory.path());
-            std::env::set_var("HOME", directory.path());
-            std::env::set_var("LOCALAPPDATA", directory.path());
-            std::env::remove_var("PRAEFECTUS_ALLOW_GLOBAL_INPUT");
-            std::env::remove_var("PRAEFECTUS_NO_YOLO");
-        }
         let arguments = args(&["capabilities", "--no-yolo"]);
-        let (_, values) = parse_arguments(&arguments).ok().unwrap();
+        let (_, values, no_yolo) = parse_arguments(&arguments).ok().unwrap();
         assert!(values.is_empty());
-        assert!(!praefectus::global_input_allowed());
-        assert!(praefectus::global_input_allowance().persisted);
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-                None => std::env::remove_var("XDG_STATE_HOME"),
-            }
-            match previous_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match previous_local {
-                Some(value) => std::env::set_var("LOCALAPPDATA", value),
-                None => std::env::remove_var("LOCALAPPDATA"),
-            }
-        }
+        assert!(no_yolo);
     }
 }
