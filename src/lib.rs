@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1083,11 +1082,18 @@ impl Drop for MacDeliveryPidGuard {
 
 #[cfg(target_os = "macos")]
 fn secure_command(name: &str) -> Result<Command, NativeError> {
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        return Err(NativeError);
+    }
     for directory in ["/usr/bin", "/usr/sbin", "/bin", "/sbin"] {
         let path = std::path::PathBuf::from(directory).join(name);
-        if path.is_file() {
-            return Ok(Command::new(path));
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
         }
+        return Ok(Command::new(path));
     }
     Err(NativeError)
 }
@@ -6708,7 +6714,7 @@ fn acquire_ledger_lock(path: &Path) -> Result<LedgerLock, ProtocolError> {
     if !existed {
         sync_parent(path)?;
     }
-    file.lock_exclusive()?;
+    fs4::FileExt::lock(&file)?;
     Ok(LedgerLock(file))
 }
 
@@ -6823,7 +6829,7 @@ struct LedgerLock(File);
 
 impl Drop for LedgerLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        let _ = fs4::FileExt::unlock(&self.0);
     }
 }
 
@@ -7344,15 +7350,35 @@ fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolErr
 }
 
 fn fallback_temp_dir() -> PathBuf {
-    use std::hash::{BuildHasher, Hasher};
+    use std::io::ErrorKind;
     use std::sync::OnceLock;
     static FALLBACK: OnceLock<PathBuf> = OnceLock::new();
     FALLBACK
         .get_or_init(|| {
-            let random_id = std::collections::hash_map::RandomState::new()
-                .build_hasher()
-                .finish();
-            std::env::temp_dir().join(format!("praefectus-{random_id:016x}"))
+            loop {
+                let mut random = [0u8; 16];
+                getrandom::fill(&mut random)
+                    .expect("secure entropy for Praefectus fallback directory");
+                let path = std::env::temp_dir().join(format!("praefectus-{}", hex::encode(random)));
+                let created = {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        std::fs::DirBuilder::new().mode(0o700).create(&path)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        std::fs::create_dir(&path)
+                    }
+                };
+                match created {
+                    Ok(()) => break path,
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        panic!("failed to create Praefectus fallback directory: {error}")
+                    }
+                }
+            }
         })
         .clone()
 }
@@ -8346,6 +8372,17 @@ mod tests {
             fallback
                 .join("praefectus")
                 .join("praefectus-operations.jsonl")
+        );
+        let metadata = std::fs::symlink_metadata(&fallback).expect("fallback metadata");
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(
+            fallback
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("praefectus-") && name.len() == 11 + 32)
         );
     }
 

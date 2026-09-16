@@ -7,7 +7,6 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
-use fs2::FileExt;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL, LocalFree, WIN32_ERROR,
 };
@@ -211,7 +210,7 @@ pub(crate) fn initialization_lock() -> io::Result<InitializationGuard> {
         .write(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0);
     let file = options.open(local.join(".praefectus-initialization.lock"))?;
-    file.lock_exclusive()?;
+    fs4::FileExt::lock(&file)?;
     restrict_file(&file)?;
     Ok(InitializationGuard {
         _path: path,

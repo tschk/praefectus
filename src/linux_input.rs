@@ -18,12 +18,18 @@ const PORTAL_RD_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
 static PORTAL_SESSION: Mutex<Option<(String, zbus::blocking::Connection)>> = Mutex::new(None);
 
 fn secure_command(name: &str) -> Result<Command, NativeError> {
-    let safe_paths = ["/usr/bin", "/bin", "/usr/local/bin"];
-    for dir in safe_paths {
-        let full_path = std::path::PathBuf::from(dir).join(name);
-        if full_path.is_file() {
-            return Ok(Command::new(full_path));
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        return Err(NativeError);
+    }
+    for directory in ["/usr/bin", "/usr/sbin", "/bin", "/sbin"] {
+        let path = std::path::PathBuf::from(directory).join(name);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
         }
+        return Ok(Command::new(path));
     }
     Err(NativeError)
 }
@@ -968,6 +974,23 @@ mod tests {
     fn session_detection_never_advertises_both() {
         let s = session_type();
         assert!(!(s == "wayland" && s == "x11"));
+    }
+
+    #[test]
+    fn secure_command_rejects_path_injection_and_usr_local() {
+        assert!(secure_command("../bin/sh").is_err());
+        assert!(secure_command("/usr/bin/true").is_err());
+        assert!(secure_command("true\0x").is_err());
+        if let Ok(command) = secure_command("true") {
+            let program = command.get_program().to_string_lossy();
+            assert!(
+                program == "/usr/bin/true"
+                    || program == "/bin/true"
+                    || program == "/usr/sbin/true"
+                    || program == "/sbin/true"
+            );
+            assert!(!program.contains("/usr/local/"));
+        }
     }
 
     #[test]
