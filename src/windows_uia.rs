@@ -679,10 +679,10 @@ fn snapshot_window(
             tag: semantic_tag(index)
                 .map_err(|_| ProtocolError::Executor("semantic snapshot failed".to_string()))?,
             element_id: element_id.clone(),
-            parent_id: parent_id.clone(),
+            parent_id,
             fingerprint_hash: fingerprint_hash.clone(),
-            role: state.role.clone(),
-            name: state.name.clone(),
+            role: state.role,
+            name: state.name,
             bounds: Some(Rect {
                 x: state.bounds.x,
                 y: state.bounds.y,
