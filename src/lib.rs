@@ -8058,14 +8058,68 @@ mod tests {
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
         NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
         ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-        VerificationPolicy, canonical_authority_bytes, default_ledger_path,
-        element_fingerprint_hash, native_snapshot_id, target_capture_bounds,
+        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
+        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
         validate_matching_live_element, verify,
     };
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
+
+    #[test]
+    fn test_canonicalize_json() {
+        let mut value = json!({
+            "b": 2,
+            "a": 1,
+            "c": {
+                "z": 26,
+                "y": 25,
+            },
+            "d": [
+                {
+                    "f": 6,
+                    "e": 5,
+                }
+            ]
+        });
+
+        canonicalize_json(&mut value);
+
+        // In serde_json, comparing values directly checks equality regardless of order,
+        // so we should compare the string serialization.
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            r#"{"a":1,"b":2,"c":{"y":25,"z":26},"d":[{"e":5,"f":6}]}"#
+        );
+    }
+
+    #[test]
+    fn test_hash_serializable() {
+        // Create two JSON values that are identical except for key ordering
+        let value1 = json!({
+            "a": 1,
+            "b": 2
+        });
+        let value2 = json!({
+            "b": 2,
+            "a": 1
+        });
+
+        let hash1 = hash_serializable(&value1).unwrap();
+        let hash2 = hash_serializable(&value2).unwrap();
+
+        assert_eq!(hash1, hash2);
+
+        // Also verify it doesn't just return the same hash for everything
+        let value3 = json!({
+            "a": 1,
+            "b": 3
+        });
+        let hash3 = hash_serializable(&value3).unwrap();
+        assert_ne!(hash1, hash3);
+    }
 
     #[test]
     fn test_cancellation_token() {
