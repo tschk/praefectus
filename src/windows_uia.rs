@@ -625,8 +625,8 @@ fn snapshot_window(
         };
         check_observation_boundary(cancellation, deadline_at_ms)?;
         if state.process_id != process_id
-            || state.process_generation != process_generation
-            || state.window_id != window_id
+            || state.process_generation != descriptor.process_generation
+            || state.window_id != descriptor.window_id
         {
             truncated |= enqueue_children(
                 &walker,
