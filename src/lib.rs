@@ -8177,7 +8177,8 @@ mod tests {
     #[test]
     fn test_action_delivery_route() {
         use super::{
-            Action, ApplicationOperation, DeliveryRoute, WindowOperation, action_delivery_route,
+            Action, ApplicationOperation, DeliveryRoute, Direction, MouseButton, TargetRef,
+            WindowOperation, action_delivery_route,
         };
         use std::path::PathBuf;
 
@@ -8239,6 +8240,62 @@ mod tests {
                 text: "test".to_string()
             }),
             DeliveryRoute::Pointer
+        );
+
+        // Missing variants mapped to Pointer (via catch-all _)
+        assert_eq!(
+            action_delivery_route(&Action::Click {
+                button: MouseButton::Left,
+                count: 1,
+                allow_coordinate_fallback: true
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Press {
+                key: "Enter".to_string(),
+                count: 1,
+                delay_ms: None
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Paste {
+                text: "test".to_string()
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Hotkey {
+                keys: vec!["Ctrl".to_string(), "C".to_string()]
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
+        assert_eq!(
+            action_delivery_route(&Action::Drag {
+                to: TargetRef::None,
+                button: MouseButton::Left
+            }),
+            DeliveryRoute::Pointer
+        );
+
+        // Missing variant mapped to Unknown
+        assert_eq!(
+            action_delivery_route(&Action::Scroll {
+                direction: Direction::Down,
+                amount: 1
+            }),
+            DeliveryRoute::Unknown
         );
     }
 
