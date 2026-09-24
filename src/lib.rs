@@ -4057,10 +4057,11 @@ pub struct OutcomeKey {
 }
 
 /// Host answer to a dispatch request for one [`OutcomeKey`].
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum LedgerDecision {
     Dispatch,
-    Recorded(Box<Terminal>),
+    Recorded(Terminal),
     Interrupted,
 }
 
@@ -4115,7 +4116,7 @@ impl OutcomeLedger for MemoryOutcomeLedger {
             .lock()
             .map_err(|_| ProtocolError::Ledger("outcome ledger is poisoned".to_string()))?;
         match entries.get(key) {
-            Some(Some(terminal)) => Ok(LedgerDecision::Recorded(Box::new(terminal.clone()))),
+            Some(Some(terminal)) => Ok(LedgerDecision::Recorded(terminal.clone())),
             Some(None) => Ok(LedgerDecision::Interrupted),
             None => {
                 entries.insert(key.clone(), None);
@@ -4336,7 +4337,7 @@ impl<E: Executor> Engine<E> {
                 receipt.delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
                 receipt.interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
                 let terminal = match self.outcomes.begin(&outcome_key)? {
-                    LedgerDecision::Recorded(terminal) => *terminal,
+                    LedgerDecision::Recorded(terminal) => terminal,
                     LedgerDecision::Dispatch | LedgerDecision::Interrupted => {
                         Terminal::OutcomeUnknown {
                             receipt,
@@ -4356,7 +4357,7 @@ impl<E: Executor> Engine<E> {
         match self.outcomes.begin(&outcome_key)? {
             LedgerDecision::Dispatch => {}
             LedgerDecision::Recorded(terminal) => {
-                return self.finish_early(request, &action_hash, *terminal);
+                return self.finish_early(request, &action_hash, terminal);
             }
             LedgerDecision::Interrupted => {
                 let receipt =
