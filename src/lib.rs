@@ -4057,6 +4057,7 @@ pub struct OutcomeKey {
 }
 
 /// Host answer to a dispatch request for one [`OutcomeKey`].
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum LedgerDecision {
     Dispatch,
