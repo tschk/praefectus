@@ -884,7 +884,8 @@ impl LinuxAtspiBackend {
         ))
         .map_err(semantic_error)?;
         let window_id = window.window_id.clone();
-        let mut queue = VecDeque::from([(window.object.clone(), None, 0_usize)]);
+        let mut queue: VecDeque<(StoredObject, Option<std::rc::Rc<String>>, usize)> =
+            VecDeque::from([(window.object.clone(), None, 0_usize)]);
         let mut seen = BTreeSet::new();
         let mut elements = Vec::new();
         let mut targets = BTreeMap::new();
@@ -914,17 +915,17 @@ impl LinuxAtspiBackend {
             check_observation_boundary(cancellation, deadline_at_ms)?;
             let second = self.sample(&object, cancellation, deadline_at_ms, false)?;
             let stable = first.identity == second.identity && first.value_hash == second.value_hash;
-            let element_id =
-                opaque_element_id(&observation_id, &backend_id).map_err(semantic_error)?;
+            let element_id = std::rc::Rc::new(
+                opaque_element_id(&observation_id, &backend_id).map_err(semantic_error)?,
+            );
             let fingerprint_hash =
                 semantic_fingerprint(&second.identity).map_err(semantic_error)?;
             let mut actionability = second.actionability;
             actionability.stable = stable;
-            let invoke_action = second.invoke_action.clone();
             elements.push(SemanticElement {
                 tag: semantic_tag(elements.len()).map_err(semantic_error)?,
-                element_id: element_id.clone(),
-                parent_id,
+                element_id: (*element_id).clone(),
+                parent_id: parent_id.map(|p: std::rc::Rc<String>| (*p).clone()),
                 fingerprint_hash,
                 role: second.identity.role,
                 name: second.identity.name,
@@ -932,10 +933,10 @@ impl LinuxAtspiBackend {
                 actionability,
             });
             targets.insert(
-                element_id.clone(),
+                (*element_id).clone(),
                 StoredTarget {
                     object: object.clone(),
-                    invoke_action,
+                    invoke_action: second.invoke_action,
                 },
             );
 
@@ -967,7 +968,7 @@ impl LinuxAtspiBackend {
                     cancellation,
                     deadline_at_ms,
                 )?;
-                queue.push_back((child, Some(element_id.clone()), depth + 1));
+                queue.push_back((child, Some(std::rc::Rc::clone(&element_id)), depth + 1));
             }
         }
 
