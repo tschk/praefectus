@@ -8177,7 +8177,8 @@ mod tests {
     #[test]
     fn test_action_delivery_route() {
         use super::{
-            Action, ApplicationOperation, DeliveryRoute, Direction, MouseButton, TargetRef, WindowOperation, action_delivery_route,
+            Action, ApplicationOperation, DeliveryRoute, Direction, MouseButton, TargetRef,
+            WindowOperation, action_delivery_route,
         };
         use std::path::PathBuf;
 
@@ -8279,10 +8280,7 @@ mod tests {
             }),
             DeliveryRoute::Pointer
         );
-        assert_eq!(
-            action_delivery_route(&Action::Move),
-            DeliveryRoute::Pointer
-        );
+        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
         assert_eq!(
             action_delivery_route(&Action::Drag {
                 to: TargetRef::None,
