@@ -8286,10 +8286,7 @@ mod tests {
             }),
             DeliveryRoute::Unknown
         );
-        assert_eq!(
-            action_delivery_route(&Action::Move),
-            DeliveryRoute::Pointer
-        );
+        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
         assert_eq!(
             action_delivery_route(&Action::Drag {
                 to: super::TargetRef::Coordinates {
