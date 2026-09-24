@@ -8058,9 +8058,9 @@ mod tests {
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
         NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
         ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-        VerificationPolicy, canonical_authority_bytes, canonical_json_bytes, canonicalize_json, default_ledger_path,
-        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        VerificationPolicy, canonical_authority_bytes, canonical_json_bytes, canonicalize_json,
+        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -8103,7 +8103,10 @@ mod tests {
         });
 
         assert_eq!(value1, expected);
-        assert_eq!(serde_json::to_string(&value1).unwrap(), "{\"a\":1,\"b\":2,\"c\":{\"d\":4,\"e\":5},\"f\":[{\"g\":7,\"h\":8}]}");
+        assert_eq!(
+            serde_json::to_string(&value1).unwrap(),
+            "{\"a\":1,\"b\":2,\"c\":{\"d\":4,\"e\":5},\"f\":[{\"g\":7,\"h\":8}]}"
+        );
     }
 
     #[test]
