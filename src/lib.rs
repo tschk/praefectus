@@ -1718,7 +1718,6 @@ impl NativeRuntime {
             {
                 return Err(NativeError);
             }
-            use std::process::Command;
             let status = secure_command("pbcopy")?
                 .stdin(std::process::Stdio::piped())
                 .spawn()
