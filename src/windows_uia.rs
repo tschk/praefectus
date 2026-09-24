@@ -537,9 +537,9 @@ fn snapshot_window(
     let SurfaceRecord { descriptor, window } = record;
     validate_surface_record(&descriptor, window, cancellation, deadline_at_ms)?;
     let process_id = descriptor.process_id;
-    let process_generation = descriptor.process_generation.clone();
-    let window_id = descriptor.window_id.clone();
-    let display_geometry_hash = descriptor.display_geometry_hash.clone();
+    let process_generation = descriptor.process_generation;
+    let window_id = descriptor.window_id;
+    let display_geometry_hash = descriptor.display_geometry_hash;
     check_observation_boundary(cancellation, deadline_at_ms)?;
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     if generation == 0 {
