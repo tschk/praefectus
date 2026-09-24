@@ -537,9 +537,6 @@ fn snapshot_window(
     let SurfaceRecord { descriptor, window } = record;
     validate_surface_record(&descriptor, window, cancellation, deadline_at_ms)?;
     let process_id = descriptor.process_id;
-    let process_generation = descriptor.process_generation;
-    let window_id = descriptor.window_id;
-    let display_geometry_hash = descriptor.display_geometry_hash;
     check_observation_boundary(cancellation, deadline_at_ms)?;
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     if generation == 0 {
@@ -551,9 +548,9 @@ fn snapshot_window(
     let observation_id = semantic_fingerprint(&(
         BACKEND,
         process_id,
-        &process_generation,
-        &window_id,
-        &display_geometry_hash,
+        &descriptor.process_generation,
+        &descriptor.window_id,
+        &descriptor.display_geometry_hash,
         observed_at_ms,
         generation,
     ))
@@ -562,10 +559,10 @@ fn snapshot_window(
         backend: SemanticBackend::Accessibility,
         backend_name: BACKEND.to_string(),
         process_id,
-        process_generation: process_generation.clone(),
-        window_id: window_id.clone(),
+        process_generation: descriptor.process_generation.clone(),
+        window_id: descriptor.window_id.clone(),
         document_id: None,
-        display_geometry_hash,
+        display_geometry_hash: descriptor.display_geometry_hash.clone(),
         host_opt_ins: Vec::new(),
     };
     let provenance_hash = semantic_fingerprint(&(
@@ -742,10 +739,10 @@ fn snapshot_window(
         generation,
         provenance_hash,
         process_id,
-        process_generation,
+        process_generation: descriptor.process_generation,
         surface_id: descriptor.surface.id,
         window_handle: window.0 as i64,
-        window_id,
+        window_id: descriptor.window_id,
         display_geometry_hash: observation.provenance.display_geometry_hash.clone(),
         observed_at_ms,
         expires_at_ms,
