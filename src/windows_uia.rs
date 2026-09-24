@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -201,7 +202,7 @@ struct WindowEnumeration {
     full: bool,
 }
 
-type PendingElement = (IUIAutomationElement, Option<String>, Vec<Vec<i32>>);
+type PendingElement = (IUIAutomationElement, Option<Rc<String>>, Vec<Vec<i32>>);
 
 #[derive(Default)]
 struct RuntimePathBudget {
@@ -593,7 +594,7 @@ fn snapshot_window(
         )
     })?;
     check_observation_boundary(cancellation, deadline_at_ms)?;
-    let mut queue = VecDeque::from([(root, None::<String>, Vec::<Vec<i32>>::new())]);
+    let mut queue = VecDeque::from([(root, None::<Rc<String>>, Vec::<Vec<i32>>::new())]);
     let mut runtime_path_budget = RuntimePathBudget::default();
     runtime_path_budget.charge(&[])?;
     let mut seen = BTreeMap::<Vec<i32>, usize>::new();
@@ -602,7 +603,8 @@ fn snapshot_window(
     let mut truncated = false;
     let mut visited_nodes = 0usize;
 
-    while let Some((element, parent_id, runtime_path)) = queue.pop_front() {
+    while let Some((element, parent_id_rc, runtime_path)) = queue.pop_front() {
+        let parent_id = parent_id_rc.as_deref().map(String::from);
         check_observation_boundary(cancellation, deadline_at_ms)?;
         if visited_nodes >= MAX_SEMANTIC_ELEMENTS || elements.len() >= MAX_SEMANTIC_ELEMENTS {
             truncated = true;
@@ -670,6 +672,7 @@ fn snapshot_window(
         let backend_id = runtime_id_text(&state.runtime_id);
         let element_id = opaque_element_id(&observation_id, &backend_id)
             .map_err(|_| ProtocolError::Executor("semantic snapshot failed".to_string()))?;
+        let element_id_rc = Rc::new(element_id.clone());
         let receives_events = state.visible && state.enabled;
         check_observation_boundary(cancellation, deadline_at_ms)?;
         let fingerprint_hash = fingerprint(&state)?;
@@ -679,7 +682,7 @@ fn snapshot_window(
             tag: semantic_tag(index)
                 .map_err(|_| ProtocolError::Executor("semantic snapshot failed".to_string()))?,
             element_id: element_id.clone(),
-            parent_id: parent_id.clone(),
+            parent_id,
             fingerprint_hash: fingerprint_hash.clone(),
             role: state.role.clone(),
             name: state.name.clone(),
@@ -703,7 +706,7 @@ fn snapshot_window(
         let mut entry_path = runtime_path;
         entry_path.push(state.runtime_id.clone());
         entries.push(MappingEntry {
-            element_id: element_id.clone(),
+            element_id,
             runtime_id: state.runtime_id,
             runtime_path: entry_path.clone(),
             fingerprint_hash,
@@ -713,7 +716,7 @@ fn snapshot_window(
         truncated |= enqueue_children(
             &walker,
             &element,
-            Some(element_id),
+            Some(element_id_rc),
             entry_path,
             (&mut runtime_path_budget, &mut queue),
             cancellation,
@@ -1414,7 +1417,7 @@ fn describe_with_window(
 fn enqueue_children(
     walker: &IUIAutomationTreeWalker,
     element: &IUIAutomationElement,
-    parent_id: Option<String>,
+    parent_id: Option<Rc<String>>,
     runtime_path: Vec<Vec<i32>>,
     pending: (&mut RuntimePathBudget, &mut VecDeque<PendingElement>),
     cancellation: &CancellationToken,
