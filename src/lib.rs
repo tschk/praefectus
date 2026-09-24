@@ -8240,6 +8240,70 @@ mod tests {
             }),
             DeliveryRoute::Pointer
         );
+
+        // Missing Actions coverage
+        assert_eq!(
+            action_delivery_route(&Action::Click {
+                button: super::MouseButton::Left,
+                count: 1,
+                allow_coordinate_fallback: false,
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None,
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Press {
+                key: "enter".to_string(),
+                count: 1,
+                delay_ms: None,
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Paste {
+                text: "test".to_string(),
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Hotkey {
+                keys: vec!["ctrl".to_string(), "c".to_string()],
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Scroll {
+                direction: super::Direction::Down,
+                amount: 1,
+            }),
+            DeliveryRoute::Unknown
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Move),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Drag {
+                to: super::TargetRef::Coordinates {
+                    x: 0,
+                    y: 0,
+                    display_id: "".to_string(),
+                    display_geometry_hash: "".to_string(),
+                    snapshot_id: "".to_string(),
+                    snapshot_content_hash: "".to_string(),
+                },
+                button: super::MouseButton::Left,
+            }),
+            DeliveryRoute::Pointer
+        );
     }
 
     #[cfg(target_os = "macos")]
