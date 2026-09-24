@@ -1441,10 +1441,10 @@ fn enqueue_children(
             return Ok(true);
         }
         runtime_path_budget.charge(&runtime_path)?;
-        queue.push_back((child.clone(), parent_id.clone(), runtime_path.clone()));
-        let Some(next) = optional_element(unsafe { walker.GetNextSiblingElement(&child) })
-            .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?
-        else {
+        let next = optional_element(unsafe { walker.GetNextSiblingElement(&child) })
+            .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
+        queue.push_back((child, parent_id.clone(), runtime_path.clone()));
+        let Some(next) = next else {
             return Ok(false);
         };
         check_observation_boundary(cancellation, deadline_at_ms)?;
