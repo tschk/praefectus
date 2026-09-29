@@ -297,6 +297,18 @@ struct FocusIdentity {
     fingerprint_hash: String,
 }
 
+fn get_monitor_info(monitor: HMONITOR) -> Option<MONITORINFO> {
+    let mut information = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut information) }.as_bool() {
+        Some(information)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn available() -> bool {
     Automation::new(MAX_PROVIDER_TIMEOUT_MS)
         .and_then(|uia| unsafe { uia.client.GetRootElement() }.map_err(|_| NativeError))
@@ -311,11 +323,7 @@ pub(crate) fn screens() -> Result<Value, NativeError> {
         state: LPARAM,
     ) -> BOOL {
         let displays = unsafe { &mut *(state.0 as *mut Vec<Value>) };
-        let mut information = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(monitor, &mut information) }.as_bool() {
+        if let Some(information) = get_monitor_info(monitor) {
             let bounds = information.rcMonitor;
             displays.push(serde_json::json!({
                 "display_id": format!("monitor-{:x}", monitor.0 as usize),
