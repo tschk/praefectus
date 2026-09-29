@@ -604,7 +604,6 @@ fn snapshot_window(
     let mut visited_nodes = 0usize;
 
     while let Some((element, parent_id_rc, runtime_path)) = queue.pop_front() {
-        let parent_id = parent_id_rc.as_deref().map(String::from);
         check_observation_boundary(cancellation, deadline_at_ms)?;
         if visited_nodes >= MAX_SEMANTIC_ELEMENTS || elements.len() >= MAX_SEMANTIC_ELEMENTS {
             truncated = true;
@@ -619,7 +618,7 @@ fn snapshot_window(
                 truncated |= enqueue_children(
                     &walker,
                     &element,
-                    parent_id,
+                    parent_id_rc.clone(),
                     runtime_path,
                     (&mut runtime_path_budget, &mut queue),
                     cancellation,
@@ -636,7 +635,7 @@ fn snapshot_window(
             truncated |= enqueue_children(
                 &walker,
                 &element,
-                parent_id,
+                parent_id_rc.clone(),
                 runtime_path,
                 (&mut runtime_path_budget, &mut queue),
                 cancellation,
@@ -650,7 +649,7 @@ fn snapshot_window(
             truncated |= enqueue_children(
                 &walker,
                 &element,
-                parent_id,
+                parent_id_rc.clone(),
                 runtime_path,
                 (&mut runtime_path_budget, &mut queue),
                 cancellation,
@@ -682,7 +681,7 @@ fn snapshot_window(
             tag: semantic_tag(index)
                 .map_err(|_| ProtocolError::Executor("semantic snapshot failed".to_string()))?,
             element_id: element_id.clone(),
-            parent_id,
+            parent_id: parent_id_rc.as_deref().map(String::from),
             fingerprint_hash: fingerprint_hash.clone(),
             role: state.role.clone(),
             name: state.name.clone(),
