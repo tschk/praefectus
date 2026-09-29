@@ -298,6 +298,18 @@ struct FocusIdentity {
     fingerprint_hash: String,
 }
 
+fn get_monitor_info(monitor: HMONITOR) -> Option<MONITORINFO> {
+    let mut information = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut information) }.as_bool() {
+        Some(information)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn available() -> bool {
     Automation::new(MAX_PROVIDER_TIMEOUT_MS)
         .and_then(|uia| unsafe { uia.client.GetRootElement() }.map_err(|_| NativeError))
@@ -312,11 +324,7 @@ pub(crate) fn screens() -> Result<Value, NativeError> {
         state: LPARAM,
     ) -> BOOL {
         let displays = unsafe { &mut *(state.0 as *mut Vec<Value>) };
-        let mut information = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(monitor, &mut information) }.as_bool() {
+        if let Some(information) = get_monitor_info(monitor) {
             let bounds = information.rcMonitor;
             displays.push(serde_json::json!({
                 "display_id": format!("monitor-{:x}", monitor.0 as usize),
@@ -538,9 +546,6 @@ fn snapshot_window(
     let SurfaceRecord { descriptor, window } = record;
     validate_surface_record(&descriptor, window, cancellation, deadline_at_ms)?;
     let process_id = descriptor.process_id;
-    let process_generation = descriptor.process_generation.clone();
-    let window_id = descriptor.window_id.clone();
-    let display_geometry_hash = descriptor.display_geometry_hash.clone();
     check_observation_boundary(cancellation, deadline_at_ms)?;
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     if generation == 0 {
@@ -552,9 +557,9 @@ fn snapshot_window(
     let observation_id = semantic_fingerprint(&(
         BACKEND,
         process_id,
-        &process_generation,
-        &window_id,
-        &display_geometry_hash,
+        &descriptor.process_generation,
+        &descriptor.window_id,
+        &descriptor.display_geometry_hash,
         observed_at_ms,
         generation,
     ))
@@ -563,10 +568,10 @@ fn snapshot_window(
         backend: SemanticBackend::Accessibility,
         backend_name: BACKEND.to_string(),
         process_id,
-        process_generation: process_generation.clone(),
-        window_id: window_id.clone(),
+        process_generation: descriptor.process_generation.clone(),
+        window_id: descriptor.window_id.clone(),
         document_id: None,
-        display_geometry_hash,
+        display_geometry_hash: descriptor.display_geometry_hash.clone(),
         host_opt_ins: Vec::new(),
     };
     let provenance_hash = semantic_fingerprint(&(
@@ -629,8 +634,8 @@ fn snapshot_window(
         };
         check_observation_boundary(cancellation, deadline_at_ms)?;
         if state.process_id != process_id
-            || state.process_generation != process_generation
-            || state.window_id != window_id
+            || state.process_generation != descriptor.process_generation
+            || state.window_id != descriptor.window_id
         {
             truncated |= enqueue_children(
                 &walker,
@@ -683,8 +688,8 @@ fn snapshot_window(
             element_id: element_id.clone(),
             parent_id: parent_id_rc.as_deref().map(String::from),
             fingerprint_hash: fingerprint_hash.clone(),
-            role: state.role.clone(),
-            name: state.name.clone(),
+            role: state.role,
+            name: state.name,
             bounds: Some(Rect {
                 x: state.bounds.x,
                 y: state.bounds.y,
@@ -744,10 +749,10 @@ fn snapshot_window(
         generation,
         provenance_hash,
         process_id,
-        process_generation,
+        process_generation: descriptor.process_generation,
         surface_id: descriptor.surface.id,
         window_handle: window.0 as i64,
-        window_id,
+        window_id: descriptor.window_id,
         display_geometry_hash: observation.provenance.display_geometry_hash.clone(),
         observed_at_ms,
         expires_at_ms,
@@ -1443,10 +1448,10 @@ fn enqueue_children(
             return Ok(true);
         }
         runtime_path_budget.charge(&runtime_path)?;
-        queue.push_back((child.clone(), parent_id.clone(), runtime_path.clone()));
-        let Some(next) = optional_element(unsafe { walker.GetNextSiblingElement(&child) })
-            .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?
-        else {
+        let next = optional_element(unsafe { walker.GetNextSiblingElement(&child) })
+            .map_err(|_| observation_call_error(cancellation, deadline_at_ms))?;
+        queue.push_back((child, parent_id.clone(), runtime_path.clone()));
+        let Some(next) = next else {
             return Ok(false);
         };
         check_observation_boundary(cancellation, deadline_at_ms)?;
