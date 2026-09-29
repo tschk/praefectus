@@ -386,7 +386,7 @@ fn x11_type_text(
     for ch in text.chars() {
         let keysym = character_to_keysym(ch);
         let keycode = keysym_to_keycode(&connection, keysym)?;
-        let needs_shift = ch.is_uppercase() || is_shift_symbol(ch);
+        let needs_shift = ch.is_uppercase() || NEEDS_SHIFT.contains(&ch);
         if needs_shift {
             let shift_kc = keysym_to_keycode(&connection, 0xffe1)?;
             connection
@@ -865,31 +865,10 @@ fn parse_swaymsg_outputs(stdout: &[u8]) -> Result<Value, NativeError> {
 
 // ── keysym table ────────────────────────────────────────────────────────────
 
-fn is_shift_symbol(ch: char) -> bool {
-    matches!(
-        ch,
-        '!' | '@'
-            | '#'
-            | '$'
-            | '%'
-            | '^'
-            | '&'
-            | '*'
-            | '('
-            | ')'
-            | '_'
-            | '+'
-            | '{'
-            | '}'
-            | '|'
-            | ':'
-            | '"'
-            | '<'
-            | '>'
-            | '?'
-            | '~'
-    )
-}
+const NEEDS_SHIFT: &[char] = &[
+    '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '{', '}', '|', ':', '"', '<', '>',
+    '?', '~',
+];
 
 const XK_BACKSPACE: u32 = 0xff08;
 const XK_TAB: u32 = 0xff09;
@@ -1045,11 +1024,11 @@ mod tests {
 
     #[test]
     fn needs_shift_contains_uppercase_and_symbols() {
-        assert!(is_shift_symbol('!'));
-        assert!(is_shift_symbol('@'));
-        assert!(is_shift_symbol('#'));
-        assert!(!is_shift_symbol('a'));
-        assert!(!is_shift_symbol('1'));
+        assert!(NEEDS_SHIFT.contains(&'!'));
+        assert!(NEEDS_SHIFT.contains(&'@'));
+        assert!(NEEDS_SHIFT.contains(&'#'));
+        assert!(!NEEDS_SHIFT.contains(&'a'));
+        assert!(!NEEDS_SHIFT.contains(&'1'));
     }
 
     #[test]

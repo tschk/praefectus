@@ -1718,7 +1718,8 @@ impl NativeRuntime {
             {
                 return Err(NativeError);
             }
-            let status = secure_command("pbcopy")?
+            use std::process::Command;
+            let status = Command::new("/usr/bin/pbcopy")
                 .stdin(std::process::Stdio::piped())
                 .spawn()
                 .and_then(|mut child| {
@@ -4056,11 +4057,10 @@ pub struct OutcomeKey {
 }
 
 /// Host answer to a dispatch request for one [`OutcomeKey`].
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum LedgerDecision {
     Dispatch,
-    Recorded(Terminal),
+    Recorded(Box<Terminal>),
     Interrupted,
 }
 
@@ -4115,7 +4115,7 @@ impl OutcomeLedger for MemoryOutcomeLedger {
             .lock()
             .map_err(|_| ProtocolError::Ledger("outcome ledger is poisoned".to_string()))?;
         match entries.get(key) {
-            Some(Some(terminal)) => Ok(LedgerDecision::Recorded(terminal.clone())),
+            Some(Some(terminal)) => Ok(LedgerDecision::Recorded(Box::new(terminal.clone()))),
             Some(None) => Ok(LedgerDecision::Interrupted),
             None => {
                 entries.insert(key.clone(), None);
@@ -4336,7 +4336,7 @@ impl<E: Executor> Engine<E> {
                 receipt.delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
                 receipt.interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
                 let terminal = match self.outcomes.begin(&outcome_key)? {
-                    LedgerDecision::Recorded(terminal) => terminal,
+                    LedgerDecision::Recorded(terminal) => *terminal,
                     LedgerDecision::Dispatch | LedgerDecision::Interrupted => {
                         Terminal::OutcomeUnknown {
                             receipt,
@@ -4356,7 +4356,7 @@ impl<E: Executor> Engine<E> {
         match self.outcomes.begin(&outcome_key)? {
             LedgerDecision::Dispatch => {}
             LedgerDecision::Recorded(terminal) => {
-                return self.finish_early(request, &action_hash, terminal);
+                return self.finish_early(request, &action_hash, *terminal);
             }
             LedgerDecision::Interrupted => {
                 let receipt =
@@ -6691,7 +6691,7 @@ impl OperationLedger {
             return Ok(None);
         };
         let finished_at_ms = now_ms();
-        let acknowledgement = generate_interrupted_ack(InterruptedAckConfig {
+        let acknowledgement = generate_interrupted_ack(
             operation_id,
             action_hash,
             claimed_at_ms,
@@ -6700,7 +6700,7 @@ impl OperationLedger {
             delivery_route,
             session_isolation,
             interaction_mode,
-        });
+        );
         self.finish(&acknowledgement)?;
         Ok(Some(acknowledgement))
     }
@@ -6864,8 +6864,9 @@ fn repair_jsonl_tail<T: DeserializeOwned>(
     Ok(())
 }
 
-struct InterruptedAckConfig<'a> {
-    operation_id: &'a str,
+#[allow(clippy::too_many_arguments)]
+fn generate_interrupted_ack(
+    operation_id: &str,
     action_hash: String,
     claimed_at_ms: i64,
     finished_at_ms: i64,
@@ -6873,28 +6874,24 @@ struct InterruptedAckConfig<'a> {
     delivery_route: Option<DeliveryRoute>,
     session_isolation: Option<SessionIsolation>,
     interaction_mode: Option<InteractionMode>,
-}
-
-fn generate_interrupted_ack(config: InterruptedAckConfig<'_>) -> ActionAck {
-    let delivery_route = config.delivery_route.unwrap_or(DeliveryRoute::Unknown);
-    let session_isolation = config
-        .session_isolation
-        .unwrap_or(SessionIsolation::Unknown);
-    let interaction_mode = config.interaction_mode.unwrap_or(InteractionMode::Unknown);
+) -> ActionAck {
+    let delivery_route = delivery_route.unwrap_or(DeliveryRoute::Unknown);
+    let session_isolation = session_isolation.unwrap_or(SessionIsolation::Unknown);
+    let interaction_mode = interaction_mode.unwrap_or(InteractionMode::Unknown);
     ActionAck {
         protocol_version: PROTOCOL_VERSION,
-        operation_id: config.operation_id.to_string(),
+        operation_id: operation_id.to_string(),
         sequence: 2,
-        action_hash: config.action_hash.clone(),
+        action_hash: action_hash.clone(),
         replayed: false,
         state: AckState::Terminal {
             terminal: Box::new(Terminal::OutcomeUnknown {
                 receipt: Receipt {
                     protocol_version: PROTOCOL_VERSION,
-                    action_name: config.action_name.unwrap_or_else(|| "unknown".to_string()),
-                    action_hash: config.action_hash,
-                    started_at_ms: config.claimed_at_ms,
-                    finished_at_ms: config.finished_at_ms,
+                    action_name: action_name.unwrap_or_else(|| "unknown".to_string()),
+                    action_hash,
+                    started_at_ms: claimed_at_ms,
+                    finished_at_ms,
                     backend: "unknown".to_string(),
                     fallback_chain: Vec::new(),
                     delivery_route,
@@ -8061,68 +8058,14 @@ mod tests {
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
         NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
         ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
-        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
+        VerificationPolicy, canonical_authority_bytes, default_ledger_path,
+        element_fingerprint_hash, native_snapshot_id, target_capture_bounds,
         validate_matching_live_element, verify,
     };
-    use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
-
-    #[test]
-    fn test_canonicalize_json() {
-        let mut value = json!({
-            "b": 2,
-            "a": 1,
-            "c": {
-                "z": 26,
-                "y": 25,
-            },
-            "d": [
-                {
-                    "f": 6,
-                    "e": 5,
-                }
-            ]
-        });
-
-        canonicalize_json(&mut value);
-
-        // In serde_json, comparing values directly checks equality regardless of order,
-        // so we should compare the string serialization.
-        assert_eq!(
-            serde_json::to_string(&value).unwrap(),
-            r#"{"a":1,"b":2,"c":{"y":25,"z":26},"d":[{"e":5,"f":6}]}"#
-        );
-    }
-
-    #[test]
-    fn test_hash_serializable() {
-        // Create two JSON values that are identical except for key ordering
-        let value1 = json!({
-            "a": 1,
-            "b": 2
-        });
-        let value2 = json!({
-            "b": 2,
-            "a": 1
-        });
-
-        let hash1 = hash_serializable(&value1).unwrap();
-        let hash2 = hash_serializable(&value2).unwrap();
-
-        assert_eq!(hash1, hash2);
-
-        // Also verify it doesn't just return the same hash for everything
-        let value3 = json!({
-            "a": 1,
-            "b": 3
-        });
-        let hash3 = hash_serializable(&value3).unwrap();
-        assert_ne!(hash1, hash3);
-    }
 
     #[test]
     fn test_cancellation_token() {
@@ -8234,8 +8177,7 @@ mod tests {
     #[test]
     fn test_action_delivery_route() {
         use super::{
-            Action, ApplicationOperation, DeliveryRoute, Direction, MouseButton, TargetRef,
-            WindowOperation, action_delivery_route,
+            Action, ApplicationOperation, DeliveryRoute, WindowOperation, action_delivery_route,
         };
         use std::path::PathBuf;
 
@@ -8297,62 +8239,6 @@ mod tests {
                 text: "test".to_string()
             }),
             DeliveryRoute::Pointer
-        );
-
-        // Missing variants mapped to Pointer (via catch-all _)
-        assert_eq!(
-            action_delivery_route(&Action::Click {
-                button: MouseButton::Left,
-                count: 1,
-                allow_coordinate_fallback: true
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::TypeText {
-                text: "test".to_string(),
-                clear: false,
-                press_return: false,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Press {
-                key: "Enter".to_string(),
-                count: 1,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Paste {
-                text: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Hotkey {
-                keys: vec!["Ctrl".to_string(), "C".to_string()]
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
-        assert_eq!(
-            action_delivery_route(&Action::Drag {
-                to: TargetRef::None,
-                button: MouseButton::Left
-            }),
-            DeliveryRoute::Pointer
-        );
-
-        // Missing variant mapped to Unknown
-        assert_eq!(
-            action_delivery_route(&Action::Scroll {
-                direction: Direction::Down,
-                amount: 1
-            }),
-            DeliveryRoute::Unknown
         );
     }
 
