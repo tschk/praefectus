@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -884,13 +885,14 @@ impl LinuxAtspiBackend {
         ))
         .map_err(semantic_error)?;
         let window_id = window.window_id.clone();
-        let mut queue = VecDeque::from([(window.object.clone(), None, 0_usize)]);
+        let mut queue = VecDeque::from([(window.object.clone(), None::<Rc<String>>, 0_usize)]);
         let mut seen = BTreeSet::new();
         let mut elements = Vec::new();
         let mut targets = BTreeMap::new();
         let mut truncated = false;
 
-        while let Some((object, parent_id, depth)) = queue.pop_front() {
+        while let Some((object, parent_id_rc, depth)) = queue.pop_front() {
+            let parent_id = parent_id_rc.as_deref().map(String::from);
             check_observation_boundary(cancellation, deadline_at_ms)?;
             if elements.len() == MAX_ELEMENTS {
                 truncated = true;
@@ -916,11 +918,11 @@ impl LinuxAtspiBackend {
             let stable = first.identity == second.identity && first.value_hash == second.value_hash;
             let element_id =
                 opaque_element_id(&observation_id, &backend_id).map_err(semantic_error)?;
+            let element_id_rc = Rc::new(element_id.clone());
             let fingerprint_hash =
                 semantic_fingerprint(&second.identity).map_err(semantic_error)?;
             let mut actionability = second.actionability;
             actionability.stable = stable;
-            let invoke_action = second.invoke_action.clone();
             elements.push(SemanticElement {
                 tag: semantic_tag(elements.len()).map_err(semantic_error)?,
                 element_id: element_id.clone(),
@@ -932,10 +934,10 @@ impl LinuxAtspiBackend {
                 actionability,
             });
             targets.insert(
-                element_id.clone(),
+                element_id,
                 StoredTarget {
                     object: object.clone(),
-                    invoke_action,
+                    invoke_action: second.invoke_action,
                 },
             );
 
@@ -967,7 +969,7 @@ impl LinuxAtspiBackend {
                     cancellation,
                     deadline_at_ms,
                 )?;
-                queue.push_back((child, Some(element_id.clone()), depth + 1));
+                queue.push_back((child, Some(element_id_rc.clone()), depth + 1));
             }
         }
 
