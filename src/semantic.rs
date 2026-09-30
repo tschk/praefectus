@@ -210,14 +210,18 @@ impl SemanticObservation {
     }
 }
 
-pub fn route_action<'a>(
-    action: &Action,
-    observation: &'a SemanticObservation,
-    target: &SemanticTargetRef,
-    now_ms: i64,
-) -> Result<&'a SemanticElement, SemanticError> {
-    let element = observation.resolve(target, now_ms)?;
-    if semantic_actionable(action, &element.actionability)? {
+pub struct RouteActionParams<'a, 'b, 'c> {
+    pub action: &'a Action,
+    pub observation: &'b SemanticObservation,
+    pub target: &'c SemanticTargetRef,
+    pub now_ms: i64,
+}
+
+pub fn route_action<'b>(
+    params: RouteActionParams<'_, 'b, '_>,
+) -> Result<&'b SemanticElement, SemanticError> {
+    let element = params.observation.resolve(params.target, params.now_ms)?;
+    if semantic_actionable(params.action, &element.actionability)? {
         return Ok(element);
     }
     Err(SemanticError::TargetNotActionable)
@@ -469,7 +473,12 @@ mod tests {
             }
             let target = observation.target(&observation.elements[0].tag).unwrap();
             assert_eq!(
-                route_action(&action, &observation, &target, 2_000),
+                route_action(RouteActionParams {
+                    action: &action,
+                    observation: &observation,
+                    target: &target,
+                    now_ms: 2_000,
+                }),
                 Err(SemanticError::TargetNotActionable)
             );
         }
@@ -477,14 +486,14 @@ mod tests {
         let observation = observation();
         let target = observation.target(&observation.elements[0].tag).unwrap();
         assert_eq!(
-            route_action(
-                &Action::SetValue {
+            route_action(RouteActionParams {
+                action: &Action::SetValue {
                     value: "secret".to_string(),
                 },
-                &observation,
-                &target,
-                2_000,
-            ),
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
             Err(SemanticError::TargetNotActionable)
         );
     }
@@ -494,26 +503,36 @@ mod tests {
         let mut observation = observation();
         let target = observation.target(&observation.elements[0].tag).unwrap();
         assert_eq!(
-            route_action(&Action::Invoke, &observation, &target, 2_000),
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
             Ok(&observation.elements[0])
         );
 
         observation.elements[0].actionability.editable = true;
         assert_eq!(
-            route_action(
-                &Action::SetValue {
+            route_action(RouteActionParams {
+                action: &Action::SetValue {
                     value: "secret".to_string()
                 },
-                &observation,
-                &target,
-                2_000
-            ),
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
             Ok(&observation.elements[0])
         );
 
         // Also test a different action that is unsupported to cover that branch
         assert_eq!(
-            route_action(&Action::Move, &observation, &target, 2_000),
+            route_action(RouteActionParams {
+                action: &Action::Move,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
             Err(SemanticError::UnsupportedAction)
         );
     }
