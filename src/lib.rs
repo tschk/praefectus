@@ -9156,4 +9156,40 @@ mod tests {
             Effect::ExecutedUnverified
         );
     }
+
+    #[test]
+    fn test_list_applications_boundary_cancelled() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let result = executor.list_applications(&token, i64::MAX);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_list_applications_boundary_expired() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let result = executor.list_applications(&token, 0);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
+    }
+
+    #[test]
+    fn test_list_applications_unsupported_os() {
+        if cfg!(not(target_os = "macos")) {
+            let executor = NativeExecutor::default();
+            let token = CancellationToken::default();
+            let result = executor.list_applications(&token, i64::MAX);
+            assert!(matches!(
+                result,
+                Err(super::ProtocolError::Executor(msg)) if msg == "application enumeration is unavailable"
+            ));
+        }
+    }
 }
