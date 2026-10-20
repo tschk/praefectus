@@ -1486,8 +1486,9 @@ impl NativeRuntime {
                 let _ = unsafe { SendInput(&ctrl_a, std::mem::size_of::<INPUT>() as i32) };
             }
 
+            let mut inputs = Vec::with_capacity(_text.len() * 2);
             for code_unit in _text.encode_utf16() {
-                let down = INPUT {
+                inputs.push(INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
                         ki: KEYBDINPUT {
@@ -1498,8 +1499,8 @@ impl NativeRuntime {
                             dwExtraInfo: 0,
                         },
                     },
-                };
-                let up = INPUT {
+                });
+                inputs.push(INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
                         ki: KEYBDINPUT {
@@ -1510,11 +1511,21 @@ impl NativeRuntime {
                             dwExtraInfo: 0,
                         },
                     },
-                };
-                let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-                if let Some(delay) = _delay_ms {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                });
+            }
+
+            if let Some(delay) = _delay_ms {
+                if delay > 0 {
+                    #[allow(clippy::chunks_exact_to_as_chunks)]
+                    for chunk in inputs.chunks_exact(2) {
+                        let _ = unsafe { SendInput(chunk, std::mem::size_of::<INPUT>() as i32) };
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                } else {
+                    let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
                 }
+            } else {
+                let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
             }
 
             if _press_return {
