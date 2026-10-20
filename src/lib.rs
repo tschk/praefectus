@@ -6720,7 +6720,9 @@ impl OperationLedger {
         loop {
             line_buf.clear();
             let len = buf_reader.read_line(&mut line_buf)?;
-            if len == 0 { break; }
+            if len == 0 {
+                break;
+            }
             if line_buf.trim().is_empty() {
                 continue;
             }
