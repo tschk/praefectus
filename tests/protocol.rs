@@ -1596,7 +1596,7 @@ fn native_executor_clipboard_read() {
                 if let ProtocolError::Executor(msg) = e {
                     assert!(msg.contains("clipboard"));
                 } else {
-                    panic!("unexpected error: {:?}", e);
+                    panic!("unexpected error: {e:?}");
                 }
             }
         }
@@ -1605,7 +1605,7 @@ fn native_executor_clipboard_read() {
         if let Err(ProtocolError::Executor(msg)) = result {
             assert_eq!(msg, "clipboard observation is unavailable");
         } else {
-            panic!("Expected ProtocolError::Executor, got: {:?}", result);
+            panic!("Expected ProtocolError::Executor, got: {result:?}");
         }
     }
 }
