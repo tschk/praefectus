@@ -1011,6 +1011,28 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
 }
 
 #[test]
+fn native_executor_observe_coordinates() {
+    let executor = NativeExecutor::default();
+    if cfg!(target_os = "linux")
+        && std::env::var("DISPLAY").is_err()
+        && std::env::var("WAYLAND_DISPLAY").is_err()
+    {
+        // No desktop session on CI.
+        return;
+    }
+    let result = executor.observe_coordinates();
+    match result {
+        Ok(observation) => {
+            assert_eq!(observation.protocol_version, praefectus::PROTOCOL_VERSION);
+            assert!(!observation.snapshot_id.is_empty());
+        }
+        Err(error) => {
+            assert!(matches!(error, praefectus::ProtocolError::Executor(_)));
+        }
+    }
+}
+
+#[test]
 fn native_executor_routes_coordinate_effects() {
     let executor = NativeExecutor::default();
     let capabilities = executor.capabilities().expect("capabilities");
