@@ -8146,7 +8146,9 @@ mod tests {
                     assert!(arr.iter().all(|v| v.is_string()));
                 }
                 Err(crate::ProtocolError::Executor(msg)) => {
-                    assert!(msg == "desktop backend error" || msg == "application enumeration failed");
+                    assert!(
+                        msg == "desktop backend error" || msg == "application enumeration failed"
+                    );
                 }
                 _ => panic!("Unexpected result on macOS: {:?}", result),
             }
