@@ -8139,7 +8139,10 @@ mod tests {
         token.cancel();
 
         let result = executor.observe_semantic(&token, i64::MAX);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
     }
 
     #[test]
@@ -8148,7 +8151,10 @@ mod tests {
         let token = CancellationToken::default();
 
         let result = executor.observe_semantic(&token, 0);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
     }
 
     #[test]
