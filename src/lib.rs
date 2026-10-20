@@ -8565,7 +8565,10 @@ mod tests {
             &cancellation,
             super::now_ms() + 1000,
         );
-        assert!(matches!(result, Err(super::ProtocolError::InvalidRequest(_))));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -8581,7 +8584,10 @@ mod tests {
             &cancellation,
             super::now_ms() + 1000,
         );
-        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
     }
 
     #[test]
@@ -8596,7 +8602,10 @@ mod tests {
             &cancellation,
             super::now_ms() - 1000,
         );
-        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
     }
 
     #[test]
