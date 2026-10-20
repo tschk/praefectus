@@ -2543,6 +2543,22 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+fn mac_enabled_state(
+    enabled: Option<bool>,
+    role: &str,
+    value_settable: impl FnOnce() -> bool,
+) -> Option<bool> {
+    // Editable macOS text sometimes omits AXEnabled; native settable evidence still proves operability.
+    enabled.or_else(|| {
+        (matches!(
+            role,
+            "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox"
+        ) && value_settable())
+        .then_some(true)
+    })
+}
+
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -2606,11 +2622,15 @@ fn mac_native_element(
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let role = element.string("AXRole").ok_or(NativeError)?;
     let title = element.string("AXTitle");
+    // Description is the element label; AXHelp is the tooltip for controls that omit one.
     let label = element
         .string("AXDescription")
         .filter(|value| !value.is_empty())
-        .or_else(|| title.clone());
-    let enabled = element.boolean("AXEnabled");
+        .or_else(|| title.clone())
+        .or_else(|| element.string("AXHelp").filter(|value| !value.is_empty()));
+    let enabled = mac_enabled_state(element.boolean("AXEnabled"), &role, || {
+        element.is_settable("AXValue")
+    });
     let focused = element.boolean("AXFocused");
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let window = element
@@ -8051,6 +8071,25 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
     observation_root(get_env)
         .join("praefectus")
         .join("praefectus-operations.jsonl")
+}
+
+#[cfg(test)]
+mod enabled_state_tests {
+    use super::mac_enabled_state;
+
+    #[test]
+    fn missing_enabled_uses_settable_text_and_never_overrides_false() {
+        for role in ["AXTextArea", "AXTextField", "AXSearchField", "AXComboBox"] {
+            assert_eq!(mac_enabled_state(None, role, || true), Some(true), "{role}");
+            assert_eq!(mac_enabled_state(None, role, || false), None, "{role}");
+        }
+        assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
+        assert_eq!(
+            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            Some(false)
+        );
+        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+    }
 }
 
 #[cfg(test)]
