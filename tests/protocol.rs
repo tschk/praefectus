@@ -230,6 +230,17 @@ fn semantic_target() -> SemanticTargetRef {
     }
 }
 
+fn coordinate_target() -> TargetRef {
+    TargetRef::Coordinates {
+        x: 120,
+        y: 240,
+        display_id: "display-1".to_string(),
+        display_geometry_hash: "a".repeat(64),
+        snapshot_id: "b".repeat(64),
+        snapshot_content_hash: "c".repeat(64),
+    }
+}
+
 fn request(operation_id: &str) -> ActionRequest {
     let mut request = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
@@ -1374,9 +1385,6 @@ fn auxiliary_actions_are_bound_to_signed_targetless_operations() {
     let directory = tempfile::tempdir().expect("temp directory");
     let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
     for (index, action) in [
-        Action::Screenshot {
-            path: directory.path().join("screen.png"),
-        },
         Action::Application {
             operation: ApplicationOperation::Launch,
             name: "TextEdit".to_string(),
@@ -1420,6 +1428,41 @@ fn auxiliary_actions_are_bound_to_signed_targetless_operations() {
                 .is_some()
         );
     }
+}
+
+#[test]
+fn screenshot_actions_require_fenced_coordinate_targets() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let engine = Engine::new(MockExecutor::new(), ledger_path(&directory), authority());
+    let mut unfenced = request("unfenced-screenshot");
+    unfenced.action = Action::Screenshot {
+        path: directory.path().join("screen.png"),
+    };
+    unfenced.target = TargetRef::None;
+    unfenced.verification = VerificationPolicy::None;
+    sign_request(&mut unfenced);
+    assert!(matches!(
+        engine.execute(&unfenced, &CancellationToken::default()),
+        Err(ProtocolError::InvalidRequest(_))
+    ));
+
+    let mut fenced = request("fenced-screenshot");
+    fenced.action = Action::Screenshot {
+        path: directory.path().join("screen.png"),
+    };
+    fenced.target = coordinate_target();
+    fenced.verification = VerificationPolicy::None;
+    sign_request(&mut fenced);
+    let report = engine
+        .execute(&fenced, &CancellationToken::default())
+        .expect("fenced screenshot result");
+    assert!(matches!(
+        terminal(&report),
+        Terminal::Rejected {
+            code: FailureCode::Unsupported,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1581,4 +1624,94 @@ fn the_null_outcome_ledger_always_grants_dispatch() {
         ledger.begin(&key).expect("begin"),
         LedgerDecision::Dispatch
     ));
+}
+
+#[test]
+fn batch_continues_verified_steps_and_replays_without_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
+    let mut second = request("batch-second");
+    second.verification = VerificationPolicy::TargetState {
+        expected: serde_json::json!({ "count": 3 }),
+    };
+    sign_request(&mut second);
+    let requests = [request("batch-first"), second];
+    let results = engine.execute_batch(&requests, &CancellationToken::default());
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(terminal(result.as_ref().unwrap()),
+        Terminal::Succeeded { receipt } if receipt.effect == Effect::Verified))
+    );
+    let replay = engine.execute_batch(&requests, &CancellationToken::default());
+    assert_eq!(replay.len(), 2);
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn batch_stops_after_unverified_success_without_attempting_later_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
+    let mut first = request("batch-unverified");
+    first.verification = VerificationPolicy::None;
+    sign_request(&mut first);
+    let results = engine.execute_batch(
+        &[first, request("batch-skipped")],
+        &CancellationToken::default(),
+    );
+    assert_eq!(results.len(), 1);
+    assert!(matches!(terminal(results[0].as_ref().unwrap()),
+        Terminal::Succeeded { receipt } if receipt.effect == Effect::ExecutedUnverified));
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
+    assert!(engine.status("batch-skipped").unwrap().is_none());
+}
+
+#[test]
+fn batch_preserves_error_and_does_not_dispatch_later_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
+    let mut first = request("batch-denied");
+    first.authority.signature = "00".repeat(64);
+    let results = engine.execute_batch(
+        &[first, request("batch-skipped")],
+        &CancellationToken::default(),
+    );
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_err());
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn batch_stops_on_unknown_outcome_and_cancelled_before_effect() {
+    for cancelled in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let executor = MockExecutor::new();
+        *executor.behavior.lock().unwrap() = Behavior::Ambiguous;
+        let engine = Engine::new(executor.clone(), ledger_path(&directory), authority());
+        let cancellation = CancellationToken::default();
+        if cancelled {
+            cancellation.cancel();
+        }
+        let results = engine.execute_batch(
+            &[request("batch-first"), request("batch-skipped")],
+            &cancellation,
+        );
+        assert_eq!(results.len(), 1);
+        if cancelled {
+            assert!(matches!(
+                terminal(results[0].as_ref().unwrap()),
+                Terminal::CancelledBeforeEffect
+            ));
+        } else {
+            assert!(matches!(
+                terminal(results[0].as_ref().unwrap()),
+                Terminal::OutcomeUnknown { .. }
+            ));
+        }
+        assert!(engine.status("batch-skipped").unwrap().is_none());
+    }
 }

@@ -5,6 +5,7 @@ use screencapturekit::prelude::{
 };
 use screencapturekit::screenshot_manager::SCScreenshotManager;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 pub(crate) struct CaptureError;
 
@@ -71,6 +72,31 @@ fn blocking_screen_content_hash() -> Result<String, CaptureError> {
         image_digest(&image, &mut hasher);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+pub(crate) fn capture_screen(path: &Path) -> Result<(), CaptureError> {
+    let path = path.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .spawn(move || {
+            let _ = sender.send(blocking_capture_screen(&path));
+        })
+        .map_err(|_| CaptureError)?;
+    receiver
+        .recv_timeout(CAPTURE_TIMEOUT)
+        .map_err(|_| CaptureError)?
+}
+
+fn blocking_capture_screen(path: &Path) -> Result<(), CaptureError> {
+    let display = displays()?.into_iter().next().ok_or(CaptureError)?;
+    let filter = SCContentFilter::create()
+        .with_display(&display)
+        .with_excluding_windows(&[])
+        .build();
+    let image = capture(&filter, display.width(), display.height())?;
+    image
+        .save_png(path.to_str().ok_or(CaptureError)?)
+        .map_err(|_| CaptureError)
 }
 
 #[cfg(test)]

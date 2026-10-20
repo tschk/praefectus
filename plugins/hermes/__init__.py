@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -15,6 +17,8 @@ from typing import Any
 from tools.registry import tool_error
 
 _MAX_IO_BYTES = 1024 * 1024
+_MAX_VISUAL_IO_BYTES = 8 * 1024 * 1024
+_MAX_IMAGE_BYTES = 6 * 1024 * 1024
 _MAX_SAFE_INTEGER = 9007199254740991
 _MAX_VALUE_BYTES = 16384
 _PROCESS_TIMEOUT_SECONDS = 30
@@ -133,6 +137,26 @@ CAPABILITIES_SCHEMA = {
     "parameters": _object({}, []),
 }
 
+_OBSERVE_REQUEST = _object(
+    {
+        "operation_id": _IDENTIFIER,
+        "interaction_mode": {"enum": ["interactive", "background_only"]},
+        "deadline_at_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _MAX_SAFE_INTEGER,
+        },
+        "safety": {"const": "reversible"},
+    },
+    ["operation_id", "interaction_mode", "deadline_at_ms", "safety"],
+)
+
+OBSERVE_SCHEMA = {
+    "name": "praefectus_observe",
+    "description": "Capture one authorized, observation-fenced desktop image for model vision.",
+    "parameters": _OBSERVE_REQUEST,
+}
+
 
 def _binary() -> str:
     return os.environ.get("PRAEFECTUS_BIN", "praefectus")
@@ -144,10 +168,13 @@ def _available() -> bool:
 
 
 def _invoke(
-    command: list[str], payload: dict[str, Any] | None, error_message: str
+    command: list[str],
+    payload: dict[str, Any] | None,
+    error_message: str,
+    max_io_bytes: int = _MAX_IO_BYTES,
 ) -> tuple[int, dict[str, Any]]:
     input_bytes = None if payload is None else json.dumps(payload).encode()
-    if input_bytes is not None and len(input_bytes) > _MAX_IO_BYTES:
+    if input_bytes is not None and len(input_bytes) > max_io_bytes:
         raise RuntimeError(error_message)
     try:
         process = subprocess.Popen(
@@ -211,7 +238,7 @@ def _invoke(
         try:
             while chunk := process.stdout.read(65536):
                 output.extend(chunk)
-                if len(output) > _MAX_IO_BYTES:
+                if len(output) > max_io_bytes:
                     raise RuntimeError(error_message)
             output_result.append(bytes(output))
         except (OSError, RuntimeError) as error:
@@ -284,6 +311,21 @@ def _run_host_executor(request: dict[str, Any]) -> dict[str, Any]:
     )
     if returncode != 0:
         raise RuntimeError("host executor failed")
+    return result
+
+
+def _run_host_observer(request: dict[str, Any]) -> dict[str, Any]:
+    bridge = os.environ.get("PRAEFECTUS_HOST_EXECUTOR")
+    if not bridge:
+        raise RuntimeError("host observer is not configured")
+    returncode, result = _invoke(
+        [bridge],
+        {"operation": "observe", "request": request},
+        "host observer failed",
+        _MAX_VISUAL_IO_BYTES,
+    )
+    if returncode != 0:
+        raise RuntimeError("host observer failed")
     return result
 
 
@@ -664,19 +706,14 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         or not isinstance(display_geometry_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", display_geometry_hash) is None
         or not isinstance(supported_actions, list)
-        or len(supported_actions) > 9
+        or len(supported_actions) > 10
         or not all(isinstance(action, str) for action in supported_actions)
         or len(supported_actions) != len(set(supported_actions))
         or not isinstance(action_capabilities, list)
-        or len(action_capabilities) > 9
+        or len(action_capabilities) > 10
         or not isinstance(permissions, dict)
         or not all(isinstance(allowed, bool) for allowed in permissions.values())
         or set(permissions) not in permission_shapes.get(platform, ())
-    ):
-        return {"error": {"code": "praefectus_error"}}
-    if platform == "macos" and any(
-        permissions.get(permission)
-        for permission in ("coordinate_capture", "screen_recording")
     ):
         return {"error": {"code": "praefectus_error"}}
     allowed_actions = (
@@ -693,6 +730,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
                 "hotkey",
                 "move",
                 "scroll",
+                "screenshot",
             }
             if platform == "macos"
             else {"invoke", "set_value"}
@@ -708,6 +746,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         "paste": ("pointer", "unavailable"),
         "hotkey": ("pointer", "unavailable"),
         "move": ("pointer", "unavailable"),
+        "screenshot": ("target_addressed", "guarded"),
     }
     background_support = "host_isolated_only" if platform == "browser" else "guarded"
     facts = []
@@ -767,6 +806,96 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         ),
         "permissions": permissions,
         "display_geometry_hash": display_geometry_hash,
+    }
+
+
+def _redact_visual(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    if result.get("ok") is False or isinstance(result.get("error"), dict):
+        error = result.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        return {
+            "error": {
+                "code": code
+                if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code)
+                else "praefectus_error"
+            },
+            "retry_safe": False,
+        }
+    data = result.get("data") if result.get("ok") is True else result
+    if not isinstance(data, dict) or set(data) != {
+        "_multimodal",
+        "content",
+        "text_summary",
+        "meta",
+    }:
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    if data.get("_multimodal") is not True:
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    content = data.get("content")
+    if not isinstance(content, list) or len(content) != 2:
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    text_part, image_part = content
+    if (
+        not isinstance(text_part, dict)
+        or set(text_part) != {"type", "text"}
+        or text_part.get("type") != "text"
+        or not isinstance(text_part.get("text"), str)
+        or len(text_part["text"]) > 1024
+    ):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    if not isinstance(data.get("text_summary"), str) or len(data["text_summary"]) > 1024:
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    image_url = image_part.get("image_url") if isinstance(image_part, dict) else None
+    if (
+        not isinstance(image_part, dict)
+        or set(image_part) != {"type", "image_url"}
+        or image_part.get("type") != "image_url"
+        or not isinstance(image_url, dict)
+        or set(image_url) != {"url"}
+        or not isinstance(image_url.get("url"), str)
+        or not image_url["url"].startswith("data:image/png;base64,")
+    ):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    encoded = image_url["url"].removeprefix("data:image/png;base64,")
+    if len(encoded) > _MAX_VISUAL_IO_BYTES:
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    try:
+        image = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    if (
+        not 1 <= len(image) <= _MAX_IMAGE_BYTES
+        or image[:8] != b"\x89PNG\r\n\x1a\n"
+    ):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    meta = data.get("meta")
+    if (
+        not isinstance(meta, dict)
+        or set(meta) != {"backend", "width", "height", "capture_hash"}
+        or not isinstance(meta.get("backend"), str)
+        or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", meta["backend"]) is None
+        or not isinstance(meta.get("width"), int)
+        or isinstance(meta["width"], bool)
+        or not 1 <= meta["width"] <= 100000
+        or not isinstance(meta.get("height"), int)
+        or isinstance(meta["height"], bool)
+        or not 1 <= meta["height"] <= 100000
+        or not isinstance(meta.get("capture_hash"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", meta["capture_hash"]) is None
+    ):
+        return {"error": {"code": "praefectus_error"}, "retry_safe": False}
+    return {
+        "_multimodal": True,
+        "content": [text_part, image_part],
+        "text_summary": data["text_summary"],
+        "meta": {
+            "backend": meta["backend"],
+            "width": meta["width"],
+            "height": meta["height"],
+            "capture_hash": meta["capture_hash"],
+        },
     }
 
 
@@ -953,6 +1082,26 @@ def _valid_proposal(args: Any) -> bool:
     )
 
 
+def _valid_observation_request(args: Any) -> bool:
+    if not isinstance(args, dict) or set(args) != {
+        "operation_id",
+        "interaction_mode",
+        "deadline_at_ms",
+        "safety",
+    }:
+        return False
+    deadline = args["deadline_at_ms"]
+    return (
+        isinstance(args["operation_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9_:-]{1,256}", args["operation_id"]) is not None
+        and args["interaction_mode"] in ("interactive", "background_only")
+        and isinstance(deadline, int)
+        and not isinstance(deadline, bool)
+        and 1 <= deadline <= _MAX_SAFE_INTEGER
+        and args["safety"] == "reversible"
+    )
+
+
 def _execute(args: dict[str, Any], **_: Any) -> str:
     if not _valid_proposal(args):
         return json.dumps({"error": {"code": "invalid_request"}, "retry_safe": False})
@@ -985,6 +1134,18 @@ def _execute(args: dict[str, Any], **_: Any) -> str:
         )
 
 
+def _observe(args: dict[str, Any], **_: Any) -> str:
+    if not _valid_observation_request(args):
+        return json.dumps({"error": {"code": "invalid_request"}, "retry_safe": False})
+    try:
+        result = _redact_visual(_run_host_observer(args))
+        return json.dumps(result)
+    except (TypeError, ValueError, RuntimeError):
+        return json.dumps(
+            {"error": {"code": "host_executor_unavailable"}, "retry_safe": False}
+        )
+
+
 def _status(args: dict[str, Any], **_: Any) -> str:
     try:
         _returncode, result = _run(["status", args["operation_id"]])
@@ -1004,6 +1165,7 @@ def _capabilities(args: dict[str, Any], **_: Any) -> str:
 def register(ctx: Any) -> None:
     for name, schema, handler in (
         ("praefectus_execute", EXECUTE_SCHEMA, _execute),
+        ("praefectus_observe", OBSERVE_SCHEMA, _observe),
         ("praefectus_status", STATUS_SCHEMA, _status),
         ("praefectus_capabilities", CAPABILITIES_SCHEMA, _capabilities),
     ):

@@ -1741,7 +1741,7 @@ fn endpoint_owner_process_ids(port: u16, _process_id: u32) -> Result<BTreeSet<u3
         if written >= descriptors.len() || written % 8 != 0 {
             return Err(CdpError::StaleTarget);
         }
-        for descriptor in descriptors[..written].chunks_exact(8) {
+        for descriptor in descriptors[..written].as_chunks::<8>().0 {
             let file_descriptor =
                 i32::from_ne_bytes(descriptor[..4].try_into().map_err(|_| CdpError::Protocol)?);
             let descriptor_type = u32::from_ne_bytes(

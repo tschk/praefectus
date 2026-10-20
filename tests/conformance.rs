@@ -786,6 +786,9 @@ fn delivery_routes_agree_for_new_actions() {
         Action::PerformSecondaryAction {
             name: "AXShowMenu".to_string(),
         },
+        Action::Screenshot {
+            path: std::path::PathBuf::from("/tmp/screen.png"),
+        },
     ] {
         assert_eq!(
             action_delivery_route(&action),

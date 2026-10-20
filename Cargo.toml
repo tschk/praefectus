@@ -1,6 +1,6 @@
 [package]
 name = "praefectus"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2024"
 rust-version = "1.88"
 license = "ISC"
@@ -12,6 +12,7 @@ documentation = "https://docs.rs/praefectus"
 include = [
     "/src/**",
     "/tests/**",
+    "/examples/**",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
@@ -25,7 +26,6 @@ include = [
 [features]
 default = []
 screencapturekit = ["dep:screencapturekit"]
-skylight = []
 
 [lib]
 path = "src/lib.rs"

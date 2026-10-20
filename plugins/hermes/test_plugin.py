@@ -76,6 +76,40 @@ def click_request():
     }
 
 
+def observe_request():
+    return {
+        "operation_id": "observe-1",
+        "interaction_mode": "interactive",
+        "deadline_at_ms": 9,
+        "safety": "reversible",
+    }
+
+
+def visual_result():
+    return {
+        "ok": True,
+        "data": {
+            "_multimodal": True,
+            "content": [
+                {"type": "text", "text": "Current display"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                    },
+                },
+            ],
+            "text_summary": "Current display",
+            "meta": {
+                "backend": "praefectus-macos-ax",
+                "width": 1,
+                "height": 1,
+                "capture_hash": "a" * 64,
+            },
+        },
+    }
+
+
 def outcome_unknown(
     operation_id="op-1",
     interaction_mode="interactive",
@@ -209,7 +243,12 @@ class PluginTest(unittest.TestCase):
         plugin.register(context)
         self.assertEqual(
             [item["name"] for item in registrations],
-            ["praefectus_execute", "praefectus_status", "praefectus_capabilities"],
+            [
+                "praefectus_execute",
+                "praefectus_observe",
+                "praefectus_status",
+                "praefectus_capabilities",
+            ],
         )
         self.assertTrue(all(item["toolset"] == "praefectus" for item in registrations))
         self.assertFalse(plugin.EXECUTE_SCHEMA["parameters"]["additionalProperties"])
@@ -225,6 +264,11 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(
             plugin.EXECUTE_SCHEMA["parameters"]["properties"]["interaction_mode"],
             {"enum": ["interactive", "background_only"]},
+        )
+        self.assertFalse(plugin.OBSERVE_SCHEMA["parameters"]["additionalProperties"])
+        self.assertEqual(
+            plugin.OBSERVE_SCHEMA["parameters"]["required"],
+            ["operation_id", "interaction_mode", "deadline_at_ms", "safety"],
         )
 
     def test_execute_sends_only_the_action_request_to_host_executor(self):
@@ -265,6 +309,41 @@ class PluginTest(unittest.TestCase):
             result = json.loads(plugin._execute(invoke_request()))
         self.assertEqual(result["error"], {"code": "host_executor_unavailable"})
         self.assertFalse(result["retry_safe"])
+
+    def test_observe_returns_only_a_bounded_multimodal_png(self):
+        request = observe_request()
+        with patch.object(
+            plugin, "_run_host_observer", return_value=visual_result()
+        ) as run:
+            result = json.loads(plugin._observe(request))
+        run.assert_called_once_with(request)
+        self.assertTrue(result["_multimodal"])
+        self.assertEqual(result["content"][1]["type"], "image_url")
+        self.assertNotIn("operation_id", json.dumps(result))
+        self.assertNotIn("authority", json.dumps(result))
+
+    def test_observe_rejects_non_png_or_unbounded_result(self):
+        invalid = visual_result()
+        invalid["data"]["content"][1]["image_url"]["url"] = "https://example.test/image.png"
+        with patch.object(plugin, "_run_host_observer", return_value=invalid):
+            self.assertEqual(
+                json.loads(plugin._observe(observe_request())),
+                {"error": {"code": "praefectus_error"}, "retry_safe": False},
+            )
+        with patch.object(
+            plugin, "_run_host_observer", side_effect=RuntimeError("image secret")
+        ):
+            result = json.loads(plugin._observe(observe_request()))
+        self.assertEqual(result["error"], {"code": "host_executor_unavailable"})
+        self.assertFalse(result["retry_safe"])
+
+    def test_observe_rejects_unknown_request_fields_before_host(self):
+        with patch.object(plugin, "_run_host_observer") as run:
+            result = json.loads(
+                plugin._observe({**observe_request(), "target": semantic_target()})
+            )
+        self.assertEqual(result, {"error": {"code": "invalid_request"}, "retry_safe": False})
+        run.assert_not_called()
 
     def test_background_mode_is_required_and_receipt_bound(self):
         request = {**invoke_request(), "interaction_mode": "background_only"}
@@ -426,6 +505,26 @@ class PluginTest(unittest.TestCase):
                 ["/host/praefectus-bridge"],
                 {"operation": "execute", "request": {"operation_id": "op-1"}},
                 "host executor failed",
+            ),
+        )
+
+    def test_host_observer_receives_a_single_visual_request(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"PRAEFECTUS_HOST_EXECUTOR": "/host/praefectus-bridge"},
+                clear=True,
+            ),
+            patch.object(plugin, "_invoke", return_value=(0, visual_result())) as invoke,
+        ):
+            self.assertEqual(plugin._run_host_observer(observe_request()), visual_result())
+        self.assertEqual(
+            invoke.call_args.args,
+            (
+                ["/host/praefectus-bridge"],
+                {"operation": "observe", "request": observe_request()},
+                "host observer failed",
+                plugin._MAX_VISUAL_IO_BYTES,
             ),
         )
 
@@ -728,31 +827,24 @@ class PluginTest(unittest.TestCase):
             self.assertNotIn("secret", json.dumps(redacted))
             self.assertNotIn("credential", json.dumps(redacted))
 
-    def test_macos_capabilities_reject_capture_permissions_but_allow_private_state_fact(
-        self,
-    ):
+    def test_macos_capabilities_expose_authorized_visual_capture(self):
         runtime = runtime_capabilities("macos")
         runtime["permissions"].update(
             {
                 "private_state": True,
-                "coordinate_capture": False,
-                "screen_recording": False,
+                "coordinate_capture": True,
+                "screen_recording": True,
             }
         )
-        self.assertNotIn("error", plugin._redact(runtime))
-        for permission in ("coordinate_capture", "screen_recording"):
-            unsafe = runtime_capabilities("macos")
-            unsafe["permissions"].update(
-                {
-                    "private_state": True,
-                    "coordinate_capture": False,
-                    "screen_recording": False,
-                    permission: True,
-                }
-            )
-            self.assertEqual(
-                plugin._redact(unsafe), {"error": {"code": "praefectus_error"}}
-            )
+        runtime["supported_actions"].append("screenshot")
+        runtime["action_capabilities"].append(
+            {
+                "action": "screenshot",
+                "delivery_route": "target_addressed",
+                "background_support": "guarded",
+            }
+        )
+        self.assertEqual(plugin._redact(runtime), runtime)
 
     def test_capabilities_accept_exact_full_runtime_contracts(self):
         for platform in ("macos", "windows", "linux", "browser"):

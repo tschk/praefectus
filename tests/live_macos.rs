@@ -96,6 +96,14 @@ mod live_macos_tests {
         }
 
         let perms = data["permissions"].as_object().unwrap();
+        let visual_capture_available = perms["screen_recording"].as_bool() == Some(true)
+            && perms["coordinate_capture"].as_bool() == Some(true)
+            && perms["private_state"].as_bool() == Some(true);
+        assert_eq!(
+            action_names.contains(&"screenshot"),
+            visual_capture_available
+        );
+
         eprintln!("permissions: {perms:?}");
         assert_eq!(perms["accessibility"], true);
     }

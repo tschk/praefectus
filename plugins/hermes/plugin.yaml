@@ -5,5 +5,6 @@ author: undivisible
 kind: backend
 provides_tools:
   - praefectus_execute
+  - praefectus_observe
   - praefectus_status
   - praefectus_capabilities

@@ -424,9 +424,9 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
         Action::Invoke
         | Action::SetValue { .. }
         | Action::SelectText { .. }
-        | Action::PerformSecondaryAction { .. } => DeliveryRoute::TargetAddressed,
-        Action::Screenshot { .. }
-        | Action::Application { .. }
+        | Action::PerformSecondaryAction { .. }
+        | Action::Screenshot { .. } => DeliveryRoute::TargetAddressed,
+        Action::Application { .. }
         | Action::Window { .. }
         | Action::Open { .. }
         | Action::ClipboardWrite { .. } => DeliveryRoute::Pointer,
@@ -444,6 +444,9 @@ fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute 
             | Action::PerformSecondaryAction { .. },
             TargetRef::Element { .. },
         ) => DeliveryRoute::TargetAddressed,
+        (Action::Screenshot { .. }, TargetRef::Coordinates { .. }) => {
+            DeliveryRoute::TargetAddressed
+        }
         (Action::Scroll { .. }, TargetRef::Element { .. }) => {
             if cfg!(target_os = "macos") {
                 native_pointer_delivery_route()
@@ -991,13 +994,6 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
         global_input_allowed(),
     ) {
         InputDelivery::PerProcess(pid) => {
-            #[cfg(feature = "skylight")]
-            {
-                use foreign_types::ForeignType;
-                if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-                    return Ok(());
-                }
-            }
             event.post_to_pid(pid);
             Ok(())
         }
@@ -1123,6 +1119,25 @@ impl NativeRuntime {
 
     fn screen_content_hash(&self) -> Result<String, NativeError> {
         native_screen_content_hash()
+    }
+
+    fn capture_screen(&self, path: &Path) -> Result<(), NativeError> {
+        #[cfg(all(target_os = "macos", feature = "screencapturekit"))]
+        {
+            if !native_permissions()
+                .get("screen_recording")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(NativeError);
+            }
+            return macos_capture::capture_screen(path).map_err(|_| NativeError);
+        }
+        #[cfg(not(all(target_os = "macos", feature = "screencapturekit")))]
+        {
+            let _ = path;
+            Err(NativeError)
+        }
     }
 
     fn target_content_hash(&self, point: &NativePoint) -> Result<String, NativeError> {
@@ -2485,6 +2500,22 @@ fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn mac_enabled_state(
+    enabled: Option<bool>,
+    role: &str,
+    value_settable: impl FnOnce() -> bool,
+) -> Option<bool> {
+    // TextEdit omits AXEnabled on editable text; native settable evidence still proves operability.
+    enabled.or_else(|| {
+        (matches!(
+            role,
+            "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox"
+        ) && value_settable())
+        .then_some(true)
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn mac_native_element(
     element: &AxElement,
@@ -2506,11 +2537,15 @@ fn mac_native_element(
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let role = element.string("AXRole").ok_or(NativeError)?;
     let title = element.string("AXTitle");
+    // Description is the element label; AXHelp is the tooltip for controls that omit one.
     let label = element
         .string("AXDescription")
         .filter(|value| !value.is_empty())
-        .or_else(|| title.clone());
-    let enabled = element.boolean("AXEnabled");
+        .or_else(|| title.clone())
+        .or_else(|| element.string("AXHelp").filter(|value| !value.is_empty()));
+    let enabled = mac_enabled_state(element.boolean("AXEnabled"), &role, || {
+        element.is_settable("AXValue")
+    });
     let focused = element.boolean("AXFocused");
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let window = element
@@ -3148,17 +3183,80 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
+    let mut selected = None;
+    for (index, matches) in matches.enumerate() {
+        if matches && selected.replace(index).is_some() {
+            return Err(NativeError);
+        }
+    }
+    selected.ok_or(NativeError)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_current_focused_window(
+    surfaces: &[(i32, i64, AxElement)],
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<AxElement, NativeError> {
+    use accessibility_sys::{AXUIElementCreateApplication, AXUIElementCreateSystemWide};
+
+    mac_native_boundary(cancellation, deadline_at_ms)?;
+    let system = AxElement::created(unsafe { AXUIElementCreateSystemWide() })?;
+    if let Ok(window) = system
+        .element("AXFocusedApplication")
+        .and_then(|app| app.element("AXFocusedWindow"))
+    {
+        return Ok(window);
+    }
+    // Some hosts omit systemwide focus attributes; an explicit app focus claim remains required.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut focused = None;
+    for (pid, _, _) in surfaces {
+        mac_native_boundary(cancellation, deadline_at_ms)?;
+        if !seen.insert(*pid) {
+            continue;
+        }
+        let application = AxElement::created(unsafe { AXUIElementCreateApplication(*pid) })?;
+        if application.boolean("AXFrontmost") == Some(true) {
+            let window = application.element("AXFocusedWindow")?;
+            if focused.replace(window).is_some() {
+                return Err(NativeError);
+            }
+        }
+    }
+    focused.ok_or(NativeError)
+}
+
 #[cfg(target_os = "macos")]
 fn mac_frontmost_window(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
 ) -> Result<AxElement, NativeError> {
-    mac_surface_windows(cancellation, deadline_at_ms)
-        .map_err(|_| NativeError)?
-        .into_iter()
-        .next()
-        .map(|(_, _, window)| window)
-        .ok_or(NativeError)
+    use accessibility_sys::{AXUIElementGetPid, kAXErrorSuccess};
+
+    let mut surfaces =
+        mac_surface_windows(cancellation, deadline_at_ms).map_err(|_| NativeError)?;
+    let focused = mac_current_focused_window(&surfaces, cancellation, deadline_at_ms)?;
+    let mut focused_pid = 0;
+    focused.prepare()?;
+    if unsafe { AXUIElementGetPid(focused.0, &mut focused_pid) } != kAXErrorSuccess
+        || focused_pid <= 0
+    {
+        return Err(NativeError);
+    }
+    // CG stacking order includes utility panels; only the exact AX-focused onscreen surface qualifies.
+    let selected = unique_focused_surface(
+        surfaces
+            .iter()
+            .map(|(pid, _, window)| *pid == focused_pid && window.identity_eq(&focused)),
+    )?;
+    let current = mac_current_focused_window(&surfaces, cancellation, deadline_at_ms)?;
+    if !current.identity_eq(&focused) {
+        return Err(NativeError);
+    }
+    Ok(surfaces.swap_remove(selected).2)
 }
 
 #[cfg(target_os = "macos")]
@@ -3473,10 +3571,7 @@ fn mac_semantic_snapshot(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
 ) -> Result<(semantic::SemanticObservation, Vec<ElementObservation>), ProtocolError> {
-    use accessibility_sys::{
-        AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementSetMessagingTimeout,
-        kAXErrorSuccess,
-    };
+    use accessibility_sys::{AXUIElementGetPid, AXUIElementSetMessagingTimeout, kAXErrorSuccess};
     use std::collections::VecDeque;
 
     if cancellation.is_cancelled() {
@@ -3485,35 +3580,16 @@ fn mac_semantic_snapshot(
     if now_ms() >= deadline_at_ms {
         return Err(ProtocolError::ObservationExpired);
     }
-    let system = AxElement::created(unsafe { AXUIElementCreateSystemWide() })
-        .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
     let window = if let Some(window) = selected_window {
         window
     } else {
-        match mac_frontmost_window(cancellation, deadline_at_ms) {
-            Ok(window) => window,
-            Err(_) => {
-                check_protocol_boundary(cancellation, deadline_at_ms)?;
-                system
-                    .element("AXFocusedApplication")
-                    .and_then(|application| application.element("AXFocusedWindow"))
-                    .or_else(|_| {
-                        mac_native_boundary(cancellation, deadline_at_ms)?;
-                        system.element("AXFocusedUIElement").and_then(|element| {
-                            element
-                                .element("AXWindow")
-                                .or_else(|_| element.element("AXTopLevelUIElement"))
-                        })
-                    })
-                    .map_err(|_| {
-                        mac_observation_error(
-                            cancellation,
-                            deadline_at_ms,
-                            ProtocolError::TargetNotFound("focused window not found".to_string()),
-                        )
-                    })?
-            }
-        }
+        mac_frontmost_window(cancellation, deadline_at_ms).map_err(|_| {
+            mac_observation_error(
+                cancellation,
+                deadline_at_ms,
+                ProtocolError::TargetNotFound("focused onscreen window not found".to_string()),
+            )
+        })?
     };
     let mut process_id = 0;
     window
@@ -4193,6 +4269,38 @@ impl<E: Executor> Engine<E> {
         self
     }
 
+    /// Executes a host-approved sequence, stopping unless each action is verified successful.
+    ///
+    /// The returned prefix contains one result per attempted request, including the stopping
+    /// error or terminal report. Empty input returns an empty vector. Each request still needs
+    /// its own signed authority and fresh target; this is not an atomic transaction and earlier
+    /// effects are not rolled back. Unknown outcomes must be reconciled, never blindly retried.
+    /// Hosts should observe and authorize another batch when an earlier step changes targets.
+    pub fn execute_batch(
+        &self,
+        requests: &[ActionRequest],
+        cancellation: &CancellationToken,
+    ) -> Vec<Result<ExecuteReport, ProtocolError>> {
+        let mut results = Vec::new();
+        for request in requests {
+            let result = self.execute(request, cancellation);
+            let verified = matches!(
+                &result,
+                Ok(report) if matches!(
+                    report.acknowledgements.last().map(|ack| &ack.state),
+                    Some(AckState::Terminal { terminal })
+                        if matches!(terminal.as_ref(), Terminal::Succeeded { receipt }
+                            if receipt.effect == Effect::Verified)
+                )
+            );
+            results.push(result);
+            if !verified {
+                break;
+            }
+        }
+        results
+    }
+
     pub fn execute(
         &self,
         request: &ActionRequest,
@@ -4646,6 +4754,7 @@ fn strict_action_capability<'a>(
             "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
                 capability.delivery_route == DeliveryRoute::TargetAddressed
             }
+            "screenshot" => capability.delivery_route == DeliveryRoute::TargetAddressed,
             "click" | "drag" | "type_text" | "press" | "paste" | "hotkey" | "move" => matches!(
                 capability.delivery_route,
                 DeliveryRoute::Pointer | DeliveryRoute::PerProcessEvent
@@ -5104,21 +5213,18 @@ impl NativeExecutor {
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<Option<DispatchReceipt>, DispatchError> {
+        if let Action::Screenshot { path } = action {
+            Self::check_before_effect(cancellation, deadline_at_ms)?;
+            self.runtime
+                .capture_screen(path)
+                .map_err(ambiguous_dispatch)?;
+            Self::check_after_effect(cancellation, deadline_at_ms)?;
+            return Ok(Some(DispatchReceipt {
+                backend: self.runtime.resolve_backend().to_string(),
+                fallback_chain: Vec::new(),
+            }));
+        }
         let status: std::process::ExitStatus = match action {
-            Action::Screenshot { path } => {
-                Self::check_before_effect(cancellation, deadline_at_ms)?;
-                #[cfg(target_os = "macos")]
-                {
-                    secure_command("screencapture")
-                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
-                        .arg("-x")
-                        .arg(path)
-                        .status()
-                        .map_err(|_| ambiguous("desktop action dispatch failed"))?
-                }
-                #[cfg(not(target_os = "macos"))]
-                return Err(unsupported("screenshot is unavailable on this backend"));
-            }
             Action::Application { operation, name } => {
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
                 #[cfg(target_os = "macos")]
@@ -5820,6 +5926,19 @@ impl Executor for NativeExecutor {
             let mut supported_actions = Vec::new();
             #[cfg(target_os = "macos")]
             supported_actions.extend(macos_semantic_actions(accessibility));
+            #[cfg(target_os = "macos")]
+            if permissions
+                .get("screen_recording")
+                .copied()
+                .unwrap_or(false)
+                && permissions
+                    .get("coordinate_capture")
+                    .copied()
+                    .unwrap_or(false)
+                && permissions.get("private_state").copied().unwrap_or(false)
+            {
+                supported_actions.push("screenshot");
+            }
             #[cfg(not(target_os = "macos"))]
             {
                 let private_state = permissions.get("private_state").copied().unwrap_or(false);
@@ -5845,6 +5964,7 @@ impl Executor for NativeExecutor {
                         "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
                             DeliveryRoute::TargetAddressed
                         }
+                        "screenshot" => DeliveryRoute::TargetAddressed,
                         "scroll" | "type_text" | "press" | "paste" | "hotkey" => {
                             native_pointer_delivery_route()
                         }
@@ -5854,6 +5974,7 @@ impl Executor for NativeExecutor {
                         "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
                             BackgroundSupport::Guarded
                         }
+                        "screenshot" => BackgroundSupport::Guarded,
                         "scroll" | "type_text" | "press" | "paste" | "hotkey"
                             if native_pointer_delivery_route()
                                 == DeliveryRoute::PerProcessEvent =>
@@ -6829,20 +6950,22 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
-    let auxiliary = matches!(
+    let host_auxiliary = matches!(
         request.action,
-        Action::Screenshot { .. }
-            | Action::Application { .. }
+        Action::Application { .. }
             | Action::Window { .. }
             | Action::Open { .. }
             | Action::ClipboardWrite { .. }
     );
-    if matches!(request.target, TargetRef::None) && !auxiliary {
+    if matches!(request.target, TargetRef::None)
+        && !host_auxiliary
+        && !matches!(request.action, Action::Screenshot { .. })
+    {
         return Err(ProtocolError::InvalidRequest(
             "action requires a target".to_string(),
         ));
     }
-    if auxiliary
+    if host_auxiliary
         && (!matches!(request.target, TargetRef::None)
             || !matches!(request.verification, VerificationPolicy::None))
     {
@@ -6850,15 +6973,23 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "desktop action requires no target and no target verification".to_string(),
         ));
     }
+    if matches!(request.action, Action::Screenshot { .. })
+        && (!matches!(request.target, TargetRef::Coordinates { .. })
+            || !matches!(request.verification, VerificationPolicy::None))
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "screenshot requires a fenced coordinate target and no target verification".to_string(),
+        ));
+    }
     validate_action(&request.action)?;
     if matches!(request.target, TargetRef::Coordinates { .. })
         && !matches!(
             request.action,
-            Action::Click { .. } | Action::Move | Action::Drag { .. }
+            Action::Click { .. } | Action::Move | Action::Drag { .. } | Action::Screenshot { .. }
         )
     {
         return Err(ProtocolError::InvalidRequest(
-            "coordinate targets support only click, move, and drag".to_string(),
+            "coordinate targets support only click, move, drag, and screenshot".to_string(),
         ));
     }
     if matches!(request.action, Action::Drag { .. })
@@ -6960,43 +7091,6 @@ fn target_provenance_is_valid(target: &TargetRef) -> bool {
                 && semantic_hash(&target.fingerprint_hash)
         }
         TargetRef::None => true,
-    }
-}
-
-#[cfg(all(target_os = "macos", feature = "skylight"))]
-mod skylight {
-    use std::ffi::{CString, c_void};
-    use std::sync::OnceLock;
-
-    type PostToPid = unsafe extern "C" fn(i32, *const c_void) -> i32;
-
-    const FRAMEWORK: &str = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
-    const SYMBOL: &str = "SLEventPostToPid";
-
-    fn entry() -> Option<PostToPid> {
-        static ENTRY: OnceLock<Option<usize>> = OnceLock::new();
-        let address = (*ENTRY.get_or_init(|| {
-            let path = CString::new(FRAMEWORK).ok()?;
-            let symbol = CString::new(SYMBOL).ok()?;
-            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) };
-            if handle.is_null() {
-                return None;
-            }
-            let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
-            if address.is_null() {
-                None
-            } else {
-                Some(address as usize)
-            }
-        }))?;
-        Some(unsafe { std::mem::transmute::<usize, PostToPid>(address) })
-    }
-
-    pub(crate) fn post_to_pid(pid: i32, event: *const c_void) -> bool {
-        if pid <= 0 || event.is_null() {
-            return false;
-        }
-        entry().is_some_and(|post| unsafe { post(pid, event) } == 0)
     }
 }
 
@@ -8029,7 +8123,7 @@ mod tests {
             action_delivery_route(&Action::Screenshot {
                 path: PathBuf::new()
             }),
-            DeliveryRoute::Pointer
+            DeliveryRoute::TargetAddressed
         );
         assert_eq!(
             action_delivery_route(&Action::Application {
@@ -8834,5 +8928,40 @@ mod tests {
             .0,
             Effect::ExecutedUnverified
         );
+    }
+}
+
+#[cfg(test)]
+mod mac_enabled_tests {
+    #[test]
+    fn missing_enabled_requires_native_settable_text_and_never_overrides_false() {
+        use super::mac_enabled_state;
+        assert_eq!(mac_enabled_state(None, "AXTextArea", || true), Some(true));
+        assert_eq!(mac_enabled_state(None, "AXTextField", || true), Some(true));
+        assert_eq!(mac_enabled_state(None, "AXSearchField", || true), Some(true));
+        assert_eq!(mac_enabled_state(None, "AXComboBox", || true), Some(true));
+        assert_eq!(mac_enabled_state(None, "AXTextArea", || false), None);
+        assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
+        assert_eq!(
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
+            Some(false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod focused_surface_tests {
+    #[test]
+    fn focused_document_wins_over_frontmost_utility_panel_and_ambiguity_fails_closed() {
+        use super::unique_focused_surface;
+        assert_eq!(
+            unique_focused_surface([false, true, false].into_iter()).unwrap(),
+            1
+        );
+        assert!(unique_focused_surface([false, false].into_iter()).is_err());
+        assert!(unique_focused_surface([true, true].into_iter()).is_err());
+        assert!(unique_focused_surface([].into_iter()).is_err());
     }
 }
