@@ -8196,6 +8196,17 @@ mod tests {
     }
 
     #[test]
+    fn test_global_input_allowance_default() {
+        assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
+        assert!(std::env::var("PRAEFECTUS_NO_YOLO").is_err());
+        let allowance = super::global_input_allowance();
+        assert_eq!(allowance.allowed, true);
+        assert_eq!(allowance.no_yolo, false);
+        assert_eq!(allowance.persisted, false);
+        assert_eq!(allowance.environment, false);
+    }
+
+    #[test]
     fn persist_no_yolo_creates_a_regular_private_file() {
         let directory = tempfile::tempdir().expect("temp directory");
         let path = directory.path().join("no-yolo");
