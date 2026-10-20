@@ -8098,7 +8098,7 @@ mod tests {
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError, Receipt, Rect,
         ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
         VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
         element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
@@ -8169,6 +8169,23 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_observe_semantic_cancelled() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let result = executor.observe_semantic(&cancellation, i64::MAX);
+        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_observe_semantic_expired() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let result = executor.observe_semantic(&cancellation, 0);
+        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
