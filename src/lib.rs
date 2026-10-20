@@ -8133,6 +8133,18 @@ mod tests {
     }
 
     #[test]
+    fn test_with_session_isolation() {
+        let executor = NativeExecutor::default();
+        assert_eq!(executor.session_isolation, SessionIsolation::SharedDesktop);
+
+        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
+        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
+
+        let executor = NativeExecutor::with_session_isolation(SessionIsolation::Unknown);
+        assert_eq!(executor.session_isolation, SessionIsolation::Unknown);
+    }
+
+    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
