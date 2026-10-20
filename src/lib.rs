@@ -8072,6 +8072,34 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
+    fn test_list_surfaces() {
+        let executor = NativeExecutor::default();
+
+        // Test 1: Cancelled token
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(result, Err(crate::ProtocolError::ObservationCancelled)));
+
+        // Test 2: Expired deadline
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() - 1000; // Past
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(result, Err(crate::ProtocolError::ObservationExpired)));
+
+        // Test 3: Valid arguments (might succeed or return executor error depending on environment)
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        match result {
+            Err(crate::ProtocolError::ObservationCancelled) => panic!("Should not be cancelled"),
+            Err(crate::ProtocolError::ObservationExpired) => panic!("Should not be expired"),
+            _ => {} // OK
+        }
+    }
+
+    #[test]
     fn test_canonicalize_json() {
         let mut value = json!({
             "b": 2,
