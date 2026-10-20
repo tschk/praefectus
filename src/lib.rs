@@ -9156,4 +9156,40 @@ mod tests {
             Effect::ExecutedUnverified
         );
     }
+
+    #[test]
+    fn test_list_windows_cancellation() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+
+        let result = executor.list_windows(&token, i64::MAX);
+        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_list_windows_expiration() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+
+        let result = executor.list_windows(&token, 0);
+        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
+    fn test_list_windows_success() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+
+        let result = executor.list_windows(&token, i64::MAX);
+        match result {
+            Ok(value) => {
+                assert!(value.is_array());
+            }
+            Err(e) => {
+                // In headless CI environments without a desktop session, it might legitimately fail to list surfaces.
+                assert!(matches!(e, super::ProtocolError::Executor(_)));
+            }
+        }
+    }
 }
