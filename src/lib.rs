@@ -8133,6 +8133,23 @@ mod tests {
     }
 
     #[test]
+    fn test_observe_semantic_cancelled() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let result = executor.observe_semantic(&token, super::now_ms() + 10000);
+        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_observe_semantic_expired() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let result = executor.observe_semantic(&token, 0);
+        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
