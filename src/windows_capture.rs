@@ -88,9 +88,8 @@ mod tests {
     #[test]
     fn screen_capture_without_display_returns_error() {
         let result = native_screen_content_hash();
-        match result {
-            Ok(hash) => assert!(!hash.is_empty()),
-            Err(_) => {} // Expected on headless CI like wine without X server
-        }
+        if let Ok(hash) = result {
+            assert!(!hash.is_empty());
+        } // Err(_) is expected on headless CI like wine without X server
     }
 }

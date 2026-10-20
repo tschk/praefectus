@@ -7,7 +7,11 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+    "RUSTSEC-2026-0370", # zvariant is unmaintained, but atspi currently requires it
+    "RUSTSEC-2026-0371", # zbus_names is unmaintained, but atspi currently requires it
+    "RUSTSEC-2026-0372", # zvariant_derive is unmaintained, but atspi currently requires it
+]
 
 [licenses]
 allow = [
