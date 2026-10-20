@@ -8138,7 +8138,10 @@ mod tests {
         let token = CancellationToken::default();
         token.cancel();
         let result = executor.observe_semantic(&token, super::now_ms() + 10000);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
     }
 
     #[test]
@@ -8146,7 +8149,10 @@ mod tests {
         let executor = NativeExecutor::default();
         let token = CancellationToken::default();
         let result = executor.observe_semantic(&token, 0);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
     }
 
     #[test]
