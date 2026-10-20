@@ -8111,6 +8111,16 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
+    fn test_with_session_isolation() {
+        assert_eq!(
+            NativeExecutor::default().session_isolation,
+            SessionIsolation::SharedDesktop
+        );
+        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
+        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
+    }
+
+    #[test]
     fn test_canonicalize_json() {
         let mut value = json!({
             "b": 2,
