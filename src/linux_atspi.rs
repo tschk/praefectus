@@ -2767,4 +2767,21 @@ mod tests {
             Err(ProtocolError::ObservationExpired)
         ));
     }
+
+    #[test]
+    fn list_surfaces_honors_observation_boundaries() {
+        let Ok(backend) = LinuxAtspiBackend::connect() else {
+            return;
+        };
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        assert!(matches!(
+            backend.list_surfaces(&cancellation, i64::MAX),
+            Err(ProtocolError::ObservationCancelled)
+        ));
+        assert!(matches!(
+            backend.list_surfaces(&CancellationToken::default(), now_ms()),
+            Err(ProtocolError::ObservationExpired)
+        ));
+    }
 }
