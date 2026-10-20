@@ -8059,11 +8059,11 @@ mod tests {
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
-        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
-        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError,
+        Receipt, Rect, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
+        Terminal, VerificationPolicy, canonical_authority_bytes, canonicalize_json,
+        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -8130,6 +8130,23 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_list_surfaces_cancellation() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let result = executor.list_surfaces(&token, i64::MAX);
+        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_list_surfaces_expiration() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let result = executor.list_surfaces(&token, 0);
+        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
