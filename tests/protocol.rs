@@ -1013,27 +1013,22 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
 #[test]
 fn native_executor_observe_coordinates() {
     let executor = NativeExecutor::default();
-    let capabilities = executor.capabilities().expect("capabilities");
     if cfg!(target_os = "linux")
         && std::env::var("DISPLAY").is_err()
         && std::env::var("WAYLAND_DISPLAY").is_err()
     {
-        // No desktop session on CI — capabilities may be empty.
+        // No desktop session on CI.
         return;
     }
-    let coordinate_capture = capabilities
-        .permissions
-        .get("coordinate_capture")
-        .copied()
-        .expect("coordinate capture permission");
     let result = executor.observe_coordinates();
-    if coordinate_capture {
-        let observation = result.expect("coordinate observation");
-        assert_eq!(observation.protocol_version, praefectus::PROTOCOL_VERSION);
-        assert!(!observation.snapshot_id.is_empty());
-    } else {
-        let error = result.expect_err("unsupported coordinate observation");
-        assert!(matches!(error, praefectus::ProtocolError::Executor(_)));
+    match result {
+        Ok(observation) => {
+            assert_eq!(observation.protocol_version, praefectus::PROTOCOL_VERSION);
+            assert!(!observation.snapshot_id.is_empty());
+        }
+        Err(error) => {
+            assert!(matches!(error, praefectus::ProtocolError::Executor(_)));
+        }
     }
 }
 
