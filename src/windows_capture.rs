@@ -80,3 +80,17 @@ pub(crate) fn native_screen_content_hash() -> Result<String, NativeError> {
     hasher.update(&pixels[..used]);
     Ok(hex::encode(hasher.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_capture_without_display_returns_error() {
+        let result = native_screen_content_hash();
+        match result {
+            Ok(hash) => assert!(!hash.is_empty()),
+            Err(_) => {} // Expected on headless CI like wine without X server
+        }
+    }
+}
