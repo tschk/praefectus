@@ -8080,13 +8080,19 @@ mod tests {
         cancellation.cancel();
         let deadline = super::now_ms() + 10_000;
         let result = executor.list_surfaces(&cancellation, deadline);
-        assert!(matches!(result, Err(crate::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationCancelled)
+        ));
 
         // Test 2: Expired deadline
         let cancellation = CancellationToken::default();
         let deadline = super::now_ms() - 1000; // Past
         let result = executor.list_surfaces(&cancellation, deadline);
-        assert!(matches!(result, Err(crate::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationExpired)
+        ));
 
         // Test 3: Valid arguments (might succeed or return executor error depending on environment)
         let cancellation = CancellationToken::default();
