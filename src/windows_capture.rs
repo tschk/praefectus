@@ -80,3 +80,21 @@ pub(crate) fn native_screen_content_hash() -> Result<String, NativeError> {
     hasher.update(&pixels[..used]);
     Ok(hex::encode(hasher.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_native_screen_content_hash() {
+        match native_screen_content_hash() {
+            Ok(hash) => {
+                assert_eq!(hash.len(), 64);
+                assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+            }
+            Err(e) => {
+                assert!(matches!(e, crate::NativeError));
+            }
+        }
+    }
+}
