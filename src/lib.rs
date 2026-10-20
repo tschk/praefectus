@@ -8554,6 +8554,52 @@ mod tests {
     }
 
     #[test]
+    fn test_observe_surface_invalid_surface() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+
+        let result = executor.observe_surface(
+            &super::SurfaceRef {
+                id: "invalid_hash".to_string(),
+            },
+            &cancellation,
+            super::now_ms() + 1000,
+        );
+        assert!(matches!(result, Err(super::ProtocolError::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn test_observe_surface_cancelled() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+        cancellation.cancel();
+
+        let result = executor.observe_surface(
+            &super::SurfaceRef {
+                id: "1234567890123456789012345678901234567890123456789012345678901234".to_string(),
+            },
+            &cancellation,
+            super::now_ms() + 1000,
+        );
+        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_observe_surface_expired() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+
+        let result = executor.observe_surface(
+            &super::SurfaceRef {
+                id: "1234567890123456789012345678901234567890123456789012345678901234".to_string(),
+            },
+            &cancellation,
+            super::now_ms() - 1000,
+        );
+        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
     fn test_default_ledger_path() {
         let path = default_ledger_path();
         assert!(path.ends_with("praefectus-operations.jsonl"));
