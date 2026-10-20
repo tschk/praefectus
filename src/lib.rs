@@ -9164,7 +9164,17 @@ mod tests {
         let cancelled = CancellationToken::default();
         cancelled.cancel();
 
-        assert!(matches!(executor.list_surfaces(&cancelled, super::now_ms() + 1000).unwrap_err(), super::ProtocolError::ObservationCancelled));
-        assert!(matches!(executor.list_surfaces(&active, super::now_ms() - 1000).unwrap_err(), super::ProtocolError::ObservationExpired));
+        assert!(matches!(
+            executor
+                .list_surfaces(&cancelled, super::now_ms() + 1000)
+                .unwrap_err(),
+            super::ProtocolError::ObservationCancelled
+        ));
+        assert!(matches!(
+            executor
+                .list_surfaces(&active, super::now_ms() - 1000)
+                .unwrap_err(),
+            super::ProtocolError::ObservationExpired
+        ));
     }
 }
