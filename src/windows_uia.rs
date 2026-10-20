@@ -878,8 +878,7 @@ fn surface_descriptor(
         _ => return Ok(None),
     };
     if window_process_id(window).ok() != Some(process_id)
-        || process_generation(process_id).ok().as_deref()
-            != Some(expected_process_generation)
+        || process_generation(process_id).ok().as_deref() != Some(expected_process_generation)
     {
         return Ok(None);
     }
