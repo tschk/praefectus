@@ -1,0 +1,3 @@
+Looking at atspi:
+0.30.0 uses zbus = "5" and therefore relies on unmaintained zbus_names and zvariant.
+0.40.0 uses zbus = "6" (or similar), wait, let's search versions of atspi.

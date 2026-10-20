@@ -1516,16 +1516,19 @@ impl NativeRuntime {
 
             if let Some(delay) = _delay_ms {
                 if delay > 0 {
-                    #[allow(clippy::chunks_exact_to_as_chunks)]
                     for chunk in inputs.chunks_exact(2) {
                         let _ = unsafe { SendInput(chunk, std::mem::size_of::<INPUT>() as i32) };
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
                 } else {
-                    let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+                    for chunk in inputs.chunks(250) {
+                        let _ = unsafe { SendInput(chunk, std::mem::size_of::<INPUT>() as i32) };
+                    }
                 }
             } else {
-                let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+                for chunk in inputs.chunks(250) {
+                    let _ = unsafe { SendInput(chunk, std::mem::size_of::<INPUT>() as i32) };
+                }
             }
 
             if _press_return {
