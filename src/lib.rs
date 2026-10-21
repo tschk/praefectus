@@ -8674,6 +8674,29 @@ mod tests {
     }
 
     #[test]
+    fn test_clipboard_read() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() + 10000;
+
+        let result = executor.clipboard_read(&cancellation, deadline);
+
+        #[cfg(target_os = "macos")]
+        {
+            let _ = result;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(result.is_err());
+            if let Err(super::ProtocolError::Executor(msg)) = result {
+                assert_eq!(msg, "clipboard observation is unavailable");
+            } else {
+                panic!("Expected ProtocolError::Executor");
+            }
+        }
+    }
+
+    #[test]
     fn test_default_ledger_path() {
         let path = default_ledger_path();
         assert!(path.ends_with("praefectus-operations.jsonl"));
