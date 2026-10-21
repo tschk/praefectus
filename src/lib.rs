@@ -5099,10 +5099,12 @@ impl NativeExecutor {
         {
             return windows_uia::list_surfaces(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
-        Err(ProtocolError::Executor(
-            "surface enumeration is unavailable".to_string(),
-        ))
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ProtocolError::Executor(
+                "surface enumeration is unavailable".to_string(),
+            ))
+        }
     }
 
     pub fn observe_surface(
@@ -5158,10 +5160,12 @@ impl NativeExecutor {
         {
             return windows_uia::snapshot_surface(surface, cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
-        Err(ProtocolError::Executor(
-            "surface observation is unavailable".to_string(),
-        ))
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ProtocolError::Executor(
+                "surface observation is unavailable".to_string(),
+            ))
+        }
     }
 
     fn dispatch_semantic(
@@ -5425,7 +5429,7 @@ impl NativeExecutor {
                 _ => Err(unsupported("semantic action is unavailable")),
             };
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = (action, target, cancellation, deadline_at_ms);
             Err(unsupported("semantic action is unavailable"))
@@ -5662,10 +5666,12 @@ impl NativeExecutor {
         {
             return windows_uia::snapshot(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
-        Err(ProtocolError::Executor(
-            "semantic observation is unavailable".to_string(),
-        ))
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ProtocolError::Executor(
+                "semantic observation is unavailable".to_string(),
+            ))
+        }
     }
 
     pub fn observe_focused(
@@ -5740,10 +5746,12 @@ impl NativeExecutor {
         {
             return windows_uia::focused_target(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
-        Err(ProtocolError::Executor(
-            "focused observation is unavailable".to_string(),
-        ))
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ProtocolError::Executor(
+                "focused observation is unavailable".to_string(),
+            ))
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -6053,10 +6061,12 @@ impl Executor for NativeExecutor {
         {
             return windows_uia::shared_desktop_context_hash(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
-        Err(ProtocolError::Executor(
-            "shared desktop context is unavailable".to_string(),
-        ))
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ProtocolError::Executor(
+                "shared desktop context is unavailable".to_string(),
+            ))
+        }
     }
 
     fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
