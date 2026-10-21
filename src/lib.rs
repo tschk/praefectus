@@ -8253,6 +8253,39 @@ mod tests {
     }
 
     #[test]
+    fn test_list_applications() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let result = executor.list_applications(&cancellation, i64::MAX);
+
+        #[cfg(target_os = "macos")]
+        {
+            // Just verify it doesn't panic and returns either an expected error or an array of strings.
+            match result {
+                Ok(serde_json::Value::Array(arr)) => {
+                    assert!(arr.iter().all(|v| v.is_string()));
+                }
+                Err(crate::ProtocolError::Executor(msg)) => {
+                    assert!(
+                        msg == "desktop backend error" || msg == "application enumeration failed"
+                    );
+                }
+                _ => panic!("Unexpected result on macOS: {:?}", result),
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            match result {
+                Err(crate::ProtocolError::Executor(msg)) => {
+                    assert_eq!(msg, "application enumeration is unavailable");
+                }
+                _ => panic!("Unexpected result on non-macOS: {:?}", result),
+            }
+        }
+    }
+
+    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
