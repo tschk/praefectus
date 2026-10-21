@@ -1585,7 +1585,14 @@ fn the_null_outcome_ledger_always_grants_dispatch() {
 #[test]
 fn native_executor_clipboard_read() {
     let executor = NativeExecutor::default();
-    let result = executor.clipboard_read(&CancellationToken::default(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 5000);
+    let result = executor.clipboard_read(
+        &CancellationToken::default(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 5000,
+    );
 
     if cfg!(target_os = "macos") {
         // We shouldn't mutate clipboard in a normal test without #[ignore], so we just check it doesn't crash
