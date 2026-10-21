@@ -1098,7 +1098,9 @@ fn secure_command(name: &str) -> Result<Command, NativeError> {
     Err(NativeError)
 }
 
-fn global_input_env_restriction(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<bool> {
+fn global_input_env_restriction(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<bool> {
     match get_env("PRAEFECTUS_ALLOW_GLOBAL_INPUT").and_then(|s| s.into_string().ok()) {
         Some(value) if value == "1" => return Some(false),
         Some(value) if value == "0" => return Some(true),
@@ -1112,9 +1114,7 @@ fn global_input_env_restriction(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 fn no_yolo_path(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
-    observation_root(get_env)
-        .join("praefectus")
-        .join("no-yolo")
+    observation_root(get_env).join("praefectus").join("no-yolo")
 }
 
 fn restriction_file_is_present(path: &Path) -> bool {
@@ -1138,7 +1138,9 @@ pub fn global_input_allowed() -> bool {
     global_input_allowed_with_env(|k| std::env::var_os(k))
 }
 
-fn global_input_allowed_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy) -> bool {
+fn global_input_allowed_with_env(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
+) -> bool {
     !match global_input_env_restriction(get_env) {
         Some(restricted) => restricted,
         None => persistent_no_yolo(get_env),
@@ -1157,7 +1159,9 @@ pub fn global_input_allowance() -> GlobalInputAllowance {
     global_input_allowance_with_env(|k| std::env::var_os(k))
 }
 
-fn global_input_allowance_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy) -> GlobalInputAllowance {
+fn global_input_allowance_with_env(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
+) -> GlobalInputAllowance {
     let environment = global_input_env_restriction(get_env) == Some(true);
     let persisted = persistent_no_yolo(get_env);
     let allowed = global_input_allowed_with_env(get_env);
