@@ -7,7 +7,9 @@ mod live_macos_tests {
 
     #[test]
     fn mac_clipboard_read() {
-        let exec = praefectus::NativeExecutor::with_session_isolation(praefectus::SessionIsolation::SharedDesktop);
+        let exec = praefectus::NativeExecutor::with_session_isolation(
+            praefectus::SessionIsolation::SharedDesktop,
+        );
         let cancel = praefectus::CancellationToken::default();
 
         let write_status = Command::new("sh")

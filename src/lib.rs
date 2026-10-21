@@ -8079,7 +8079,11 @@ mod tests {
         let res = exec.clipboard_read(&cancel, i64::MAX);
 
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("clipboard observation is unavailable"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("clipboard observation is unavailable")
+        );
     }
 
     #[test]
