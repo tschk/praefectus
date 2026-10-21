@@ -6,6 +6,24 @@ mod live_macos_tests {
     /// This exercises the full native input path.
 
     #[test]
+    fn mac_clipboard_read() {
+        let exec = praefectus::NativeExecutor::with_session_isolation(
+            praefectus::SessionIsolation::SharedDesktop,
+        );
+        let cancel = praefectus::CancellationToken::default();
+
+        let write_status = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'test_clipboard_content' | pbcopy")
+            .status()
+            .expect("pbcopy should succeed");
+        assert!(write_status.success());
+
+        let content = exec.clipboard_read(&cancel, i64::MAX).unwrap();
+        assert_eq!(content.trim(), "test_clipboard_content");
+    }
+
+    #[test]
     #[ignore = "requires macOS accessibility permissions and a running UI"]
     fn mac_e2e_type_text_in_textedit() {
         // Check accessibility permission first

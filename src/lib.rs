@@ -8191,6 +8191,21 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn test_clipboard_read_unsupported_platform() {
+        let exec = NativeExecutor::with_session_isolation(SessionIsolation::SharedDesktop);
+        let cancel = CancellationToken::default();
+        let res = exec.clipboard_read(&cancel, i64::MAX);
+
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("clipboard observation is unavailable")
+        );
+    }
+
     #[test]
     fn test_canonicalize_json() {
         let mut value = json!({
