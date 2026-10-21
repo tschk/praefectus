@@ -6800,17 +6800,31 @@ impl OperationLedger {
             Err(error) => return Err(error.into()),
         };
         restrict_file(&file)?;
-        let mut lines = BufReader::new(file).lines().peekable();
+        let mut buf_reader = BufReader::new(file);
+        let mut line_buf = String::new();
         let mut records = Vec::new();
-        while let Some(line) = lines.next() {
-            let line = line?;
-            if line.trim().is_empty() {
+        loop {
+            line_buf.clear();
+            let len = buf_reader.read_line(&mut line_buf)?;
+            if len == 0 {
+                break;
+            }
+            if line_buf.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str(&line) {
+            match serde_json::from_str(&line_buf) {
                 Ok(record) => records.push(record),
-                Err(_) if lines.peek().is_none() => break,
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    let mut is_eof = false;
+                    let peek = buf_reader.fill_buf()?;
+                    if peek.is_empty() || peek.iter().all(|b| b.is_ascii_whitespace()) {
+                        is_eof = true;
+                    }
+                    if is_eof {
+                        break;
+                    }
+                    return Err(error.into());
+                }
             }
         }
         Ok(records)
