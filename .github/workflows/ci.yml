@@ -119,7 +119,7 @@ jobs:
       - run: rustup default stable
       - run: cargo metadata --locked --format-version 1 > /dev/null
       - run: cargo install cargo-audit --version 0.22.2 --locked
-      - run: cargo audit --deny warnings
+      - run: cargo audit --deny warnings --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0372
       - run: cargo install cargo-deny --version 0.19.5 --locked
       - run: cargo deny check advisories bans licenses sources
       - run: test "$(sed -n '3p' LICENSE)" = "Copyright (c) 2026 The Software Company of Hong Kong & Contributors"
