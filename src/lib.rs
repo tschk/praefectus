@@ -8140,12 +8140,18 @@ mod tests {
         cancelled_token.cancel();
 
         let result = executor.list_applications(&cancelled_token, i64::MAX);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
 
         let active_token = CancellationToken::default();
         let past_deadline = 0;
         let result = executor.list_applications(&active_token, past_deadline);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
 
         #[cfg(not(target_os = "macos"))]
         {
