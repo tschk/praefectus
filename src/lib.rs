@@ -2542,8 +2542,7 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
-#[cfg(target_os = "macos")]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, target_os = "macos")))]
 fn mac_enabled_state(
     enabled: Option<bool>,
     role: &str,
@@ -2559,6 +2558,7 @@ fn mac_enabled_state(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -3268,6 +3268,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -7025,6 +7026,18 @@ impl Drop for LedgerLock {
 }
 
 fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+    validate_protocol_versions(request)?;
+    validate_identifiers(request)?;
+    validate_target_compatibility(request)?;
+    validate_action(&request.action)?;
+    validate_verification(&request.verification)?;
+    validate_action_verification(request)?;
+    validate_security_metadata(request)?;
+    validate_provenance(request)?;
+    Ok(())
+}
+
+fn validate_protocol_versions(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
@@ -7035,6 +7048,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "unsupported protocol version".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -7049,6 +7066,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
+    Ok(())
+}
+
+fn validate_target_compatibility(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -7070,7 +7091,6 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "desktop action requires no target and no target verification".to_string(),
         ));
     }
-    validate_action(&request.action)?;
     if matches!(request.target, TargetRef::Coordinates { .. })
         && !matches!(
             request.action,
@@ -7097,7 +7117,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "action requires a fenced semantic element target".to_string(),
         ));
     }
-    validate_verification(&request.verification)?;
+    Ok(())
+}
+
+fn validate_action_verification(request: &ActionRequest) -> Result<(), ProtocolError> {
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
             if semantic_hash(sha256) && hash_bytes(value.as_bytes()) == *sha256 => {}
@@ -7108,6 +7131,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn validate_security_metadata(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.deadline_at_ms <= 0
         || request.authority.signature.len() != 128
         || !request
@@ -7120,6 +7147,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid deadline or authority signature".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_provenance(request: &ActionRequest) -> Result<(), ProtocolError> {
     let valid_snapshot = target_provenance_is_valid(&request.target);
     if !valid_snapshot {
         return Err(ProtocolError::InvalidRequest(
@@ -8139,7 +8170,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8151,10 +8182,15 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
