@@ -143,7 +143,9 @@ impl SemanticObservation {
             }
             let mut ancestors = BTreeSet::new();
             if std::iter::successors(element.parent_id.as_deref(), |&id| {
-                elements.get(id).and_then(|parent| parent.parent_id.as_deref())
+                elements
+                    .get(id)
+                    .and_then(|parent| parent.parent_id.as_deref())
             })
             .any(|id| !ancestors.insert(id))
             {
