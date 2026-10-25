@@ -2558,6 +2558,7 @@ fn mac_enabled_state(
         .then_some(true)
     })
 }
+#[cfg(target_os = "macos")]
 
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
@@ -2786,6 +2787,168 @@ fn mac_scroll_action_name(direction: Direction) -> Option<&'static str> {
         Direction::Left => Some("AXScrollLeftByPage"),
         Direction::Right => Some("AXScrollRightByPage"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_semantic_scroll(
+    element: &AxElement,
+    direction: Direction,
+    amount: u32,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    let Some(name) = mac_scroll_action_name(direction) else {
+        return Err(unsupported("semantic action is unavailable"));
+    };
+    if !element
+        .actions()
+        .is_ok_and(|actions| actions.iter().any(|action| action == name))
+    {
+        return Err(unsupported("semantic action is unavailable"));
+    }
+
+    let name = CFString::new(name);
+    for index in 0..amount {
+        if index == 0 {
+            NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+            return Err(ambiguous("scroll interrupted after partial dispatch"));
+        }
+        if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
+            != kAXErrorSuccess
+        {
+            return Err(if index == 0 {
+                no_effect("semantic scroll is unavailable")
+            } else {
+                ambiguous("accessibility action outcome is unknown")
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_semantic_invoke(
+    element: &AxElement,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    element
+        .prepare()
+        .map_err(|_| no_effect("semantic target is unavailable"))?;
+    if !element
+        .actions()
+        .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"))
+    {
+        return Err(no_effect("semantic target is not invokable"));
+    }
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    let action = CFString::new("AXPress");
+    if unsafe { AXUIElementPerformAction(element.0, action.as_concrete_TypeRef()) }
+        != kAXErrorSuccess
+    {
+        return Err(ambiguous("accessibility action outcome is unknown"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_semantic_set_value(
+    element: &AxElement,
+    value: &str,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    use accessibility_sys::{AXUIElementSetAttributeValue, kAXErrorSuccess};
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    element
+        .prepare()
+        .map_err(|_| no_effect("semantic target is unavailable"))?;
+    if !element.is_settable("AXValue") {
+        return Err(no_effect("semantic target is not editable"));
+    }
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    let attribute = CFString::new("AXValue");
+    let value = CFString::new(value);
+    if unsafe {
+        AXUIElementSetAttributeValue(
+            element.0,
+            attribute.as_concrete_TypeRef(),
+            value.as_CFTypeRef(),
+        )
+    } != kAXErrorSuccess
+    {
+        return Err(ambiguous("accessibility action outcome is unknown"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_semantic_select_text(
+    element: &AxElement,
+    start: u32,
+    length: u32,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    element
+        .prepare()
+        .map_err(|_| no_effect("semantic target is unavailable"))?;
+    if !element.is_settable("AXSelectedTextRange") {
+        return Err(no_effect("semantic target has no settable text selection"));
+    }
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    mac_set_selected_range(element, start, length)?;
+    if mac_selected_range(element) != Some((start, length)) {
+        return Err(ambiguous("text selection outcome is unknown"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_semantic_perform_secondary_action(
+    element: &AxElement,
+    name: &str,
+    cancellation: &CancellationToken,
+    deadline_at_ms: i64,
+) -> Result<(), DispatchError> {
+    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    element
+        .prepare()
+        .map_err(|_| no_effect("semantic target is unavailable"))?;
+    if !secondary_action_allowed(name) {
+        return Err(unsupported("secondary action is not permitted"));
+    }
+    if !element
+        .actions()
+        .is_ok_and(|actions| actions.iter().any(|action| action == name))
+    {
+        return Err(no_effect("semantic target does not advertise that action"));
+    }
+    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
+    let name = CFString::new(name);
+    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) } != kAXErrorSuccess
+    {
+        return Err(ambiguous("accessibility action outcome is unknown"));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3268,6 +3431,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(target_os = "linux")]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -5209,29 +5373,8 @@ impl NativeExecutor {
             if !mac_actionability_matches_observation(action, &actionability, &live_actionability) {
                 return Err(no_effect("semantic target actionability changed"));
             }
-            if let Action::Scroll { direction, amount } = action
-                && let Some(name) = mac_scroll_action_name(*direction)
-                && element
-                    .actions()
-                    .is_ok_and(|actions| actions.iter().any(|action| action == name))
-            {
-                let name = CFString::new(name);
-                for index in 0..*amount {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("scroll interrupted after partial dispatch"));
-                    }
-                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
-                        != kAXErrorSuccess
-                    {
-                        return Err(if index == 0 {
-                            no_effect("semantic scroll is unavailable")
-                        } else {
-                            ambiguous("accessibility action outcome is unknown")
-                        });
-                    }
-                }
+            if let Action::Scroll { direction, amount } = action {
+                mac_semantic_scroll(&element, *direction, *amount, cancellation, deadline_at_ms)?;
                 Self::check_after_effect(cancellation, deadline_at_ms)?;
                 return Ok(DispatchReceipt {
                     backend: "praefectus-macos-ax".to_string(),
@@ -5260,81 +5403,27 @@ impl NativeExecutor {
             }
             match action {
                 Action::Invoke => {
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    element
-                        .prepare()
-                        .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    if !element
-                        .actions()
-                        .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"))
-                    {
-                        return Err(no_effect("semantic target is not invokable"));
-                    }
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    let action = CFString::new("AXPress");
-                    if unsafe { AXUIElementPerformAction(element.0, action.as_concrete_TypeRef()) }
-                        != kAXErrorSuccess
-                    {
-                        return Err(ambiguous("accessibility action outcome is unknown"));
-                    }
+                    mac_semantic_invoke(&element, cancellation, deadline_at_ms)?;
                 }
                 Action::SetValue { value } => {
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    element
-                        .prepare()
-                        .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    if !element.is_settable("AXValue") {
-                        return Err(no_effect("semantic target is not editable"));
-                    }
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    let attribute = CFString::new("AXValue");
-                    let value = CFString::new(value);
-                    if unsafe {
-                        AXUIElementSetAttributeValue(
-                            element.0,
-                            attribute.as_concrete_TypeRef(),
-                            value.as_CFTypeRef(),
-                        )
-                    } != kAXErrorSuccess
-                    {
-                        return Err(ambiguous("accessibility action outcome is unknown"));
-                    }
+                    mac_semantic_set_value(&element, value, cancellation, deadline_at_ms)?;
                 }
                 Action::SelectText { start, length } => {
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    element
-                        .prepare()
-                        .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    if !element.is_settable("AXSelectedTextRange") {
-                        return Err(no_effect("semantic target has no settable text selection"));
-                    }
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    mac_set_selected_range(&element, *start, *length)?;
-                    if mac_selected_range(&element) != Some((*start, *length)) {
-                        return Err(ambiguous("text selection outcome is unknown"));
-                    }
+                    mac_semantic_select_text(
+                        &element,
+                        *start,
+                        *length,
+                        cancellation,
+                        deadline_at_ms,
+                    )?;
                 }
                 Action::PerformSecondaryAction { name } => {
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    element
-                        .prepare()
-                        .map_err(|_| no_effect("semantic target is unavailable"))?;
-                    if !secondary_action_allowed(name) {
-                        return Err(unsupported("secondary action is not permitted"));
-                    }
-                    if !element
-                        .actions()
-                        .is_ok_and(|actions| actions.iter().any(|action| action == name))
-                    {
-                        return Err(no_effect("semantic target does not advertise that action"));
-                    }
-                    Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    let name = CFString::new(name);
-                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
-                        != kAXErrorSuccess
-                    {
-                        return Err(ambiguous("accessibility action outcome is unknown"));
-                    }
+                    mac_semantic_perform_secondary_action(
+                        &element,
+                        name,
+                        cancellation,
+                        deadline_at_ms,
+                    )?;
                 }
                 _ => return Err(unsupported("semantic action is unavailable")),
             }
@@ -8139,6 +8228,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
+#[cfg(all(test, target_os = "macos"))]
 #[cfg(test)]
 mod enabled_state_tests {
     use super::mac_enabled_state;
@@ -8151,10 +8241,15 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
