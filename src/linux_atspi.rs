@@ -1695,30 +1695,31 @@ impl LinuxAtspiBackend {
                     continue;
                 }
                 let states = self.states(&window, cancellation, deadline_at_ms)?;
-                if states.contains(State::Visible)
-                    && states.contains(State::Showing)
-                    && !states.contains(State::Defunct)
-                    && !states.contains(State::Iconified)
+                if !states.contains(State::Visible)
+                    || !states.contains(State::Showing)
+                    || states.contains(State::Defunct)
+                    || states.contains(State::Iconified)
                 {
-                    let identity =
-                        self.surface_identity(&window, states, cancellation, deadline_at_ms)?;
-                    let window_id =
-                        semantic_fingerprint(&identity.backend_id).map_err(semantic_error)?;
-                    let fingerprint_hash =
-                        semantic_fingerprint(&identity).map_err(semantic_error)?;
-                    windows.push(SurfaceWindow {
-                        object: window,
-                        process_id,
-                        process_generation: generation.clone(),
-                        window_id,
-                        fingerprint_hash,
-                        bounds: identity.bounds,
-                    });
-                    if windows.len() > MAX_SURFACES {
-                        return Err(ProtocolError::Executor(
-                            "accessibility surface limit exceeded".to_string(),
-                        ));
-                    }
+                    continue;
+                }
+                let identity =
+                    self.surface_identity(&window, states, cancellation, deadline_at_ms)?;
+                let window_id =
+                    semantic_fingerprint(&identity.backend_id).map_err(semantic_error)?;
+                let fingerprint_hash =
+                    semantic_fingerprint(&identity).map_err(semantic_error)?;
+                windows.push(SurfaceWindow {
+                    object: window,
+                    process_id,
+                    process_generation: generation.clone(),
+                    window_id,
+                    fingerprint_hash,
+                    bounds: identity.bounds,
+                });
+                if windows.len() > MAX_SURFACES {
+                    return Err(ProtocolError::Executor(
+                        "accessibility surface limit exceeded".to_string(),
+                    ));
                 }
             }
             if process_generation(process_id)? != generation {
