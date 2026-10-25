@@ -906,6 +906,7 @@ name = "praefectus"
 version = "0.8.4"
 dependencies = [
  "accessibility-sys",
+ "async-io",
  "atspi",
  "core-foundation",
  "core-graphics",

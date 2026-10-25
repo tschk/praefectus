@@ -61,6 +61,7 @@ screencapturekit = { version = "8.0.1", features = ["macos_14_0"], optional = tr
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+async-io = "2.6"
 atspi = { version = "0.30", default-features = false, features = ["proxies", "zbus"] }
 phf = { version = "0.14.0", features = ["macros"] }
 rustix = { version = "1.1", default-features = false, features = ["net", "process", "std"] }

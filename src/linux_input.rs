@@ -432,7 +432,7 @@ fn portal_type_text(
     if clear {
         portal_hotkey(&["ctrl", "a"])?;
         std::thread::sleep(std::time::Duration::from_millis(10));
-        portal_press("BackSpace", 1, None)?;
+        zbus::block_on(portal_press("BackSpace", 1, None))?;
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let (session_handle, connection) = ensure_portal_session()?;
@@ -463,7 +463,7 @@ pub(crate) fn native_press(
     }
     match session_type() {
         "x11" => x11_press(key, count, delay_ms),
-        "wayland" => portal_press(key, count, delay_ms),
+        "wayland" => zbus::block_on(portal_press(key, count, delay_ms)),
         _ => Err(NativeError),
     }
 }
@@ -497,7 +497,7 @@ fn x11_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeE
     Ok(())
 }
 
-fn portal_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
+async fn portal_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
     let keysym = keysym_for_name(key)
         .unwrap_or_else(|| key.chars().next().map(character_to_keysym).unwrap_or(0));
     if keysym == 0 {
@@ -508,7 +508,7 @@ fn portal_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), Nati
         if i > 0 {
             if let Some(delay) = delay_ms {
                 if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    async_io::Timer::after(std::time::Duration::from_millis(delay)).await;
                 }
             }
         }
