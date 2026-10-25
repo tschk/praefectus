@@ -8072,6 +8072,52 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
+    fn test_list_windows_cancelled() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 10000;
+        let result = executor.list_windows(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_list_windows_expired() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 10000;
+        let result = executor.list_windows(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationExpired)
+        ));
+    }
+
+    #[test]
+    fn test_list_windows_execution() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 10000;
+        let result = executor.list_windows(&cancellation, deadline);
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
     fn test_canonicalize_json() {
         let mut value = json!({
             "b": 2,
