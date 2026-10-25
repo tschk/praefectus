@@ -2548,7 +2548,6 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
-#[cfg(target_os = "macos")]
 #[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
@@ -3275,6 +3274,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -8146,7 +8146,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8158,10 +8158,15 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
@@ -8481,6 +8486,48 @@ mod tests {
             }),
             DeliveryRoute::Unknown
         );
+    }
+
+    #[test]
+    fn test_action_delivery_route_explicit_pointer_variants() {
+        use super::{Action, DeliveryRoute, MouseButton, TargetRef, action_delivery_route};
+
+        let pointer_actions = [
+            Action::Click {
+                button: MouseButton::Left,
+                count: 1,
+                allow_coordinate_fallback: true,
+            },
+            Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None,
+            },
+            Action::Press {
+                key: "Enter".to_string(),
+                count: 1,
+                delay_ms: None,
+            },
+            Action::Paste {
+                text: "test".to_string(),
+            },
+            Action::Hotkey {
+                keys: vec!["Ctrl".to_string(), "C".to_string()],
+            },
+            Action::Move,
+            Action::Drag {
+                to: TargetRef::None,
+                button: MouseButton::Left,
+            },
+        ];
+
+        for action in &pointer_actions {
+            assert!(matches!(
+                action_delivery_route(action),
+                DeliveryRoute::Pointer
+            ));
+        }
     }
 
     #[cfg(target_os = "macos")]
