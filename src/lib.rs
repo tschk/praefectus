@@ -2542,7 +2542,7 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
-#[cfg(any(target_os = "macos", all(test, target_os = "macos")))]
+#[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
     role: &str,
@@ -7186,7 +7186,6 @@ fn validate_provenance(request: &ActionRequest) -> Result<(), ProtocolError> {
     }
     Ok(())
 }
-
 fn target_provenance_is_valid(target: &TargetRef) -> bool {
     match target {
         TargetRef::Coordinates {
@@ -8170,7 +8169,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
