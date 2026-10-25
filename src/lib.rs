@@ -2542,7 +2542,6 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
-#[cfg(target_os = "macos")]
 #[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
@@ -2559,6 +2558,7 @@ fn mac_enabled_state(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -7024,7 +7024,7 @@ impl Drop for LedgerLock {
     }
 }
 
-fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+fn validate_request_metadata(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
@@ -7035,6 +7035,22 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "unsupported protocol version".to_string(),
         ));
     }
+    if request.deadline_at_ms <= 0
+        || request.authority.signature.len() != 128
+        || !request
+            .authority
+            .signature
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "invalid deadline or authority signature".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -7049,6 +7065,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
+    Ok(())
+}
+
+fn validate_request_action_and_target(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -7097,6 +7117,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "action requires a fenced semantic element target".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request_verification_rules(request: &ActionRequest) -> Result<(), ProtocolError> {
     validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
@@ -7108,18 +7132,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         }
         _ => {}
     }
-    if request.deadline_at_ms <= 0
-        || request.authority.signature.len() != 128
-        || !request
-            .authority
-            .signature
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(ProtocolError::InvalidRequest(
-            "invalid deadline or authority signature".to_string(),
-        ));
-    }
+    Ok(())
+}
+
+fn validate_request_provenance(request: &ActionRequest) -> Result<(), ProtocolError> {
     let valid_snapshot = target_provenance_is_valid(&request.target);
     if !valid_snapshot {
         return Err(ProtocolError::InvalidRequest(
@@ -7153,6 +7169,15 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid snapshot ID".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+    validate_request_metadata(request)?;
+    validate_request_identifiers(request)?;
+    validate_request_action_and_target(request)?;
+    validate_request_verification_rules(request)?;
+    validate_request_provenance(request)?;
     Ok(())
 }
 
@@ -8151,10 +8176,15 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
