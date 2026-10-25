@@ -119,39 +119,7 @@ impl SemanticObservation {
             return Err(SemanticError::StaleObservation);
         }
 
-        let mut elements = BTreeMap::new();
-        let mut tags = BTreeSet::new();
-        for element in &self.elements {
-            if !valid_element(element) {
-                return Err(SemanticError::InvalidObservation);
-            }
-            if !tags.insert(element.tag.as_str()) {
-                return Err(SemanticError::AmbiguousTarget);
-            }
-            if elements
-                .insert(element.element_id.as_str(), element)
-                .is_some()
-            {
-                return Err(SemanticError::AmbiguousTarget);
-            }
-        }
-        for element in &self.elements {
-            if element.parent_id.as_deref().is_some_and(|parent| {
-                parent == element.element_id || !elements.contains_key(parent)
-            }) {
-                return Err(SemanticError::InvalidObservation);
-            }
-            let mut ancestors = BTreeSet::new();
-            let mut current = element.parent_id.as_deref();
-            while let Some(id) = current {
-                if !ancestors.insert(id) {
-                    return Err(SemanticError::InvalidObservation);
-                }
-                current = elements
-                    .get(id)
-                    .and_then(|parent| parent.parent_id.as_deref());
-            }
-        }
+        let _elements = build_mapping(&self.elements)?;
         Ok(())
     }
 
@@ -268,6 +236,47 @@ fn semantic_actionable(
         Action::SetValue { .. } => Ok(base && actionability.editable),
         _ => Err(SemanticError::UnsupportedAction),
     }
+}
+
+fn build_mapping(
+    elements_slice: &[SemanticElement],
+) -> Result<BTreeMap<&str, &SemanticElement>, SemanticError> {
+    let mut elements = BTreeMap::new();
+    let mut tags = BTreeSet::new();
+    for element in elements_slice {
+        if !valid_element(element) {
+            return Err(SemanticError::InvalidObservation);
+        }
+        if !tags.insert(element.tag.as_str()) {
+            return Err(SemanticError::AmbiguousTarget);
+        }
+        if elements
+            .insert(element.element_id.as_str(), element)
+            .is_some()
+        {
+            return Err(SemanticError::AmbiguousTarget);
+        }
+    }
+    for element in elements_slice {
+        if element
+            .parent_id
+            .as_deref()
+            .is_some_and(|parent| parent == element.element_id || !elements.contains_key(parent))
+        {
+            return Err(SemanticError::InvalidObservation);
+        }
+        let mut ancestors = BTreeSet::new();
+        let mut current = element.parent_id.as_deref();
+        while let Some(id) = current {
+            if !ancestors.insert(id) {
+                return Err(SemanticError::InvalidObservation);
+            }
+            current = elements
+                .get(id)
+                .and_then(|parent| parent.parent_id.as_deref());
+        }
+    }
+    Ok(elements)
 }
 
 fn valid_provenance(provenance: &SemanticProvenance) -> bool {
