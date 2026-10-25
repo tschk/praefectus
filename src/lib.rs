@@ -2558,7 +2558,6 @@ fn mac_enabled_state(
     })
 }
 #[cfg(target_os = "macos")]
-
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -3268,6 +3267,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
