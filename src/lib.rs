@@ -2559,6 +2559,7 @@ fn mac_enabled_state(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -5217,11 +5218,12 @@ impl NativeExecutor {
             {
                 let name = CFString::new(name);
                 for index in 0..*amount {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("scroll interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "scroll interrupted after partial dispatch",
+                    )?;
                     if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
                         != kAXErrorSuccess
                     {
@@ -5913,6 +5915,20 @@ impl NativeExecutor {
         Ok(())
     }
 
+    fn check_partial_dispatch(
+        index: u32,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+        interrupted_message: &'static str,
+    ) -> Result<(), DispatchError> {
+        if index == 0 {
+            Self::check_before_effect(cancellation, deadline_at_ms)?;
+        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+            return Err(ambiguous(interrupted_message));
+        }
+        Ok(())
+    }
+
     fn dispatch_type_text(
         &self,
         text: &str,
@@ -6367,11 +6383,12 @@ impl Executor for NativeExecutor {
                     ));
                 }
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("click interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "click interrupted after partial dispatch",
+                    )?;
                     self.runtime.click(native_target()?, button.as_str())?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
@@ -6391,11 +6408,12 @@ impl Executor for NativeExecutor {
                 delay_ms,
             } => {
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("press interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "press interrupted after partial dispatch",
+                    )?;
                     self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
@@ -6419,11 +6437,12 @@ impl Executor for NativeExecutor {
             }
             Action::Scroll { direction, amount } => {
                 for index in 0..*amount {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("scroll interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "scroll interrupted after partial dispatch",
+                    )?;
                     self.runtime
                         .scroll(
                             match direction {
@@ -8140,6 +8159,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 #[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8151,10 +8171,15 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
