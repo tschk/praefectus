@@ -8138,7 +8138,10 @@ mod tests {
         let token = CancellationToken::default();
         token.cancel();
         let res = executor.observe_focused(&token, i64::MAX);
-        assert!(matches!(res, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            res,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
     }
 
     #[test]
