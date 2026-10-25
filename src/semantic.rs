@@ -136,20 +136,17 @@ impl SemanticObservation {
             }
         }
         for element in &self.elements {
-            if element.parent_id.as_deref().is_some_and(|parent| {
-                parent == element.element_id || !elements.contains_key(parent)
-            }) {
-                return Err(SemanticError::InvalidObservation);
-            }
             let mut ancestors = BTreeSet::new();
+            ancestors.insert(element.element_id.as_str());
             let mut current = element.parent_id.as_deref();
             while let Some(id) = current {
                 if !ancestors.insert(id) {
                     return Err(SemanticError::InvalidObservation);
                 }
-                current = elements
-                    .get(id)
-                    .and_then(|parent| parent.parent_id.as_deref());
+                let Some(parent) = elements.get(id) else {
+                    return Err(SemanticError::InvalidObservation);
+                };
+                current = parent.parent_id.as_deref();
             }
         }
         Ok(())
