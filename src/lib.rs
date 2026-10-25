@@ -2559,6 +2559,7 @@ fn mac_enabled_state(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -3268,6 +3269,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -8140,6 +8142,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8151,14 +8154,20 @@ mod enabled_state_tests {
         }
         assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
         assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!("must not override explicit false")),
+            mac_enabled_state(Some(false), "AXTextArea", || panic!(
+                "must not override explicit false"
+            )),
             Some(false)
         );
-        assert_eq!(mac_enabled_state(Some(true), "AXButton", || false), Some(true));
+        assert_eq!(
+            mac_enabled_state(Some(true), "AXButton", || false),
+            Some(true)
+        );
     }
 }
 
 #[cfg(test)]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod focused_surface_tests {
     use super::unique_focused_surface;
 
