@@ -478,7 +478,13 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
         | Action::Open { .. }
         | Action::ClipboardWrite { .. } => DeliveryRoute::Pointer,
         Action::Scroll { .. } => DeliveryRoute::Unknown,
-        _ => DeliveryRoute::Pointer,
+        Action::Click { .. }
+        | Action::TypeText { .. }
+        | Action::Press { .. }
+        | Action::Paste { .. }
+        | Action::Hotkey { .. }
+        | Action::Move
+        | Action::Drag { .. } => DeliveryRoute::Pointer,
     }
 }
 
@@ -2559,6 +2565,7 @@ fn mac_enabled_state(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
         AXValueGetType, AXValueGetTypeID, AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize,
@@ -8139,7 +8146,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8419,7 +8426,7 @@ mod tests {
             DeliveryRoute::Pointer
         );
 
-        // Missing variants mapped to Pointer (via catch-all _)
+        // Pointer variants (explicitly mapped in the function)
         assert_eq!(
             action_delivery_route(&Action::Click {
                 button: MouseButton::Left,
