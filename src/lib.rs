@@ -3268,10 +3268,7 @@ fn mac_resolve_observed_element(
     result
 }
 
-#[cfg(any(
-    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    test
-))]
+#[cfg(any(not(any(target_os = "linux", target_os = "windows")), test))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
