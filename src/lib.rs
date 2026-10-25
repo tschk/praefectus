@@ -2543,7 +2543,6 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
 }
 
 #[cfg(target_os = "macos")]
-#[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
     role: &str,
@@ -7858,18 +7857,16 @@ fn ensure_directory(path: &Path, restrict_existing: bool) -> Result<(), Protocol
     }
     #[cfg(not(windows))]
     std::fs::create_dir_all(&directory)?;
-
+    #[cfg(windows)]
     for directory in missing.iter().rev() {
-        #[cfg(windows)]
-        {
-            match std::fs::create_dir(directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            windows_guards.push(windows_acl::lock_path(directory)?);
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
-
+        windows_guards.push(windows_acl::lock_path(directory)?);
+    }
+    for directory in missing.iter().rev() {
         restrict_directory(directory)?;
         sync_parent(directory)?;
     }
