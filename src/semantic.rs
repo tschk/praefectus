@@ -142,15 +142,12 @@ impl SemanticObservation {
                 return Err(SemanticError::InvalidObservation);
             }
             let mut ancestors = BTreeSet::new();
-            let mut current = element.parent_id.as_deref();
-            while let Some(id) = current {
-                if !ancestors.insert(id) {
-                    return Err(SemanticError::InvalidObservation);
-                }
-                current = elements
-                    .get(id)
-                    .and_then(|parent| parent.parent_id.as_deref());
-            }
+            std::iter::successors(element.parent_id.as_deref(), |&id| {
+                elements.get(id).and_then(|parent| parent.parent_id.as_deref())
+            })
+            .try_for_each(|id| {
+                ancestors.insert(id).then_some(()).ok_or(SemanticError::InvalidObservation)
+            })?;
         }
         Ok(())
     }
