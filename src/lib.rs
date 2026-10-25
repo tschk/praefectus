@@ -5174,12 +5174,6 @@ impl NativeExecutor {
     ) -> Result<DispatchReceipt, DispatchError> {
         #[cfg(target_os = "macos")]
         {
-            use accessibility_sys::{
-                AXUIElementPerformAction, AXUIElementSetAttributeValue, kAXErrorSuccess,
-            };
-            use core_foundation::base::TCFType;
-            use core_foundation::string::CFString;
-
             Self::check_before_effect(cancellation, deadline_at_ms)?;
             let (element, native, actionability) = self
                 .resolve_recorded_element(target, cancellation, deadline_at_ms)
