@@ -9166,7 +9166,10 @@ mod tests {
         };
 
         let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
-        assert!(matches!(result, Err(super::ProtocolError::InvalidRequest(_))));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -9174,23 +9177,25 @@ mod tests {
         let executor = super::NativeExecutor::default();
         let cancellation = super::CancellationToken::default();
         cancellation.cancel();
-        let surface = super::SurfaceRef {
-            id: "a".repeat(64),
-        };
+        let surface = super::SurfaceRef { id: "a".repeat(64) };
 
         let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
-        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
     }
 
     #[test]
     fn test_observe_surface_expired() {
         let executor = super::NativeExecutor::default();
         let cancellation = super::CancellationToken::default();
-        let surface = super::SurfaceRef {
-            id: "a".repeat(64),
-        };
+        let surface = super::SurfaceRef { id: "a".repeat(64) };
 
         let result = executor.observe_surface(&surface, &cancellation, 0); // Expired immediately
-        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
     }
 }
