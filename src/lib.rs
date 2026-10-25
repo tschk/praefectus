@@ -3269,6 +3269,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(target_os = "macos")]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -8164,7 +8165,7 @@ mod enabled_state_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod focused_surface_tests {
     use super::unique_focused_surface;
 
