@@ -1011,6 +1011,7 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
 }
 
 #[test]
+#[ignore = "touches host state"]
 fn native_executor_observe_coordinates() {
     let executor = NativeExecutor::default();
     if cfg!(target_os = "linux")
