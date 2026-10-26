@@ -8340,6 +8340,49 @@ mod tests {
     }
 
     #[test]
+    fn test_list_applications() {
+        let executor = NativeExecutor::default();
+
+        let cancelled_token = CancellationToken::default();
+        cancelled_token.cancel();
+
+        let result = executor.list_applications(&cancelled_token, i64::MAX);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+
+        let active_token = CancellationToken::default();
+        let past_deadline = 0;
+        let result = executor.list_applications(&active_token, past_deadline);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let result = executor.list_applications(&active_token, i64::MAX);
+            if let Err(super::ProtocolError::Executor(msg)) = result {
+                assert_eq!(msg, "application enumeration is unavailable");
+            } else {
+                panic!("Expected application enumeration unavailable error on non-macOS");
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let result = executor.list_applications(&active_token, i64::MAX);
+            // It could succeed or fail with backend error due to missing permissions in CI.
+            assert!(
+                result.is_ok() || matches!(result, Err(super::ProtocolError::Executor(_))),
+                "Unexpected result on macOS: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
     fn test_observe_semantic_cancelled() {
         let executor = NativeExecutor::default();
         let cancellation = CancellationToken::default();
