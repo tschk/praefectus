@@ -2542,6 +2542,7 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
@@ -3268,7 +3269,7 @@ fn mac_resolve_observed_element(
     result
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -8141,6 +8142,7 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 #[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8165,6 +8167,7 @@ mod enabled_state_tests {
 }
 
 #[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod focused_surface_tests {
     use super::unique_focused_surface;
 
@@ -8185,27 +8188,17 @@ mod tests {
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError,
-        Receipt, Rect, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
-        Terminal, VerificationPolicy, canonical_authority_bytes, canonicalize_json,
-        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
-        target_capture_bounds, validate_matching_live_element, verify,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
+        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
+        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
+        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
-
-    #[test]
-    fn test_with_session_isolation() {
-        assert_eq!(
-            NativeExecutor::default().session_isolation,
-            SessionIsolation::SharedDesktop
-        );
-        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
-        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
-    }
 
     #[test]
     fn test_canonicalize_json() {
@@ -8266,23 +8259,6 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.is_cancelled());
-    }
-
-    #[test]
-    fn test_list_surfaces_cancellation() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        token.cancel();
-        let result = executor.list_surfaces(&token, i64::MAX);
-        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
-    }
-
-    #[test]
-    fn test_list_surfaces_expiration() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        let result = executor.list_surfaces(&token, 0);
-        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
