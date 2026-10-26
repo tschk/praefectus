@@ -1706,8 +1706,7 @@ impl LinuxAtspiBackend {
                     self.surface_identity(&window, states, cancellation, deadline_at_ms)?;
                 let window_id =
                     semantic_fingerprint(&identity.backend_id).map_err(semantic_error)?;
-                let fingerprint_hash =
-                    semantic_fingerprint(&identity).map_err(semantic_error)?;
+                let fingerprint_hash = semantic_fingerprint(&identity).map_err(semantic_error)?;
                 windows.push(SurfaceWindow {
                     object: window,
                     process_id,
