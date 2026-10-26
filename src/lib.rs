@@ -8198,6 +8198,40 @@ mod tests {
     use super::macos_semantic_actions;
 
     #[test]
+    fn test_list_surfaces() {
+        let executor = NativeExecutor::default();
+
+        // Test 1: Cancelled token
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationCancelled)
+        ));
+
+        // Test 2: Expired deadline
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() - 1000; // Past
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationExpired)
+        ));
+
+        // Test 3: Valid arguments (might succeed or return executor error depending on environment)
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        match result {
+            Err(crate::ProtocolError::ObservationCancelled) => panic!("Should not be cancelled"),
+            Err(crate::ProtocolError::ObservationExpired) => panic!("Should not be expired"),
+            _ => {} // OK
+        }
+    }
+
+    #[test]
     fn test_with_session_isolation() {
         assert_eq!(
             NativeExecutor::default().session_isolation,
@@ -8269,6 +8303,26 @@ mod tests {
     }
 
     #[test]
+    fn test_observe_focused_cancelled() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let res = executor.observe_focused(&token, i64::MAX);
+        assert!(matches!(
+            res,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_observe_focused_expired() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let res = executor.observe_focused(&token, 0);
+        assert!(matches!(res, Err(super::ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
     fn test_list_surfaces_cancellation() {
         let executor = NativeExecutor::default();
         let token = CancellationToken::default();
@@ -8326,6 +8380,23 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn test_observe_semantic_cancelled() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let result = executor.observe_semantic(&cancellation, i64::MAX);
+        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_observe_semantic_expired() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let result = executor.observe_semantic(&cancellation, 0);
+        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
