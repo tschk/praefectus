@@ -2542,22 +2542,6 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn mac_enabled_state(
-    enabled: Option<bool>,
-    role: &str,
-    value_settable: impl FnOnce() -> bool,
-) -> Option<bool> {
-    // Editable macOS text sometimes omits AXEnabled; native settable evidence still proves operability.
-    enabled.or_else(|| {
-        (matches!(
-            role,
-            "AXTextArea" | "AXTextField" | "AXSearchField" | "AXComboBox"
-        ) && value_settable())
-        .then_some(true)
-    })
-}
-
 #[cfg(target_os = "macos")]
 fn mac_ax_bounds(element: &AxElement) -> Result<NativeBounds, NativeError> {
     use accessibility_sys::{
@@ -2622,15 +2606,11 @@ fn mac_native_element(
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let role = element.string("AXRole").ok_or(NativeError)?;
     let title = element.string("AXTitle");
-    // Description is the element label; AXHelp is the tooltip for controls that omit one.
     let label = element
         .string("AXDescription")
         .filter(|value| !value.is_empty())
-        .or_else(|| title.clone())
-        .or_else(|| element.string("AXHelp").filter(|value| !value.is_empty()));
-    let enabled = mac_enabled_state(element.boolean("AXEnabled"), &role, || {
-        element.is_settable("AXValue")
-    });
+        .or_else(|| title.clone());
+    let enabled = element.boolean("AXEnabled");
     let focused = element.boolean("AXFocused");
     mac_native_boundary(cancellation, deadline_at_ms)?;
     let window = element
@@ -3268,80 +3248,17 @@ fn mac_resolve_observed_element(
     result
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
-    let mut selected = None;
-    for (index, matches) in matches.enumerate() {
-        if matches && selected.replace(index).is_some() {
-            return Err(NativeError);
-        }
-    }
-    selected.ok_or(NativeError)
-}
-
-#[cfg(target_os = "macos")]
-fn mac_current_focused_window(
-    surfaces: &[(i32, i64, AxElement)],
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<AxElement, NativeError> {
-    use accessibility_sys::{AXUIElementCreateApplication, AXUIElementCreateSystemWide};
-
-    mac_native_boundary(cancellation, deadline_at_ms)?;
-    let system = AxElement::created(unsafe { AXUIElementCreateSystemWide() })?;
-    if let Ok(window) = system
-        .element("AXFocusedApplication")
-        .and_then(|app| app.element("AXFocusedWindow"))
-    {
-        return Ok(window);
-    }
-    // Some hosts omit systemwide focus attributes; an explicit app focus claim remains required.
-    let mut seen = std::collections::BTreeSet::new();
-    let mut focused = None;
-    for (pid, _, _) in surfaces {
-        mac_native_boundary(cancellation, deadline_at_ms)?;
-        if !seen.insert(*pid) {
-            continue;
-        }
-        let application = AxElement::created(unsafe { AXUIElementCreateApplication(*pid) })?;
-        if application.boolean("AXFrontmost") == Some(true) {
-            let window = application.element("AXFocusedWindow")?;
-            if focused.replace(window).is_some() {
-                return Err(NativeError);
-            }
-        }
-    }
-    focused.ok_or(NativeError)
-}
-
 #[cfg(target_os = "macos")]
 fn mac_frontmost_window(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
 ) -> Result<AxElement, NativeError> {
-    use accessibility_sys::{AXUIElementGetPid, kAXErrorSuccess};
-
-    let mut surfaces =
-        mac_surface_windows(cancellation, deadline_at_ms).map_err(|_| NativeError)?;
-    let focused = mac_current_focused_window(&surfaces, cancellation, deadline_at_ms)?;
-    let mut focused_pid = 0;
-    focused.prepare()?;
-    if unsafe { AXUIElementGetPid(focused.0, &mut focused_pid) } != kAXErrorSuccess
-        || focused_pid <= 0
-    {
-        return Err(NativeError);
-    }
-    // CG stacking order includes utility panels; only the exact AX-focused onscreen surface qualifies.
-    let selected = unique_focused_surface(
-        surfaces
-            .iter()
-            .map(|(pid, _, window)| *pid == focused_pid && window.identity_eq(&focused)),
-    )?;
-    let current = mac_current_focused_window(&surfaces, cancellation, deadline_at_ms)?;
-    if !current.identity_eq(&focused) {
-        return Err(NativeError);
-    }
-    Ok(surfaces.swap_remove(selected).2)
+    mac_surface_windows(cancellation, deadline_at_ms)
+        .map_err(|_| NativeError)?
+        .into_iter()
+        .next()
+        .map(|(_, _, window)| window)
+        .ok_or(NativeError)
 }
 
 #[cfg(target_os = "macos")]
@@ -3656,7 +3573,10 @@ fn mac_semantic_snapshot(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
 ) -> Result<(semantic::SemanticObservation, Vec<ElementObservation>), ProtocolError> {
-    use accessibility_sys::{AXUIElementGetPid, AXUIElementSetMessagingTimeout, kAXErrorSuccess};
+    use accessibility_sys::{
+        AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementSetMessagingTimeout,
+        kAXErrorSuccess,
+    };
     use std::collections::VecDeque;
 
     if cancellation.is_cancelled() {
@@ -3665,16 +3585,35 @@ fn mac_semantic_snapshot(
     if now_ms() >= deadline_at_ms {
         return Err(ProtocolError::ObservationExpired);
     }
+    let system = AxElement::created(unsafe { AXUIElementCreateSystemWide() })
+        .map_err(|_| ProtocolError::Executor("desktop backend error".to_string()))?;
     let window = if let Some(window) = selected_window {
         window
     } else {
-        mac_frontmost_window(cancellation, deadline_at_ms).map_err(|_| {
-            mac_observation_error(
-                cancellation,
-                deadline_at_ms,
-                ProtocolError::TargetNotFound("focused onscreen window not found".to_string()),
-            )
-        })?
+        match mac_frontmost_window(cancellation, deadline_at_ms) {
+            Ok(window) => window,
+            Err(_) => {
+                check_protocol_boundary(cancellation, deadline_at_ms)?;
+                system
+                    .element("AXFocusedApplication")
+                    .and_then(|application| application.element("AXFocusedWindow"))
+                    .or_else(|_| {
+                        mac_native_boundary(cancellation, deadline_at_ms)?;
+                        system.element("AXFocusedUIElement").and_then(|element| {
+                            element
+                                .element("AXWindow")
+                                .or_else(|_| element.element("AXTopLevelUIElement"))
+                        })
+                    })
+                    .map_err(|_| {
+                        mac_observation_error(
+                            cancellation,
+                            deadline_at_ms,
+                            ProtocolError::TargetNotFound("focused window not found".to_string()),
+                        )
+                    })?
+            }
+        }
     };
     let mut process_id = 0;
     window
@@ -4747,32 +4686,6 @@ impl<E: Executor> Engine<E> {
             return Ok(());
         };
         self.outcomes.record(key, terminal)
-    }
-
-    /// Runs individually signed requests in order and stops at the first non-verified result.
-    pub fn execute_batch(
-        &self,
-        requests: &[ActionRequest],
-        cancellation: &CancellationToken,
-    ) -> Vec<Result<ExecuteReport, ProtocolError>> {
-        let mut results = Vec::new();
-        for request in requests {
-            let result = self.execute(request, cancellation);
-            let verified = matches!(
-                &result,
-                Ok(report) if matches!(
-                    report.acknowledgements.last().map(|ack| &ack.state),
-                    Some(AckState::Terminal { terminal })
-                        if matches!(terminal.as_ref(), Terminal::Succeeded { receipt }
-                            if receipt.effect == Effect::Verified)
-                )
-            );
-            results.push(result);
-            if !verified {
-                break;
-            }
-        }
-        results
     }
 
     pub fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
@@ -7755,7 +7668,11 @@ fn persist_observation(path: &Path, observation: &impl Serialize) -> Result<(), 
     ensure_directory(parent, true)?;
     #[cfg(windows)]
     let _path_guard = windows_acl::lock_path(parent)?;
-    let temporary = path.with_extension("tmp");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let temporary = path.with_extension(format!("tmp-{}-{}", std::process::id(), now));
     let mut file = private_open_options()
         .create_new(true)
         .write(true)
@@ -8141,71 +8058,22 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 #[cfg(test)]
-mod enabled_state_tests {
-    use super::mac_enabled_state;
-
-    #[test]
-    fn missing_enabled_uses_settable_text_and_never_overrides_false() {
-        for role in ["AXTextArea", "AXTextField", "AXSearchField", "AXComboBox"] {
-            assert_eq!(mac_enabled_state(None, role, || true), Some(true), "{role}");
-            assert_eq!(mac_enabled_state(None, role, || false), None, "{role}");
-        }
-        assert_eq!(mac_enabled_state(None, "AXButton", || true), None);
-        assert_eq!(
-            mac_enabled_state(Some(false), "AXTextArea", || panic!(
-                "must not override explicit false"
-            )),
-            Some(false)
-        );
-        assert_eq!(
-            mac_enabled_state(Some(true), "AXButton", || false),
-            Some(true)
-        );
-    }
-}
-
-#[cfg(test)]
-mod focused_surface_tests {
-    use super::unique_focused_surface;
-
-    #[test]
-    fn exactly_one_focused_onscreen_surface_is_required() {
-        assert_eq!(
-            unique_focused_surface([false, true, false].into_iter()).unwrap(),
-            1
-        );
-        assert!(unique_focused_surface([false, false].into_iter()).is_err());
-        assert!(unique_focused_surface([true, true].into_iter()).is_err());
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::{
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError,
-        Receipt, Rect, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
-        Terminal, VerificationPolicy, canonical_authority_bytes, canonicalize_json,
-        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
-        target_capture_bounds, validate_matching_live_element, verify,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
+        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
+        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
+        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
-
-    #[test]
-    fn test_with_session_isolation() {
-        assert_eq!(
-            NativeExecutor::default().session_isolation,
-            SessionIsolation::SharedDesktop
-        );
-        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
-        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
-    }
 
     #[test]
     fn test_canonicalize_json() {
@@ -8266,23 +8134,6 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.is_cancelled());
-    }
-
-    #[test]
-    fn test_list_surfaces_cancellation() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        token.cancel();
-        let result = executor.list_surfaces(&token, i64::MAX);
-        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
-    }
-
-    #[test]
-    fn test_list_surfaces_expiration() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        let result = executor.list_surfaces(&token, 0);
-        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
@@ -9317,10 +9168,7 @@ mod tests {
         token.cancel();
 
         let result = executor.list_windows(&token, i64::MAX);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationCancelled)
-        ));
+        assert!(matches!(result, Err(super::ProtocolError::ObservationCancelled)));
     }
 
     #[test]
@@ -9329,10 +9177,7 @@ mod tests {
         let token = CancellationToken::default();
 
         let result = executor.list_windows(&token, 0);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationExpired)
-        ));
+        assert!(matches!(result, Err(super::ProtocolError::ObservationExpired)));
     }
 
     #[test]
