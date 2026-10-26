@@ -8506,121 +8506,119 @@ mod tests {
         };
         use std::path::PathBuf;
 
-        assert_eq!(
-            action_delivery_route(&Action::Invoke),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::SetValue {
-                value: "test".to_string()
-            }),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::SelectText {
-                start: 0,
-                length: 1
-            }),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::PerformSecondaryAction {
-                name: "test".to_string()
-            }),
-            DeliveryRoute::TargetAddressed
-        );
+        let cases = [
+            (Action::Invoke, DeliveryRoute::TargetAddressed),
+            (
+                Action::SetValue {
+                    value: "test".to_string(),
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::SelectText {
+                    start: 0,
+                    length: 1,
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::PerformSecondaryAction {
+                    name: "test".to_string(),
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::Screenshot {
+                    path: PathBuf::new(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Application {
+                    operation: ApplicationOperation::Launch,
+                    name: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Window {
+                    operation: WindowOperation::Focus,
+                    app: None,
+                    title: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Open {
+                    target: "test".to_string(),
+                    app: None,
+                    no_focus: false,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::ClipboardWrite {
+                    text: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Click {
+                    button: MouseButton::Left,
+                    count: 1,
+                    allow_coordinate_fallback: true,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::TypeText {
+                    text: "test".to_string(),
+                    clear: false,
+                    press_return: false,
+                    delay_ms: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Press {
+                    key: "Enter".to_string(),
+                    count: 1,
+                    delay_ms: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Paste {
+                    text: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Hotkey {
+                    keys: vec!["Ctrl".to_string(), "C".to_string()],
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (Action::Move, DeliveryRoute::Pointer),
+            (
+                Action::Drag {
+                    to: TargetRef::None,
+                    button: MouseButton::Left,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Scroll {
+                    direction: Direction::Down,
+                    amount: 1,
+                },
+                DeliveryRoute::Unknown,
+            ),
+        ];
 
-        assert_eq!(
-            action_delivery_route(&Action::Screenshot {
-                path: PathBuf::new()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Application {
-                operation: ApplicationOperation::Launch,
-                name: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Window {
-                operation: WindowOperation::Focus,
-                app: None,
-                title: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Open {
-                target: "test".to_string(),
-                app: None,
-                no_focus: false
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::ClipboardWrite {
-                text: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-
-        // Missing variants mapped to Pointer (via catch-all _)
-        assert_eq!(
-            action_delivery_route(&Action::Click {
-                button: MouseButton::Left,
-                count: 1,
-                allow_coordinate_fallback: true
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::TypeText {
-                text: "test".to_string(),
-                clear: false,
-                press_return: false,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Press {
-                key: "Enter".to_string(),
-                count: 1,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Paste {
-                text: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Hotkey {
-                keys: vec!["Ctrl".to_string(), "C".to_string()]
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
-        assert_eq!(
-            action_delivery_route(&Action::Drag {
-                to: TargetRef::None,
-                button: MouseButton::Left
-            }),
-            DeliveryRoute::Pointer
-        );
-
-        // Missing variant mapped to Unknown
-        assert_eq!(
-            action_delivery_route(&Action::Scroll {
-                direction: Direction::Down,
-                amount: 1
-            }),
-            DeliveryRoute::Unknown
-        );
+        for (action, expected) in cases {
+            assert_eq!(action_delivery_route(&action), expected);
+        }
     }
 
     #[cfg(target_os = "macos")]
