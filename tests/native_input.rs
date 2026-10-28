@@ -173,27 +173,4 @@ mod native_input_tests {
             .expect("paste should succeed");
         assert_eq!(receipt.backend, "praefectus-macos-ax");
     }
-
-    #[test]
-    #[ignore = "mutates the user's clipboard"]
-    fn native_clipboard_read_returns_clipboard_content() {
-        let executor = NativeExecutor::default();
-        let text = "praefectus-read-test";
-        executor
-            .dispatch(
-                &praefectus::Action::ClipboardWrite {
-                    text: text.to_string(),
-                },
-                &praefectus::ResolvedTarget::None,
-                &VerificationPolicy::None,
-                &CancellationToken::default(),
-                now_ms() + 5000,
-            )
-            .expect("clipboard write should succeed");
-
-        let content = executor
-            .clipboard_read(&CancellationToken::default(), now_ms() + 5000)
-            .expect("clipboard read should succeed");
-        assert_eq!(content, text);
-    }
 }

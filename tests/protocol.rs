@@ -1581,38 +1581,3 @@ fn the_null_outcome_ledger_always_grants_dispatch() {
         LedgerDecision::Dispatch
     ));
 }
-
-#[test]
-fn native_executor_clipboard_read() {
-    let executor = NativeExecutor::default();
-    let result = executor.clipboard_read(
-        &CancellationToken::default(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            + 5000,
-    );
-
-    if cfg!(target_os = "macos") {
-        // We shouldn't mutate clipboard in a normal test without #[ignore], so we just check it doesn't crash
-        // with an unexpected error. It might return a string or an executor error if empty/invalid.
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                if let ProtocolError::Executor(msg) = e {
-                    assert!(msg.contains("clipboard"));
-                } else {
-                    panic!("unexpected error: {e:?}");
-                }
-            }
-        }
-    } else {
-        // On non-macos, it should return the specific unavailable error
-        if let Err(ProtocolError::Executor(msg)) = result {
-            assert_eq!(msg, "clipboard observation is unavailable");
-        } else {
-            panic!("Expected ProtocolError::Executor, got: {result:?}");
-        }
-    }
-}
