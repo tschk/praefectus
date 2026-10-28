@@ -1098,23 +1098,23 @@ fn secure_command(name: &str) -> Result<Command, NativeError> {
     Err(NativeError)
 }
 
-fn global_input_env_restriction() -> Option<bool> {
-    match std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT") {
-        Ok(value) if value == "1" => return Some(false),
-        Ok(value) if value == "0" => return Some(true),
+fn global_input_env_restriction(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<bool> {
+    match get_env("PRAEFECTUS_ALLOW_GLOBAL_INPUT").and_then(|s| s.into_string().ok()) {
+        Some(value) if value == "1" => return Some(false),
+        Some(value) if value == "0" => return Some(true),
         _ => {}
     }
-    match std::env::var("PRAEFECTUS_NO_YOLO") {
-        Ok(value) if value == "1" => Some(true),
-        Ok(value) if value == "0" => Some(false),
+    match get_env("PRAEFECTUS_NO_YOLO").and_then(|s| s.into_string().ok()) {
+        Some(value) if value == "1" => Some(true),
+        Some(value) if value == "0" => Some(false),
         _ => None,
     }
 }
 
-fn no_yolo_path() -> PathBuf {
-    observation_root(|key| std::env::var_os(key))
-        .join("praefectus")
-        .join("no-yolo")
+fn no_yolo_path(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    observation_root(get_env).join("praefectus").join("no-yolo")
 }
 
 fn restriction_file_is_present(path: &Path) -> bool {
@@ -1124,8 +1124,8 @@ fn restriction_file_is_present(path: &Path) -> bool {
     }
 }
 
-fn persistent_no_yolo() -> bool {
-    let path = no_yolo_path();
+fn persistent_no_yolo(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    let path = no_yolo_path(get_env);
     #[cfg(windows)]
     let _path_guard = match windows_acl::lock_path(&path) {
         Ok(guard) => guard,
@@ -1135,9 +1135,15 @@ fn persistent_no_yolo() -> bool {
 }
 
 pub fn global_input_allowed() -> bool {
-    !match global_input_env_restriction() {
+    global_input_allowed_with_env(|k| std::env::var_os(k))
+}
+
+fn global_input_allowed_with_env(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
+) -> bool {
+    !match global_input_env_restriction(get_env) {
         Some(restricted) => restricted,
-        None => persistent_no_yolo(),
+        None => persistent_no_yolo(get_env),
     }
 }
 
@@ -1150,18 +1156,25 @@ pub struct GlobalInputAllowance {
 }
 
 pub fn global_input_allowance() -> GlobalInputAllowance {
-    let environment = global_input_env_restriction() == Some(true);
-    let persisted = persistent_no_yolo();
+    global_input_allowance_with_env(|k| std::env::var_os(k))
+}
+
+fn global_input_allowance_with_env(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
+) -> GlobalInputAllowance {
+    let environment = global_input_env_restriction(get_env) == Some(true);
+    let persisted = persistent_no_yolo(get_env);
+    let allowed = global_input_allowed_with_env(get_env);
     GlobalInputAllowance {
-        allowed: global_input_allowed(),
-        no_yolo: !global_input_allowed(),
+        allowed,
+        no_yolo: !allowed,
         persisted,
         environment,
     }
 }
 
 pub fn persist_no_yolo(restricted: bool) -> Result<GlobalInputAllowance, ProtocolError> {
-    persist_no_yolo_at(&no_yolo_path(), restricted)?;
+    persist_no_yolo_at(&no_yolo_path(|k| std::env::var_os(k)), restricted)?;
     Ok(global_input_allowance())
 }
 
@@ -8526,10 +8539,51 @@ mod tests {
 
     #[test]
     fn global_input_is_allowed_unless_no_yolo() {
-        assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
-        assert!(std::env::var("PRAEFECTUS_NO_YOLO").is_err());
-        assert!(!super::persistent_no_yolo());
-        assert!(super::global_input_allowed());
+        let get_env = |_k: &str| None;
+        assert!(!super::persistent_no_yolo(get_env));
+        assert!(super::global_input_allowed_with_env(get_env));
+    }
+
+    #[test]
+    fn test_global_input_allowance_default() {
+        let get_env = |_k: &str| None;
+        let allowance = super::global_input_allowance_with_env(get_env);
+        assert!(allowance.allowed);
+        assert!(!allowance.no_yolo);
+        assert!(!allowance.persisted);
+        assert!(!allowance.environment);
+    }
+
+    #[test]
+    fn test_global_input_allowance_with_env_restrictions() {
+        let get_env = |k: &str| {
+            if k == "PRAEFECTUS_ALLOW_GLOBAL_INPUT" {
+                Some(std::ffi::OsString::from("0"))
+            } else {
+                None
+            }
+        };
+        let allowance = super::global_input_allowance_with_env(get_env);
+        assert!(!allowance.allowed);
+        assert!(allowance.no_yolo);
+        assert!(!allowance.persisted);
+        assert!(allowance.environment);
+    }
+
+    #[test]
+    fn test_global_input_allowance_with_no_yolo_env() {
+        let get_env = |k: &str| {
+            if k == "PRAEFECTUS_NO_YOLO" {
+                Some(std::ffi::OsString::from("1"))
+            } else {
+                None
+            }
+        };
+        let allowance = super::global_input_allowance_with_env(get_env);
+        assert!(!allowance.allowed);
+        assert!(allowance.no_yolo);
+        assert!(!allowance.persisted);
+        assert!(allowance.environment);
     }
 
     #[test]
