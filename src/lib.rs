@@ -8209,6 +8209,7 @@ fn mac_semantic_perform_secondary_action(
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod enabled_state_tests {
     use super::mac_enabled_state;
