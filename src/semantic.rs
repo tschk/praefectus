@@ -119,7 +119,7 @@ impl SemanticObservation {
             return Err(SemanticError::StaleObservation);
         }
 
-        let _elements = build_mapping(&self.elements)?;
+        build_mapping(&self.elements)?;
         Ok(())
     }
 
@@ -266,14 +266,14 @@ fn build_mapping(
             return Err(SemanticError::InvalidObservation);
         }
         let mut ancestors = BTreeSet::new();
-        let mut current = element.parent_id.as_deref();
-        while let Some(id) = current {
-            if !ancestors.insert(id) {
-                return Err(SemanticError::InvalidObservation);
-            }
-            current = elements
+        if std::iter::successors(element.parent_id.as_deref(), |&id| {
+            elements
                 .get(id)
-                .and_then(|parent| parent.parent_id.as_deref());
+                .and_then(|parent| parent.parent_id.as_deref())
+        })
+        .any(|id| !ancestors.insert(id))
+        {
+            return Err(SemanticError::InvalidObservation);
         }
     }
     Ok(elements)

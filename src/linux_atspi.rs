@@ -9,17 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use atspi::proxy::accessible::AccessibleProxyBlocking;
-use atspi::proxy::action::ActionProxyBlocking;
-use atspi::proxy::bus::BusProxyBlocking;
-use atspi::proxy::component::ComponentProxyBlocking;
-use atspi::proxy::editable_text::EditableTextProxyBlocking;
-use atspi::proxy::text::TextProxyBlocking;
-use atspi::zbus::Address;
-use atspi::zbus::blocking::fdo::DBusProxy;
-use atspi::zbus::blocking::{Connection, connection::Builder};
-use atspi::zbus::proxy::CacheProperties;
-use atspi::{CoordType, Interface, ObjectRefOwned, Role, State, StateSet};
 use serde::{Deserialize, Serialize};
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::randr::{ConnectionExt as _, SetConfig};
@@ -28,6 +17,10 @@ use x11rb::reexports::x11rb_protocol::parse_display::{ConnectAddress, parse_disp
 use x11rb::reexports::x11rb_protocol::xauth::get_auth;
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 
+use self::atspi_dbus::{
+    AccessibleProxy, ActionProxy, BusProxy, COORD_TYPE_SCREEN, ComponentProxy, EditableTextProxy,
+    Interface, ObjectRef, ROLE_DIALOG, ROLE_FRAME, ROLE_WINDOW, State, StateSet, TextProxy,
+};
 use crate::semantic::{
     Actionability, SemanticBackend, SemanticElement, SemanticObservation, SemanticProvenance,
     SemanticTargetRef, opaque_element_id, semantic_fingerprint, semantic_tag,
@@ -59,7 +52,7 @@ const MAX_OUTPUTS: usize = 256;
 macro_rules! provider_call {
     ($cancellation:expr, $deadline_at_ms:expr, $call:expr) => {{
         check_observation_boundary($cancellation, $deadline_at_ms)?;
-        match $call {
+        match zbus::block_on($call) {
             Ok(value) => {
                 check_observation_boundary($cancellation, $deadline_at_ms)?;
                 Ok(value)
@@ -73,7 +66,7 @@ macro_rules! provider_call {
 }
 
 pub struct LinuxAtspiBackend {
-    connection: Connection,
+    connection: zbus::Connection,
     generation: AtomicU64,
     latest: Mutex<Option<StoredSnapshot>>,
     topology: Option<X11TopologyWorker>,
@@ -278,6 +271,24 @@ fn focused_element_id<'a>(
     Ok(element_id)
 }
 
+fn process_x11_request<T>(
+    connection: &mut Option<(RustConnection, usize, X11ServerIdentity)>,
+    response: mpsc::Sender<Result<T, ()>>,
+    action: impl FnOnce(&RustConnection, usize) -> Result<T, ()>,
+) {
+    let result = connection
+        .as_ref()
+        .ok_or(())
+        .and_then(|(conn, screen, server)| {
+            server.validate(conn)?;
+            action(conn, *screen)
+        });
+    if result.is_err() {
+        *connection = None;
+    }
+    let _ = response.send(result);
+}
+
 impl X11TopologyWorker {
     fn spawn() -> Result<Self, ProtocolError> {
         let (requests, receiver) = mpsc::sync_channel::<X11Request>(1);
@@ -291,28 +302,10 @@ impl X11TopologyWorker {
                     }
                     match request {
                         X11Request::Topology(response) => {
-                            let result = connection.as_ref().ok_or(()).and_then(
-                                |(connection, screen, server)| {
-                                    server.validate(connection)?;
-                                    x11_topology_hash(connection, *screen)
-                                },
-                            );
-                            if result.is_err() {
-                                connection = None;
-                            }
-                            let _ = response.send(result);
+                            process_x11_request(&mut connection, response, x11_topology_hash);
                         }
                         X11Request::Desktop(response) => {
-                            let result = connection.as_ref().ok_or(()).and_then(
-                                |(connection, screen, server)| {
-                                    server.validate(connection)?;
-                                    x11_desktop_sentinel(connection, *screen)
-                                },
-                            );
-                            if result.is_err() {
-                                connection = None;
-                            }
-                            let _ = response.send(result);
+                            process_x11_request(&mut connection, response, x11_desktop_sentinel);
                         }
                     }
                 }
@@ -693,19 +686,18 @@ fn valid_keyboard_focus(focus: u32, root: u32) -> bool {
 
 impl LinuxAtspiBackend {
     pub fn connect() -> Result<Self, ProtocolError> {
-        let session = Builder::session()
-            .map_err(executor_error)?
-            .method_timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS))
-            .build()
-            .map_err(executor_error)?;
-        let address = BusProxyBlocking::new(&session)
-            .and_then(|proxy| proxy.get_address())
-            .map_err(executor_error)?;
-        let address = Address::try_from(address.as_str()).map_err(executor_error)?;
-        let connection = Builder::address(address)
-            .map(|builder| builder.method_timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS)))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)?;
+        let connection = zbus::block_on(async {
+            let session = zbus::conn::Builder::session()
+                .method_timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS))
+                .build()
+                .await?;
+            let address = BusProxy::new(&session).await?.get_address().await?;
+            zbus::conn::Builder::address(address.as_str())
+                .method_timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS))
+                .build()
+                .await
+        })
+        .map_err(executor_error)?;
         Ok(Self {
             connection,
             generation: AtomicU64::new(0),
@@ -1200,12 +1192,14 @@ impl LinuxAtspiBackend {
         if process_generation(x11.foreground_process_id)? != x11.foreground_process_generation {
             return Err(desktop_state_unavailable());
         }
-        let root = AccessibleProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination("org.a11y.atspi.Registry")
-            .and_then(|builder| builder.path("/org/a11y/atspi/accessible/root"))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)?;
+        let root = zbus::block_on(
+            AccessibleProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination("org.a11y.atspi.Registry")
+                .path("/org/a11y/atspi/accessible/root")
+                .build(),
+        )
+        .map_err(executor_error)?;
         let applications = provider_call!(cancellation, deadline_at_ms, root.get_children())?;
         if applications.len() > MAX_APPLICATIONS {
             return Err(desktop_state_unavailable());
@@ -1250,7 +1244,7 @@ impl LinuxAtspiBackend {
                 )?;
                 let states = self.states(&window, cancellation, deadline_at_ms)?;
                 if active_window_state(states) {
-                    if !matches!(role, Role::Dialog | Role::Frame | Role::Window) {
+                    if !matches!(role, ROLE_DIALOG | ROLE_FRAME | ROLE_WINDOW) {
                         return Err(desktop_state_unavailable());
                     }
                     active.push(window);
@@ -1278,7 +1272,7 @@ impl LinuxAtspiBackend {
         if process_generation(x11.foreground_process_id)? != x11.foreground_process_generation
             || self.process_id(&window, cancellation, deadline_at_ms)? != x11.foreground_process_id
             || process_generation(process_id)? != focused_process_generation
-            || !matches!(live_window_role, Role::Dialog | Role::Frame | Role::Window)
+            || !matches!(live_window_role, ROLE_DIALOG | ROLE_FRAME | ROLE_WINDOW)
             || !active_window_state(self.states(&window, cancellation, deadline_at_ms)?)
             || !focused_state(self.states(&focused, cancellation, deadline_at_ms)?)
         {
@@ -1436,8 +1430,7 @@ impl LinuxAtspiBackend {
             ));
         }
         check_dispatch_boundary(cancellation, deadline_at_ms)?;
-        let dispatched = proxy
-            .do_action(expected_action.index)
+        let dispatched = zbus::block_on(proxy.do_action(expected_action.index))
             .map_err(|_| unknown_after_dispatch())?;
         if !dispatched {
             return Err(unknown_after_dispatch());
@@ -1485,9 +1478,8 @@ impl LinuxAtspiBackend {
         )
         .map_err(|error| protocol_before_effect(error, cancellation, deadline_at_ms))?;
         check_dispatch_boundary(cancellation, deadline_at_ms)?;
-        let dispatched = proxy
-            .set_text_contents(value)
-            .map_err(|_| unknown_after_dispatch())?;
+        let dispatched =
+            zbus::block_on(proxy.set_text_contents(value)).map_err(|_| unknown_after_dispatch())?;
         if !dispatched {
             return Err(unknown_after_dispatch());
         }
@@ -1638,12 +1630,14 @@ impl LinuxAtspiBackend {
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<Vec<SurfaceWindow>, ProtocolError> {
-        let root = AccessibleProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination("org.a11y.atspi.Registry")
-            .and_then(|builder| builder.path("/org/a11y/atspi/accessible/root"))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)?;
+        let root = zbus::block_on(
+            AccessibleProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination("org.a11y.atspi.Registry")
+                .path("/org/a11y/atspi/accessible/root")
+                .build(),
+        )
+        .map_err(executor_error)?;
         let applications = provider_call!(cancellation, deadline_at_ms, root.get_children())?;
         if applications.len() > MAX_APPLICATIONS {
             return Err(ProtocolError::Executor(
@@ -1691,34 +1685,34 @@ impl LinuxAtspiBackend {
                     deadline_at_ms,
                     self.accessible(&window)?.get_role()
                 )?;
-                if !matches!(role, Role::Dialog | Role::Frame | Role::Window) {
+                if !matches!(role, ROLE_DIALOG | ROLE_FRAME | ROLE_WINDOW) {
                     continue;
                 }
                 let states = self.states(&window, cancellation, deadline_at_ms)?;
-                if states.contains(State::Visible)
-                    && states.contains(State::Showing)
-                    && !states.contains(State::Defunct)
-                    && !states.contains(State::Iconified)
+                if !states.contains(State::Visible)
+                    || !states.contains(State::Showing)
+                    || states.contains(State::Defunct)
+                    || states.contains(State::Iconified)
                 {
-                    let identity =
-                        self.surface_identity(&window, states, cancellation, deadline_at_ms)?;
-                    let window_id =
-                        semantic_fingerprint(&identity.backend_id).map_err(semantic_error)?;
-                    let fingerprint_hash =
-                        semantic_fingerprint(&identity).map_err(semantic_error)?;
-                    windows.push(SurfaceWindow {
-                        object: window,
-                        process_id,
-                        process_generation: generation.clone(),
-                        window_id,
-                        fingerprint_hash,
-                        bounds: identity.bounds,
-                    });
-                    if windows.len() > MAX_SURFACES {
-                        return Err(ProtocolError::Executor(
-                            "accessibility surface limit exceeded".to_string(),
-                        ));
-                    }
+                    continue;
+                }
+                let identity =
+                    self.surface_identity(&window, states, cancellation, deadline_at_ms)?;
+                let window_id =
+                    semantic_fingerprint(&identity.backend_id).map_err(semantic_error)?;
+                let fingerprint_hash = semantic_fingerprint(&identity).map_err(semantic_error)?;
+                windows.push(SurfaceWindow {
+                    object: window,
+                    process_id,
+                    process_generation: generation.clone(),
+                    window_id,
+                    fingerprint_hash,
+                    bounds: identity.bounds,
+                });
+                if windows.len() > MAX_SURFACES {
+                    return Err(ProtocolError::Executor(
+                        "accessibility surface limit exceeded".to_string(),
+                    ));
                 }
             }
             if process_generation(process_id)? != generation {
@@ -1739,7 +1733,7 @@ impl LinuxAtspiBackend {
         deadline_at_ms: i64,
     ) -> Result<SurfaceIdentity, ProtocolError> {
         let accessible = self.accessible(object)?;
-        let role_code = provider_call!(cancellation, deadline_at_ms, accessible.get_role())? as u32;
+        let role_code = provider_call!(cancellation, deadline_at_ms, accessible.get_role())?;
         let role = bounded_text(provider_call!(
             cancellation,
             deadline_at_ms,
@@ -1755,7 +1749,7 @@ impl LinuxAtspiBackend {
             let (x, y, width, height) = provider_call!(
                 cancellation,
                 deadline_at_ms,
-                self.component(object)?.get_extents(CoordType::Screen)
+                self.component(object)?.get_extents(COORD_TYPE_SCREEN)
             )?;
             (width > 0 && height > 0).then_some(Rect {
                 x: i64::from(x),
@@ -1801,7 +1795,7 @@ impl LinuxAtspiBackend {
             let (x, y, width, height) = provider_call!(
                 cancellation,
                 deadline_at_ms,
-                component.get_extents(CoordType::Screen)
+                component.get_extents(COORD_TYPE_SCREEN)
             )?;
             (width > 0 && height > 0).then_some(Rect {
                 x: i64::from(x),
@@ -1860,7 +1854,7 @@ impl LinuxAtspiBackend {
 
     fn action_names(
         &self,
-        proxy: &ActionProxyBlocking<'_>,
+        proxy: &ActionProxy<'_>,
         cancellation: &CancellationToken,
         deadline_at_ms: i64,
     ) -> Result<Vec<String>, ProtocolError> {
@@ -1922,9 +1916,10 @@ impl LinuxAtspiBackend {
         deadline_at_ms: i64,
     ) -> Result<u32, ProtocolError> {
         object.validate()?;
-        let name = atspi::zbus::names::BusName::try_from(object.bus_name.as_str())
-            .map_err(executor_error)?;
-        let proxy = DBusProxy::new(&self.connection).map_err(executor_error)?;
+        let name =
+            zbus::names::BusName::try_from(object.bus_name.as_str()).map_err(executor_error)?;
+        let proxy =
+            zbus::block_on(zbus::fdo::DBusProxy::new(&self.connection)).map_err(executor_error)?;
         provider_call!(
             cancellation,
             deadline_at_ms,
@@ -1935,66 +1930,70 @@ impl LinuxAtspiBackend {
     fn accessible<'a>(
         &'a self,
         object: &'a StoredObject,
-    ) -> Result<AccessibleProxyBlocking<'a>, ProtocolError> {
+    ) -> Result<AccessibleProxy<'a>, ProtocolError> {
         object.validate()?;
-        AccessibleProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination(object.bus_name.as_str())
-            .and_then(|builder| builder.path(object.path.as_str()))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)
+        zbus::block_on(
+            AccessibleProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination(object.bus_name.as_str())
+                .path(object.path.as_str())
+                .build(),
+        )
+        .map_err(executor_error)
     }
 
-    fn action<'a>(
-        &'a self,
-        object: &'a StoredObject,
-    ) -> Result<ActionProxyBlocking<'a>, ProtocolError> {
+    fn action<'a>(&'a self, object: &'a StoredObject) -> Result<ActionProxy<'a>, ProtocolError> {
         object.validate()?;
-        ActionProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination(object.bus_name.as_str())
-            .and_then(|builder| builder.path(object.path.as_str()))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)
+        zbus::block_on(
+            ActionProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination(object.bus_name.as_str())
+                .path(object.path.as_str())
+                .build(),
+        )
+        .map_err(executor_error)
     }
 
     fn component<'a>(
         &'a self,
         object: &'a StoredObject,
-    ) -> Result<ComponentProxyBlocking<'a>, ProtocolError> {
+    ) -> Result<ComponentProxy<'a>, ProtocolError> {
         object.validate()?;
-        ComponentProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination(object.bus_name.as_str())
-            .and_then(|builder| builder.path(object.path.as_str()))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)
+        zbus::block_on(
+            ComponentProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination(object.bus_name.as_str())
+                .path(object.path.as_str())
+                .build(),
+        )
+        .map_err(executor_error)
     }
 
     fn editable_text<'a>(
         &'a self,
         object: &'a StoredObject,
-    ) -> Result<EditableTextProxyBlocking<'a>, ProtocolError> {
+    ) -> Result<EditableTextProxy<'a>, ProtocolError> {
         object.validate()?;
-        EditableTextProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination(object.bus_name.as_str())
-            .and_then(|builder| builder.path(object.path.as_str()))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)
+        zbus::block_on(
+            EditableTextProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination(object.bus_name.as_str())
+                .path(object.path.as_str())
+                .build(),
+        )
+        .map_err(executor_error)
     }
 
-    fn text<'a>(
-        &'a self,
-        object: &'a StoredObject,
-    ) -> Result<TextProxyBlocking<'a>, ProtocolError> {
+    fn text<'a>(&'a self, object: &'a StoredObject) -> Result<TextProxy<'a>, ProtocolError> {
         object.validate()?;
-        TextProxyBlocking::builder(&self.connection)
-            .cache_properties(CacheProperties::No)
-            .destination(object.bus_name.as_str())
-            .and_then(|builder| builder.path(object.path.as_str()))
-            .and_then(|builder| builder.build())
-            .map_err(executor_error)
+        zbus::block_on(
+            TextProxy::builder(&self.connection)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .destination(object.bus_name.as_str())
+                .path(object.path.as_str())
+                .build(),
+        )
+        .map_err(executor_error)
     }
 }
 
@@ -2054,7 +2053,7 @@ fn surface_states(states: StateSet) -> u64 {
 }
 
 impl StoredObject {
-    fn from_ref(object: &ObjectRefOwned) -> Result<Self, ProtocolError> {
+    fn from_ref(object: &ObjectRef) -> Result<Self, ProtocolError> {
         let stored = Self {
             bus_name: object
                 .name_as_str()
@@ -2076,8 +2075,8 @@ impl StoredObject {
                 .chars()
                 .chain(self.path.chars())
                 .any(char::is_control)
-            || atspi::zbus::names::UniqueName::try_from(self.bus_name.as_str()).is_err()
-            || atspi::zbus::zvariant::ObjectPath::try_from(self.path.as_str()).is_err()
+            || zbus::names::UniqueName::try_from(self.bus_name.as_str()).is_err()
+            || zbus::ObjectPath::try_from(self.path.as_str()).is_err()
         {
             return Err(ProtocolError::StaleTarget(
                 "accessibility object is invalid".to_string(),
@@ -2402,6 +2401,217 @@ fn now_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+/// The small slice of the AT-SPI2 D-Bus protocol this backend uses, on zbus directly.
+mod atspi_dbus {
+    use serde::{Deserialize, Deserializer};
+    use zbus::{OwnedObjectPath, Signature, Type};
+
+    const NULL_PATH: &str = "/org/a11y/atspi/null";
+
+    /// `ATSPI_COORD_TYPE_SCREEN`.
+    pub const COORD_TYPE_SCREEN: u32 = 0;
+    /// `ATSPI_ROLE_DIALOG`.
+    pub const ROLE_DIALOG: u32 = 16;
+    /// `ATSPI_ROLE_FRAME`.
+    pub const ROLE_FRAME: u32 = 23;
+    /// `ATSPI_ROLE_WINDOW`.
+    pub const ROLE_WINDOW: u32 = 69;
+
+    /// An accessible object reference, `(so)` on the wire.
+    #[derive(Clone, Debug, Deserialize, Type)]
+    pub struct ObjectRef(String, OwnedObjectPath);
+
+    impl ObjectRef {
+        pub fn is_null(&self) -> bool {
+            self.1.as_str() == NULL_PATH
+        }
+
+        pub fn name_as_str(&self) -> Option<&str> {
+            (!self.is_null()).then_some(self.0.as_str())
+        }
+
+        pub fn path_as_str(&self) -> &str {
+            self.1.as_str()
+        }
+    }
+
+    /// `AtspiStateType` values, used as bit positions in a state set.
+    #[derive(Clone, Copy, Debug)]
+    #[repr(u32)]
+    pub enum State {
+        Active = 1,
+        Busy = 3,
+        Defunct = 6,
+        Editable = 7,
+        Enabled = 8,
+        Focused = 12,
+        Iconified = 15,
+        Sensitive = 24,
+        Showing = 25,
+        Visible = 30,
+        ReadOnly = 43,
+    }
+
+    /// An AT-SPI state set, two `u32` words (`au`) on the wire.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct StateSet(u64);
+
+    impl StateSet {
+        #[cfg(test)]
+        pub fn new(states: &[State]) -> Self {
+            Self(
+                states
+                    .iter()
+                    .fold(0, |bits, state| bits | (1_u64 << *state as u32)),
+            )
+        }
+
+        pub fn contains(self, state: State) -> bool {
+            self.0 & (1_u64 << state as u32) != 0
+        }
+    }
+
+    impl Type for StateSet {
+        const SIGNATURE: &'static Signature = <Vec<u32> as Type>::SIGNATURE;
+    }
+
+    impl<'de> Deserialize<'de> for StateSet {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            match <Vec<u32>>::deserialize(deserializer)?.as_slice() {
+                [low, high] => Ok(Self(u64::from(*low) | (u64::from(*high) << 32))),
+                words => Err(serde::de::Error::invalid_length(
+                    words.len(),
+                    &"array of size 2",
+                )),
+            }
+        }
+    }
+
+    /// AT-SPI interface names, in the bit order of an interface set.
+    const INTERFACE_NAMES: [&str; 20] = [
+        "org.a11y.atspi.Accessible",
+        "org.a11y.atspi.Action",
+        "org.a11y.atspi.Application",
+        "org.a11y.atspi.Cache",
+        "org.a11y.atspi.Collection",
+        "org.a11y.atspi.Component",
+        "org.a11y.atspi.Document",
+        "org.a11y.atspi.DeviceEventController",
+        "org.a11y.atspi.DeviceEventListener",
+        "org.a11y.atspi.EditableText",
+        "org.a11y.atspi.Hyperlink",
+        "org.a11y.atspi.Hypertext",
+        "org.a11y.atspi.Image",
+        "org.a11y.atspi.Registry",
+        "org.a11y.atspi.Selection",
+        "org.a11y.atspi.Socket",
+        "org.a11y.atspi.Table",
+        "org.a11y.atspi.TableCell",
+        "org.a11y.atspi.Text",
+        "org.a11y.atspi.Value",
+    ];
+
+    /// AT-SPI interfaces this backend calls into, as bit positions in an interface set.
+    #[derive(Clone, Copy, Debug)]
+    #[repr(u32)]
+    pub enum Interface {
+        Action = 1,
+        Component = 5,
+        EditableText = 9,
+        Text = 18,
+    }
+
+    /// The known interfaces an object implements, `as` of interface names on the wire.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct InterfaceSet(u32);
+
+    impl InterfaceSet {
+        pub fn contains(self, interface: Interface) -> bool {
+            self.0 & (1_u32 << interface as u32) != 0
+        }
+
+        pub fn bits(self) -> u32 {
+            self.0
+        }
+    }
+
+    impl Type for InterfaceSet {
+        const SIGNATURE: &'static Signature = <Vec<String> as Type>::SIGNATURE;
+    }
+
+    impl<'de> Deserialize<'de> for InterfaceSet {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let names = <Vec<String>>::deserialize(deserializer)?;
+            Ok(Self(INTERFACE_NAMES.iter().enumerate().fold(
+                0,
+                |bits, (index, known)| {
+                    if names.iter().any(|name| name == known) {
+                        bits | (1_u32 << index)
+                    } else {
+                        bits
+                    }
+                },
+            )))
+        }
+    }
+
+    #[zbus::proxy(
+        interface = "org.a11y.Bus",
+        default_service = "org.a11y.Bus",
+        default_path = "/org/a11y/bus"
+    )]
+    pub trait Bus {
+        fn get_address(&self) -> zbus::Result<String>;
+    }
+
+    #[zbus::proxy(interface = "org.a11y.atspi.Accessible", assume_defaults = false)]
+    pub trait Accessible {
+        fn get_children(&self) -> zbus::Result<Vec<ObjectRef>>;
+
+        fn get_interfaces(&self) -> zbus::Result<InterfaceSet>;
+
+        fn get_role(&self) -> zbus::Result<u32>;
+
+        fn get_role_name(&self) -> zbus::Result<String>;
+
+        fn get_state(&self) -> zbus::Result<StateSet>;
+
+        #[zbus(property)]
+        fn name(&self) -> zbus::Result<String>;
+
+        #[zbus(property)]
+        fn parent(&self) -> zbus::Result<ObjectRef>;
+    }
+
+    #[zbus::proxy(interface = "org.a11y.atspi.Action", assume_defaults = false)]
+    pub trait Action {
+        fn do_action(&self, index: i32) -> zbus::Result<bool>;
+
+        fn get_name(&self, index: i32) -> zbus::Result<String>;
+
+        #[zbus(property)]
+        fn n_actions(&self) -> zbus::Result<i32>;
+    }
+
+    #[zbus::proxy(interface = "org.a11y.atspi.Component", assume_defaults = false)]
+    pub trait Component {
+        fn get_extents(&self, coord_type: u32) -> zbus::Result<(i32, i32, i32, i32)>;
+    }
+
+    #[zbus::proxy(interface = "org.a11y.atspi.EditableText", assume_defaults = false)]
+    pub trait EditableText {
+        fn set_text_contents(&self, new_contents: &str) -> zbus::Result<bool>;
+    }
+
+    #[zbus::proxy(interface = "org.a11y.atspi.Text", assume_defaults = false)]
+    pub trait Text {
+        fn get_text(&self, start_offset: i32, end_offset: i32) -> zbus::Result<String>;
+
+        #[zbus(property)]
+        fn character_count(&self) -> zbus::Result<i32>;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2574,19 +2784,87 @@ mod tests {
 
     #[test]
     fn accessibility_focus_requires_exact_visible_states() {
-        let focused = StateSet::new(State::Focused | State::Visible | State::Showing);
+        let focused = StateSet::new(&[State::Focused, State::Visible, State::Showing]);
         assert!(focused_state(focused));
-        assert!(!focused_state(StateSet::new(
-            State::Focused | State::Visible
-        )));
-        assert!(!focused_state(StateSet::new(
-            State::Focused | State::Visible | State::Showing | State::Defunct
-        )));
-        let active = StateSet::new(State::Active | State::Visible | State::Showing);
+        assert!(!focused_state(StateSet::new(&[
+            State::Focused,
+            State::Visible
+        ])));
+        assert!(!focused_state(StateSet::new(&[
+            State::Focused,
+            State::Visible,
+            State::Showing,
+            State::Defunct
+        ])));
+        let active = StateSet::new(&[State::Active, State::Visible, State::Showing]);
         assert!(active_window_state(active));
-        assert!(!active_window_state(StateSet::new(
-            State::Active | State::Visible | State::Showing | State::Iconified
-        )));
+        assert!(!active_window_state(StateSet::new(&[
+            State::Active,
+            State::Visible,
+            State::Showing,
+            State::Iconified
+        ])));
+    }
+
+    #[test]
+    fn atspi_wire_values_decode_like_the_protocol() {
+        use zbus::wire::{LE, serialized::Context, to_bytes};
+
+        let context = Context::new(LE, 0);
+        let states: StateSet = to_bytes(context, &vec![1_u32 << 30, 1_u32 << (43 - 32)])
+            .unwrap()
+            .deserialize()
+            .unwrap()
+            .0;
+        assert!(states.contains(State::Visible) && states.contains(State::ReadOnly));
+        assert!(!states.contains(State::Showing));
+        assert!(
+            to_bytes(context, &vec![0_u32])
+                .unwrap()
+                .deserialize::<StateSet>()
+                .is_err()
+        );
+
+        let interfaces: atspi_dbus::InterfaceSet = to_bytes(
+            context,
+            &vec![
+                "org.a11y.atspi.Text",
+                "org.a11y.atspi.Component",
+                "x.Unknown",
+            ],
+        )
+        .unwrap()
+        .deserialize()
+        .unwrap()
+        .0;
+        assert_eq!(interfaces.bits(), (1 << 5) | (1 << 18));
+        assert!(interfaces.contains(Interface::Text));
+        assert!(!interfaces.contains(Interface::Action));
+
+        let null: ObjectRef = to_bytes(
+            context,
+            &(
+                "",
+                zbus::ObjectPath::try_from("/org/a11y/atspi/null").unwrap(),
+            ),
+        )
+        .unwrap()
+        .deserialize()
+        .unwrap()
+        .0;
+        assert!(null.is_null() && null.name_as_str().is_none());
+        let object: ObjectRef = to_bytes(
+            context,
+            &(":1.7", zbus::ObjectPath::try_from("/a/b").unwrap()),
+        )
+        .unwrap()
+        .deserialize()
+        .unwrap()
+        .0;
+        assert_eq!(
+            StoredObject::from_ref(&object).unwrap().id().unwrap(),
+            ":1.7:/a/b"
+        );
     }
 
     #[test]

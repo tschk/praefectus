@@ -1011,6 +1011,29 @@ fn invalid_actions_and_unfenced_effects_are_rejected_before_claim() {
 }
 
 #[test]
+#[ignore = "takes a real screen snapshot and persists an observation in the user state directory"]
+fn native_executor_observe_coordinates() {
+    let executor = NativeExecutor::default();
+    if cfg!(target_os = "linux")
+        && std::env::var("DISPLAY").is_err()
+        && std::env::var("WAYLAND_DISPLAY").is_err()
+    {
+        // No desktop session on CI.
+        return;
+    }
+    let result = executor.observe_coordinates();
+    match result {
+        Ok(observation) => {
+            assert_eq!(observation.protocol_version, praefectus::PROTOCOL_VERSION);
+            assert!(!observation.snapshot_id.is_empty());
+        }
+        Err(error) => {
+            assert!(matches!(error, praefectus::ProtocolError::Executor(_)));
+        }
+    }
+}
+
+#[test]
 fn native_executor_routes_coordinate_effects() {
     let executor = NativeExecutor::default();
     let capabilities = executor.capabilities().expect("capabilities");
@@ -1580,4 +1603,39 @@ fn the_null_outcome_ledger_always_grants_dispatch() {
         ledger.begin(&key).expect("begin"),
         LedgerDecision::Dispatch
     ));
+}
+
+#[test]
+fn native_executor_clipboard_read() {
+    let executor = NativeExecutor::default();
+    let result = executor.clipboard_read(
+        &CancellationToken::default(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 5000,
+    );
+
+    if cfg!(target_os = "macos") {
+        // We shouldn't mutate clipboard in a normal test without #[ignore], so we just check it doesn't crash
+        // with an unexpected error. It might return a string or an executor error if empty/invalid.
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                if let ProtocolError::Executor(msg) = e {
+                    assert!(msg.contains("clipboard"));
+                } else {
+                    panic!("unexpected error: {e:?}");
+                }
+            }
+        }
+    } else {
+        // On non-macos, it should return the specific unavailable error
+        if let Err(ProtocolError::Executor(msg)) = result {
+            assert_eq!(msg, "clipboard observation is unavailable");
+        } else {
+            panic!("Expected ProtocolError::Executor, got: {result:?}");
+        }
+    }
 }
