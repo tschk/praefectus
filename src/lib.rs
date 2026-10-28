@@ -7700,21 +7700,55 @@ fn persist_observation(path: &Path, observation: &impl Serialize) -> Result<(), 
     ensure_directory(parent, true)?;
     #[cfg(windows)]
     let _path_guard = windows_acl::lock_path(parent)?;
-    let temporary = path.with_extension("tmp");
+    let temporary = unique_temporary_path(path)?;
     let mut file = private_open_options()
         .create_new(true)
         .write(true)
         .open(&temporary)?;
-    restrict_file(&file)?;
-    serde_json::to_writer(&mut file, observation)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
+    let written = (|| -> Result<(), ProtocolError> {
+        restrict_file(&file)?;
+        serde_json::to_writer(&mut file, observation)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        Ok(())
+    })();
     drop(file);
-    #[cfg(not(windows))]
-    std::fs::rename(&temporary, path)?;
-    #[cfg(windows)]
-    windows_acl::replace_file_durable(&temporary, path)?;
+    let replaced = written.and_then(|()| {
+        #[cfg(not(windows))]
+        std::fs::rename(&temporary, path)?;
+        #[cfg(windows)]
+        windows_acl::replace_file_durable(&temporary, path)?;
+        Ok(())
+    });
+    if let Err(error) = replaced {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     sync_parent(path)
+}
+
+/// Returns a temporary sibling of `path` that no other writer or stale crash leftover shares.
+fn unique_temporary_path(path: &Path) -> Result<PathBuf, ProtocolError> {
+    use std::hash::BuildHasher;
+
+    static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| ProtocolError::InvalidRequest("invalid observation path".to_string()))?;
+    let process = std::process::id();
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::collections::hash_map::RandomState::new().hash_one((
+        process,
+        sequence,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default(),
+    ));
+    let mut temporary = name.to_os_string();
+    temporary.push(format!(".{process}.{sequence}.{nonce:016x}.tmp"));
+    Ok(path.with_file_name(temporary))
 }
 
 fn load_coordinate_observation(snapshot_id: &str) -> Result<CoordinateObservation, ProtocolError> {
@@ -9374,6 +9408,46 @@ mod tests {
             std::fs::read(&ledger.path).unwrap(),
             b"{\"kind\":\"claim\"\n"
         );
+    }
+
+    #[test]
+    fn persist_observation_tolerates_stale_and_concurrent_temporaries() {
+        let directory = tempfile::tempdir().unwrap();
+        super::restrict_directory(directory.path()).unwrap();
+        let path = directory.path().join("observation.json");
+        let stale = path.with_extension("tmp");
+        std::fs::write(&stale, b"left by a crashed writer").unwrap();
+
+        super::persist_observation(&path, &json!({"i": 0})).unwrap();
+        super::persist_observation(&path, &json!({"i": 1})).unwrap();
+        // Windows rejects a destination another writer replaced before it could verify its own
+        // rename, so only Unix can persist the same path from many threads at once.
+        #[cfg(not(windows))]
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (2..10)
+                .map(|index| {
+                    let path = &path;
+                    scope.spawn(move || super::persist_observation(path, &json!({"i": index})))
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+        });
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(persisted["i"].as_u64().is_some_and(|index| index < 10));
+        let temporaries: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .extension()
+                    .is_some_and(|extension| extension == "tmp")
+            })
+            .collect();
+        assert_eq!(temporaries, vec![stale]);
     }
 
     #[cfg(target_os = "macos")]
