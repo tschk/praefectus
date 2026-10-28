@@ -9278,8 +9278,13 @@ mod tests {
         let stale = path.with_extension("tmp");
         std::fs::write(&stale, b"left by a crashed writer").unwrap();
 
+        super::persist_observation(&path, &json!({"i": 0})).unwrap();
+        super::persist_observation(&path, &json!({"i": 1})).unwrap();
+        // Windows rejects a destination another writer replaced before it could verify its own
+        // rename, so only Unix can persist the same path from many threads at once.
+        #[cfg(not(windows))]
         std::thread::scope(|scope| {
-            let writers: Vec<_> = (0..8)
+            let writers: Vec<_> = (2..10)
                 .map(|index| {
                     let path = &path;
                     scope.spawn(move || super::persist_observation(path, &json!({"i": index})))
@@ -9292,14 +9297,17 @@ mod tests {
 
         let persisted: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(persisted["i"].as_u64().is_some_and(|index| index < 8));
-        let mut leftovers: Vec<_> = std::fs::read_dir(directory.path())
+        assert!(persisted["i"].as_u64().is_some_and(|index| index < 10));
+        let temporaries: Vec<_> = std::fs::read_dir(directory.path())
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|entry| entry != &path)
+            .filter(|entry| {
+                entry
+                    .extension()
+                    .is_some_and(|extension| extension == "tmp")
+            })
             .collect();
-        leftovers.sort();
-        assert_eq!(leftovers, vec![stale]);
+        assert_eq!(temporaries, vec![stale]);
     }
 
     #[cfg(target_os = "macos")]
