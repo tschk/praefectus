@@ -271,6 +271,24 @@ fn focused_element_id<'a>(
     Ok(element_id)
 }
 
+fn process_x11_request<T>(
+    connection: &mut Option<(RustConnection, usize, X11ServerIdentity)>,
+    response: mpsc::Sender<Result<T, ()>>,
+    action: impl FnOnce(&RustConnection, usize) -> Result<T, ()>,
+) {
+    let result = connection
+        .as_ref()
+        .ok_or(())
+        .and_then(|(conn, screen, server)| {
+            server.validate(conn)?;
+            action(conn, *screen)
+        });
+    if result.is_err() {
+        *connection = None;
+    }
+    let _ = response.send(result);
+}
+
 impl X11TopologyWorker {
     fn spawn() -> Result<Self, ProtocolError> {
         let (requests, receiver) = mpsc::sync_channel::<X11Request>(1);
@@ -284,28 +302,10 @@ impl X11TopologyWorker {
                     }
                     match request {
                         X11Request::Topology(response) => {
-                            let result = connection.as_ref().ok_or(()).and_then(
-                                |(connection, screen, server)| {
-                                    server.validate(connection)?;
-                                    x11_topology_hash(connection, *screen)
-                                },
-                            );
-                            if result.is_err() {
-                                connection = None;
-                            }
-                            let _ = response.send(result);
+                            process_x11_request(&mut connection, response, x11_topology_hash);
                         }
                         X11Request::Desktop(response) => {
-                            let result = connection.as_ref().ok_or(()).and_then(
-                                |(connection, screen, server)| {
-                                    server.validate(connection)?;
-                                    x11_desktop_sentinel(connection, *screen)
-                                },
-                            );
-                            if result.is_err() {
-                                connection = None;
-                            }
-                            let _ = response.send(result);
+                            process_x11_request(&mut connection, response, x11_desktop_sentinel);
                         }
                     }
                 }
