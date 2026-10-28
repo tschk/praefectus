@@ -51,15 +51,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
 
   msrv:
-    name: Rust 1.88 (MSRV)
+    name: Rust 1.89 (MSRV)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.88.0 --profile minimal --component clippy
-      - run: rustup default 1.88.0
+      - run: rustup toolchain install 1.89.0 --profile minimal --component clippy
+      - run: rustup default 1.89.0
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo check --locked --all-targets --all-features
 

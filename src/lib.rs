@@ -478,7 +478,13 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
         | Action::Open { .. }
         | Action::ClipboardWrite { .. } => DeliveryRoute::Pointer,
         Action::Scroll { .. } => DeliveryRoute::Unknown,
-        _ => DeliveryRoute::Pointer,
+        Action::Click { .. }
+        | Action::TypeText { .. }
+        | Action::Press { .. }
+        | Action::Paste { .. }
+        | Action::Hotkey { .. }
+        | Action::Move
+        | Action::Drag { .. } => DeliveryRoute::Pointer,
     }
 }
 
@@ -5113,7 +5119,7 @@ impl NativeExecutor {
         {
             return windows_uia::list_surfaces(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(ProtocolError::Executor(
             "surface enumeration is unavailable".to_string(),
         ))
@@ -5172,7 +5178,7 @@ impl NativeExecutor {
         {
             return windows_uia::snapshot_surface(surface, cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(ProtocolError::Executor(
             "surface observation is unavailable".to_string(),
         ))
@@ -5356,7 +5362,7 @@ impl NativeExecutor {
                 _ => Err(unsupported("semantic action is unavailable")),
             };
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = (action, target, cancellation, deadline_at_ms);
             Err(unsupported("semantic action is unavailable"))
@@ -5593,7 +5599,7 @@ impl NativeExecutor {
         {
             return windows_uia::snapshot(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(ProtocolError::Executor(
             "semantic observation is unavailable".to_string(),
         ))
@@ -5671,7 +5677,7 @@ impl NativeExecutor {
         {
             return windows_uia::focused_target(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(ProtocolError::Executor(
             "focused observation is unavailable".to_string(),
         ))
@@ -5844,6 +5850,20 @@ impl NativeExecutor {
         Ok(())
     }
 
+    fn check_partial_dispatch(
+        index: u32,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+        interrupted_message: &'static str,
+    ) -> Result<(), DispatchError> {
+        if index == 0 {
+            Self::check_before_effect(cancellation, deadline_at_ms)?;
+        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+            return Err(ambiguous(interrupted_message));
+        }
+        Ok(())
+    }
+
     fn dispatch_type_text(
         &self,
         text: &str,
@@ -5984,7 +6004,7 @@ impl Executor for NativeExecutor {
         {
             return windows_uia::shared_desktop_context_hash(cancellation, deadline_at_ms);
         }
-        #[allow(unreachable_code)]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(ProtocolError::Executor(
             "shared desktop context is unavailable".to_string(),
         ))
@@ -6298,11 +6318,12 @@ impl Executor for NativeExecutor {
                     ));
                 }
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("click interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "click interrupted after partial dispatch",
+                    )?;
                     self.runtime.click(native_target()?, button.as_str())?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
@@ -6322,11 +6343,12 @@ impl Executor for NativeExecutor {
                 delay_ms,
             } => {
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("press interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "press interrupted after partial dispatch",
+                    )?;
                     self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
@@ -6350,21 +6372,14 @@ impl Executor for NativeExecutor {
             }
             Action::Scroll { direction, amount } => {
                 for index in 0..*amount {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("scroll interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "scroll interrupted after partial dispatch",
+                    )?;
                     self.runtime
-                        .scroll(
-                            match direction {
-                                Direction::Up => Direction::Up,
-                                Direction::Down => Direction::Down,
-                                Direction::Left => Direction::Left,
-                                Direction::Right => Direction::Right,
-                            },
-                            1,
-                        )
+                        .scroll(*direction, 1)
                         .map_err(ambiguous_dispatch)?;
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
@@ -8118,11 +8133,12 @@ fn mac_semantic_scroll(
 
     let name = CFString::new(name);
     for index in 0..amount {
-        if index == 0 {
-            NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-            return Err(ambiguous("scroll interrupted after partial dispatch"));
-        }
+        NativeExecutor::check_partial_dispatch(
+            index,
+            cancellation,
+            deadline_at_ms,
+            "scroll interrupted after partial dispatch",
+        )?;
         if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
             != kAXErrorSuccess
         {

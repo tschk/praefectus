@@ -46,15 +46,15 @@ export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 
 if [[ ! -x "${CARGO_HOME}/bin/rustup" ]]; then
-  time_step "install rustup" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal'
+  time_step "install rustup" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --profile minimal'
 fi
 
 # shellcheck disable=SC1091
 source "${CARGO_HOME}/env"
 
-time_step "rust toolchain" rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy --no-self-update
+time_step "rust toolchain" rustup toolchain install 1.89.0 --profile minimal --component rustfmt,clippy --no-self-update
 time_step "stable toolchain" rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
-time_step "default rust 1.88.0" rustup default 1.88.0
+time_step "default rust 1.89.0" rustup default 1.89.0
 
 if [[ -f Cargo.lock ]]; then
   time_step "cargo fetch" cargo fetch --locked
