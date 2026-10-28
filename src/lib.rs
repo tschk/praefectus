@@ -8159,7 +8159,6 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
 }
 
 #[cfg(test)]
-#[cfg(all(test, target_os = "macos"))]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
