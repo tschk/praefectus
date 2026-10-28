@@ -15,7 +15,7 @@ const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const PORTAL_RD_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
 
-static PORTAL_SESSION: Mutex<Option<(String, zbus::blocking::Connection)>> = Mutex::new(None);
+static PORTAL_SESSION: Mutex<Option<(String, zbus::Connection)>> = Mutex::new(None);
 
 fn secure_command(name: &str) -> Result<Command, NativeError> {
     if name.is_empty() || name.contains('/') || name.contains('\0') {
@@ -92,34 +92,31 @@ fn keysym_to_keycode(connection: &RustConnection, keysym: u32) -> Result<u8, Nat
 
 // ── Portal helpers ──────────────────────────────────────────────────────────
 
-fn portal_connection() -> Result<zbus::blocking::Connection, NativeError> {
-    zbus::blocking::Connection::session().map_err(|_| NativeError)
+fn portal_connection() -> Result<zbus::Connection, NativeError> {
+    zbus::block_on(zbus::Connection::session()).map_err(|_| NativeError)
 }
 
-fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<String, NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+fn portal_create_session(connection: &zbus::Connection) -> Result<String, NativeError> {
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    let reply = connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "CreateSession",
-            &(zbus::zvariant::Value::from("token"), options),
-        )
-        .map_err(|_| NativeError)?;
+    let reply = zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "CreateSession",
+        &(zbus::Variant::from("token"), options),
+    ))
+    .map_err(|_| NativeError)?;
     let body = reply.body();
     let status: u32 = body.deserialize().map_err(|_| NativeError)?;
     if status != 0 {
         return Err(NativeError);
     }
     let body = reply.body();
-    let (_, results): (
-        u32,
-        std::collections::HashMap<String, zbus::zvariant::Value>,
-    ) = body.deserialize().map_err(|_| NativeError)?;
+    let (_, results): (u32, std::collections::HashMap<String, zbus::Variant>) =
+        body.deserialize().map_err(|_| NativeError)?;
     let handle = results.get("session_handle").ok_or(NativeError)?;
-    if let zbus::zvariant::Value::Str(s) = handle {
+    if let zbus::Variant::Str(s) = handle {
         Ok(s.to_string())
     } else {
         Err(NativeError)
@@ -127,22 +124,21 @@ fn portal_create_session(connection: &zbus::blocking::Connection) -> Result<Stri
 }
 
 fn portal_authorize(
-    connection: &zbus::blocking::Connection,
+    connection: &zbus::Connection,
     session_handle: &str,
 ) -> Result<(), NativeError> {
-    let mut options: std::collections::HashMap<String, zbus::zvariant::Value> =
+    let mut options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    let types = zbus::zvariant::Value::U32(1 | 2);
+    let types = zbus::Variant::U32(1 | 2);
     options.insert("types".to_string(), types);
-    let reply = connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "Authorize",
-            &(session_handle, options),
-        )
-        .map_err(|_| NativeError)?;
+    let reply = zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "Authorize",
+        &(session_handle, options),
+    ))
+    .map_err(|_| NativeError)?;
     let status: u32 = reply.body().deserialize().map_err(|_| NativeError)?;
     if status != 0 {
         return Err(NativeError);
@@ -150,21 +146,17 @@ fn portal_authorize(
     Ok(())
 }
 
-fn portal_start(
-    connection: &zbus::blocking::Connection,
-    session_handle: &str,
-) -> Result<(), NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+fn portal_start(connection: &zbus::Connection, session_handle: &str) -> Result<(), NativeError> {
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    let reply = connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "Start",
-            &("", session_handle, options),
-        )
-        .map_err(|_| NativeError)?;
+    let reply = zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "Start",
+        &("", session_handle, options),
+    ))
+    .map_err(|_| NativeError)?;
     let status: u32 = reply.body().deserialize().map_err(|_| NativeError)?;
     if status != 0 {
         return Err(NativeError);
@@ -172,7 +164,7 @@ fn portal_start(
     Ok(())
 }
 
-fn ensure_portal_session() -> Result<(String, zbus::blocking::Connection), NativeError> {
+fn ensure_portal_session() -> Result<(String, zbus::Connection), NativeError> {
     let mut guard = PORTAL_SESSION.lock().map_err(|_| NativeError)?;
     if let Some((ref handle, ref conn)) = *guard {
         return Ok((handle.clone(), conn.clone()));
@@ -186,82 +178,78 @@ fn ensure_portal_session() -> Result<(String, zbus::blocking::Connection), Nativ
 }
 
 fn portal_notify_pointer_motion(
-    connection: &zbus::blocking::Connection,
+    connection: &zbus::Connection,
     session_handle: &str,
     dx: f64,
     dy: f64,
 ) -> Result<(), NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "NotifyPointerMotion",
-            &(session_handle, options, dx, dy),
-        )
-        .map_err(|_| NativeError)?;
+    zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "NotifyPointerMotion",
+        &(session_handle, options, dx, dy),
+    ))
+    .map_err(|_| NativeError)?;
     Ok(())
 }
 
 fn portal_notify_pointer_button(
-    connection: &zbus::blocking::Connection,
+    connection: &zbus::Connection,
     session_handle: &str,
     button: u32,
     state: u32,
 ) -> Result<(), NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "NotifyPointerButton",
-            &(session_handle, options, button, state),
-        )
-        .map_err(|_| NativeError)?;
+    zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "NotifyPointerButton",
+        &(session_handle, options, button, state),
+    ))
+    .map_err(|_| NativeError)?;
     Ok(())
 }
 
 fn portal_notify_pointer_axis(
-    connection: &zbus::blocking::Connection,
+    connection: &zbus::Connection,
     session_handle: &str,
     dx: f64,
     dy: f64,
 ) -> Result<(), NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "NotifyPointerAxis",
-            &(session_handle, options, dx, dy),
-        )
-        .map_err(|_| NativeError)?;
+    zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "NotifyPointerAxis",
+        &(session_handle, options, dx, dy),
+    ))
+    .map_err(|_| NativeError)?;
     Ok(())
 }
 
 fn portal_notify_keyboard_keysym(
-    connection: &zbus::blocking::Connection,
+    connection: &zbus::Connection,
     session_handle: &str,
     keysym: u32,
     state: u32,
 ) -> Result<(), NativeError> {
-    let options: std::collections::HashMap<String, zbus::zvariant::Value> =
+    let options: std::collections::HashMap<String, zbus::Variant> =
         std::collections::HashMap::new();
-    connection
-        .call_method(
-            Some(PORTAL_DESTINATION),
-            PORTAL_PATH,
-            Some(PORTAL_RD_INTERFACE),
-            "NotifyKeyboardKeysym",
-            &(session_handle, options, keysym as i32, state),
-        )
-        .map_err(|_| NativeError)?;
+    zbus::block_on(connection.call_method(
+        Some(PORTAL_DESTINATION),
+        PORTAL_PATH,
+        Some(PORTAL_RD_INTERFACE),
+        "NotifyKeyboardKeysym",
+        &(session_handle, options, keysym as i32, state),
+    ))
+    .map_err(|_| NativeError)?;
     Ok(())
 }
 
