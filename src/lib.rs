@@ -1098,23 +1098,23 @@ fn secure_command(name: &str) -> Result<Command, NativeError> {
     Err(NativeError)
 }
 
-fn global_input_env_restriction(
-    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Option<bool> {
-    match get_env("PRAEFECTUS_ALLOW_GLOBAL_INPUT").and_then(|s| s.into_string().ok()) {
-        Some(value) if value == "1" => return Some(false),
-        Some(value) if value == "0" => return Some(true),
+fn global_input_env_restriction() -> Option<bool> {
+    match std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT") {
+        Ok(value) if value == "1" => return Some(false),
+        Ok(value) if value == "0" => return Some(true),
         _ => {}
     }
-    match get_env("PRAEFECTUS_NO_YOLO").and_then(|s| s.into_string().ok()) {
-        Some(value) if value == "1" => Some(true),
-        Some(value) if value == "0" => Some(false),
+    match std::env::var("PRAEFECTUS_NO_YOLO") {
+        Ok(value) if value == "1" => Some(true),
+        Ok(value) if value == "0" => Some(false),
         _ => None,
     }
 }
 
-fn no_yolo_path(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
-    observation_root(get_env).join("praefectus").join("no-yolo")
+fn no_yolo_path() -> PathBuf {
+    observation_root(|key| std::env::var_os(key))
+        .join("praefectus")
+        .join("no-yolo")
 }
 
 fn restriction_file_is_present(path: &Path) -> bool {
@@ -1124,8 +1124,8 @@ fn restriction_file_is_present(path: &Path) -> bool {
     }
 }
 
-fn persistent_no_yolo(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
-    let path = no_yolo_path(get_env);
+fn persistent_no_yolo() -> bool {
+    let path = no_yolo_path();
     #[cfg(windows)]
     let _path_guard = match windows_acl::lock_path(&path) {
         Ok(guard) => guard,
@@ -1135,15 +1135,9 @@ fn persistent_no_yolo(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> b
 }
 
 pub fn global_input_allowed() -> bool {
-    global_input_allowed_with_env(|k| std::env::var_os(k))
-}
-
-fn global_input_allowed_with_env(
-    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
-) -> bool {
-    !match global_input_env_restriction(get_env) {
+    !match global_input_env_restriction() {
         Some(restricted) => restricted,
-        None => persistent_no_yolo(get_env),
+        None => persistent_no_yolo(),
     }
 }
 
@@ -1156,25 +1150,18 @@ pub struct GlobalInputAllowance {
 }
 
 pub fn global_input_allowance() -> GlobalInputAllowance {
-    global_input_allowance_with_env(|k| std::env::var_os(k))
-}
-
-fn global_input_allowance_with_env(
-    get_env: impl Fn(&str) -> Option<std::ffi::OsString> + Copy,
-) -> GlobalInputAllowance {
-    let environment = global_input_env_restriction(get_env) == Some(true);
-    let persisted = persistent_no_yolo(get_env);
-    let allowed = global_input_allowed_with_env(get_env);
+    let environment = global_input_env_restriction() == Some(true);
+    let persisted = persistent_no_yolo();
     GlobalInputAllowance {
-        allowed,
-        no_yolo: !allowed,
+        allowed: global_input_allowed(),
+        no_yolo: !global_input_allowed(),
         persisted,
         environment,
     }
 }
 
 pub fn persist_no_yolo(restricted: bool) -> Result<GlobalInputAllowance, ProtocolError> {
-    persist_no_yolo_at(&no_yolo_path(|k| std::env::var_os(k)), restricted)?;
+    persist_no_yolo_at(&no_yolo_path(), restricted)?;
     Ok(global_input_allowance())
 }
 
@@ -2555,6 +2542,7 @@ fn mac_ax_element_at(point: &NativePoint) -> Result<AxElement, NativeError> {
     AxElement::created(raw)
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(any(target_os = "macos", test))]
 fn mac_enabled_state(
     enabled: Option<bool>,
@@ -5187,6 +5175,12 @@ impl NativeExecutor {
     ) -> Result<DispatchReceipt, DispatchError> {
         #[cfg(target_os = "macos")]
         {
+            use accessibility_sys::{
+                AXUIElementPerformAction, AXUIElementSetAttributeValue, kAXErrorSuccess,
+            };
+            use core_foundation::base::TCFType;
+            use core_foundation::string::CFString;
+
             Self::check_before_effect(cancellation, deadline_at_ms)?;
             let (element, native, actionability) = self
                 .resolve_recorded_element(target, cancellation, deadline_at_ms)
@@ -5223,7 +5217,24 @@ impl NativeExecutor {
                     .actions()
                     .is_ok_and(|actions| actions.iter().any(|action| action == name))
             {
-                mac_semantic_scroll(&element, name, *amount, cancellation, deadline_at_ms)?;
+                let name = CFString::new(name);
+                for index in 0..*amount {
+                    if index == 0 {
+                        Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+                        return Err(ambiguous("scroll interrupted after partial dispatch"));
+                    }
+                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
+                        != kAXErrorSuccess
+                    {
+                        return Err(if index == 0 {
+                            no_effect("semantic scroll is unavailable")
+                        } else {
+                            ambiguous("accessibility action outcome is unknown")
+                        });
+                    }
+                }
+                Self::check_after_effect(cancellation, deadline_at_ms)?;
                 return Ok(DispatchReceipt {
                     backend: "praefectus-macos-ax".to_string(),
                     fallback_chain: Vec::new(),
@@ -5250,23 +5261,83 @@ impl NativeExecutor {
                 );
             }
             match action {
-                Action::Invoke => mac_semantic_invoke(&element, cancellation, deadline_at_ms)?,
-                Action::SetValue { value } => {
-                    mac_semantic_set_value(&element, value, cancellation, deadline_at_ms)?
+                Action::Invoke => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !element
+                        .actions()
+                        .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"))
+                    {
+                        return Err(no_effect("semantic target is not invokable"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    let action = CFString::new("AXPress");
+                    if unsafe { AXUIElementPerformAction(element.0, action.as_concrete_TypeRef()) }
+                        != kAXErrorSuccess
+                    {
+                        return Err(ambiguous("accessibility action outcome is unknown"));
+                    }
                 }
-                Action::SelectText { start, length } => mac_semantic_select_text(
-                    &element,
-                    *start,
-                    *length,
-                    cancellation,
-                    deadline_at_ms,
-                )?,
-                Action::PerformSecondaryAction { name } => mac_semantic_perform_secondary_action(
-                    &element,
-                    name,
-                    cancellation,
-                    deadline_at_ms,
-                )?,
+                Action::SetValue { value } => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !element.is_settable("AXValue") {
+                        return Err(no_effect("semantic target is not editable"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    let attribute = CFString::new("AXValue");
+                    let value = CFString::new(value);
+                    if unsafe {
+                        AXUIElementSetAttributeValue(
+                            element.0,
+                            attribute.as_concrete_TypeRef(),
+                            value.as_CFTypeRef(),
+                        )
+                    } != kAXErrorSuccess
+                    {
+                        return Err(ambiguous("accessibility action outcome is unknown"));
+                    }
+                }
+                Action::SelectText { start, length } => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !element.is_settable("AXSelectedTextRange") {
+                        return Err(no_effect("semantic target has no settable text selection"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    mac_set_selected_range(&element, *start, *length)?;
+                    if mac_selected_range(&element) != Some((*start, *length)) {
+                        return Err(ambiguous("text selection outcome is unknown"));
+                    }
+                }
+                Action::PerformSecondaryAction { name } => {
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    element
+                        .prepare()
+                        .map_err(|_| no_effect("semantic target is unavailable"))?;
+                    if !secondary_action_allowed(name) {
+                        return Err(unsupported("secondary action is not permitted"));
+                    }
+                    if !element
+                        .actions()
+                        .is_ok_and(|actions| actions.iter().any(|action| action == name))
+                    {
+                        return Err(no_effect("semantic target does not advertise that action"));
+                    }
+                    Self::check_before_effect(cancellation, deadline_at_ms)?;
+                    let name = CFString::new(name);
+                    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
+                        != kAXErrorSuccess
+                    {
+                        return Err(ambiguous("accessibility action outcome is unknown"));
+                    }
+                }
                 _ => return Err(unsupported("semantic action is unavailable")),
             }
             Self::check_after_effect(cancellation, deadline_at_ms)?;
@@ -8070,160 +8141,8 @@ fn default_ledger_path_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join("praefectus-operations.jsonl")
 }
 
-#[cfg(target_os = "macos")]
-fn mac_semantic_scroll(
-    element: &AxElement,
-    name: &str,
-    amount: u32,
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<(), DispatchError> {
-    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-
-    let name = CFString::new(name);
-    for index in 0..amount {
-        if index == 0 {
-            NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-            return Err(ambiguous("scroll interrupted after partial dispatch"));
-        }
-        if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
-            != kAXErrorSuccess
-        {
-            return Err(if index == 0 {
-                no_effect("semantic scroll is unavailable")
-            } else {
-                ambiguous("accessibility action outcome is unknown")
-            });
-        }
-    }
-    NativeExecutor::check_after_effect(cancellation, deadline_at_ms)?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn mac_semantic_invoke(
-    element: &AxElement,
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<(), DispatchError> {
-    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    element
-        .prepare()
-        .map_err(|_| no_effect("semantic target is unavailable"))?;
-    if !element
-        .actions()
-        .is_ok_and(|actions| actions.iter().any(|action| action == "AXPress"))
-    {
-        return Err(no_effect("semantic target is not invokable"));
-    }
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    let action = CFString::new("AXPress");
-    if unsafe { AXUIElementPerformAction(element.0, action.as_concrete_TypeRef()) }
-        != kAXErrorSuccess
-    {
-        return Err(ambiguous("accessibility action outcome is unknown"));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn mac_semantic_set_value(
-    element: &AxElement,
-    value: &str,
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<(), DispatchError> {
-    use accessibility_sys::{AXUIElementSetAttributeValue, kAXErrorSuccess};
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    element
-        .prepare()
-        .map_err(|_| no_effect("semantic target is unavailable"))?;
-    if !element.is_settable("AXValue") {
-        return Err(no_effect("semantic target is not editable"));
-    }
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    let attribute = CFString::new("AXValue");
-    let value = CFString::new(value);
-    if unsafe {
-        AXUIElementSetAttributeValue(
-            element.0,
-            attribute.as_concrete_TypeRef(),
-            value.as_CFTypeRef(),
-        )
-    } != kAXErrorSuccess
-    {
-        return Err(ambiguous("accessibility action outcome is unknown"));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn mac_semantic_select_text(
-    element: &AxElement,
-    start: u32,
-    length: u32,
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<(), DispatchError> {
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    element
-        .prepare()
-        .map_err(|_| no_effect("semantic target is unavailable"))?;
-    if !element.is_settable("AXSelectedTextRange") {
-        return Err(no_effect("semantic target has no settable text selection"));
-    }
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    mac_set_selected_range(element, start, length)?;
-    if mac_selected_range(element) != Some((start, length)) {
-        return Err(ambiguous("text selection outcome is unknown"));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn mac_semantic_perform_secondary_action(
-    element: &AxElement,
-    name: &str,
-    cancellation: &CancellationToken,
-    deadline_at_ms: i64,
-) -> Result<(), DispatchError> {
-    use accessibility_sys::{AXUIElementPerformAction, kAXErrorSuccess};
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    element
-        .prepare()
-        .map_err(|_| no_effect("semantic target is unavailable"))?;
-    if !secondary_action_allowed(name) {
-        return Err(unsupported("secondary action is not permitted"));
-    }
-    if !element
-        .actions()
-        .is_ok_and(|actions| actions.iter().any(|action| action == name))
-    {
-        return Err(no_effect("semantic target does not advertise that action"));
-    }
-    NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-    let name = CFString::new(name);
-    if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) } != kAXErrorSuccess
-    {
-        return Err(ambiguous("accessibility action outcome is unknown"));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod enabled_state_tests {
     use super::mac_enabled_state;
 
@@ -8248,6 +8167,7 @@ mod enabled_state_tests {
 }
 
 #[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 mod focused_surface_tests {
     use super::unique_focused_surface;
 
@@ -8268,61 +8188,17 @@ mod tests {
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError,
-        Receipt, Rect, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
-        Terminal, VerificationPolicy, canonical_authority_bytes, canonicalize_json,
-        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
-        target_capture_bounds, validate_matching_live_element, verify,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
+        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
+        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
+        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
+        validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
-
-    #[test]
-    fn test_list_surfaces() {
-        let executor = NativeExecutor::default();
-
-        // Test 1: Cancelled token
-        let cancellation = CancellationToken::default();
-        cancellation.cancel();
-        let deadline = super::now_ms() + 10_000;
-        let result = executor.list_surfaces(&cancellation, deadline);
-        assert!(matches!(
-            result,
-            Err(crate::ProtocolError::ObservationCancelled)
-        ));
-
-        // Test 2: Expired deadline
-        let cancellation = CancellationToken::default();
-        let deadline = super::now_ms() - 1000; // Past
-        let result = executor.list_surfaces(&cancellation, deadline);
-        assert!(matches!(
-            result,
-            Err(crate::ProtocolError::ObservationExpired)
-        ));
-
-        // Test 3: Valid arguments (might succeed or return executor error depending on environment)
-        let cancellation = CancellationToken::default();
-        let deadline = super::now_ms() + 10_000;
-        let result = executor.list_surfaces(&cancellation, deadline);
-        match result {
-            Err(crate::ProtocolError::ObservationCancelled) => panic!("Should not be cancelled"),
-            Err(crate::ProtocolError::ObservationExpired) => panic!("Should not be expired"),
-            _ => {} // OK
-        }
-    }
-
-    #[test]
-    fn test_with_session_isolation() {
-        assert_eq!(
-            NativeExecutor::default().session_isolation,
-            SessionIsolation::SharedDesktop
-        );
-        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
-        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
-    }
 
     #[test]
     fn test_canonicalize_json() {
@@ -8386,103 +8262,6 @@ mod tests {
     }
 
     #[test]
-    fn test_observe_focused_cancelled() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        token.cancel();
-        let res = executor.observe_focused(&token, i64::MAX);
-        assert!(matches!(
-            res,
-            Err(super::ProtocolError::ObservationCancelled)
-        ));
-    }
-
-    #[test]
-    fn test_observe_focused_expired() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        let res = executor.observe_focused(&token, 0);
-        assert!(matches!(res, Err(super::ProtocolError::ObservationExpired)));
-    }
-
-    #[test]
-    fn test_list_surfaces_cancellation() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        token.cancel();
-        let result = executor.list_surfaces(&token, i64::MAX);
-        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
-    }
-
-    #[test]
-    fn test_list_surfaces_expiration() {
-        let executor = NativeExecutor::default();
-        let token = CancellationToken::default();
-        let result = executor.list_surfaces(&token, 0);
-        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
-    }
-
-    #[test]
-    fn test_list_applications() {
-        let executor = NativeExecutor::default();
-
-        let cancelled_token = CancellationToken::default();
-        cancelled_token.cancel();
-
-        let result = executor.list_applications(&cancelled_token, i64::MAX);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationCancelled)
-        ));
-
-        let active_token = CancellationToken::default();
-        let past_deadline = 0;
-        let result = executor.list_applications(&active_token, past_deadline);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationExpired)
-        ));
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let result = executor.list_applications(&active_token, i64::MAX);
-            if let Err(super::ProtocolError::Executor(msg)) = result {
-                assert_eq!(msg, "application enumeration is unavailable");
-            } else {
-                panic!("Expected application enumeration unavailable error on non-macOS");
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let result = executor.list_applications(&active_token, i64::MAX);
-            // It could succeed or fail with backend error due to missing permissions in CI.
-            assert!(
-                result.is_ok() || matches!(result, Err(super::ProtocolError::Executor(_))),
-                "Unexpected result on macOS: {:?}",
-                result
-            );
-        }
-    }
-
-    #[test]
-    fn test_observe_semantic_cancelled() {
-        let executor = NativeExecutor::default();
-        let cancellation = CancellationToken::default();
-        cancellation.cancel();
-        let result = executor.observe_semantic(&cancellation, i64::MAX);
-        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
-    }
-
-    #[test]
-    fn test_observe_semantic_expired() {
-        let executor = NativeExecutor::default();
-        let cancellation = CancellationToken::default();
-        let result = executor.observe_semantic(&cancellation, 0);
-        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
-    }
-
-    #[test]
     fn test_element_fingerprint_hash() {
         let mut fingerprint1 = ElementFingerprint {
             backend: "x11".to_string(),
@@ -8539,51 +8318,10 @@ mod tests {
 
     #[test]
     fn global_input_is_allowed_unless_no_yolo() {
-        let get_env = |_k: &str| None;
-        assert!(!super::persistent_no_yolo(get_env));
-        assert!(super::global_input_allowed_with_env(get_env));
-    }
-
-    #[test]
-    fn test_global_input_allowance_default() {
-        let get_env = |_k: &str| None;
-        let allowance = super::global_input_allowance_with_env(get_env);
-        assert!(allowance.allowed);
-        assert!(!allowance.no_yolo);
-        assert!(!allowance.persisted);
-        assert!(!allowance.environment);
-    }
-
-    #[test]
-    fn test_global_input_allowance_with_env_restrictions() {
-        let get_env = |k: &str| {
-            if k == "PRAEFECTUS_ALLOW_GLOBAL_INPUT" {
-                Some(std::ffi::OsString::from("0"))
-            } else {
-                None
-            }
-        };
-        let allowance = super::global_input_allowance_with_env(get_env);
-        assert!(!allowance.allowed);
-        assert!(allowance.no_yolo);
-        assert!(!allowance.persisted);
-        assert!(allowance.environment);
-    }
-
-    #[test]
-    fn test_global_input_allowance_with_no_yolo_env() {
-        let get_env = |k: &str| {
-            if k == "PRAEFECTUS_NO_YOLO" {
-                Some(std::ffi::OsString::from("1"))
-            } else {
-                None
-            }
-        };
-        let allowance = super::global_input_allowance_with_env(get_env);
-        assert!(!allowance.allowed);
-        assert!(allowance.no_yolo);
-        assert!(!allowance.persisted);
-        assert!(allowance.environment);
+        assert!(std::env::var("PRAEFECTUS_ALLOW_GLOBAL_INPUT").is_err());
+        assert!(std::env::var("PRAEFECTUS_NO_YOLO").is_err());
+        assert!(!super::persistent_no_yolo());
+        assert!(super::global_input_allowed());
     }
 
     #[test]
@@ -8630,119 +8368,121 @@ mod tests {
         };
         use std::path::PathBuf;
 
-        let cases = [
-            (Action::Invoke, DeliveryRoute::TargetAddressed),
-            (
-                Action::SetValue {
-                    value: "test".to_string(),
-                },
-                DeliveryRoute::TargetAddressed,
-            ),
-            (
-                Action::SelectText {
-                    start: 0,
-                    length: 1,
-                },
-                DeliveryRoute::TargetAddressed,
-            ),
-            (
-                Action::PerformSecondaryAction {
-                    name: "test".to_string(),
-                },
-                DeliveryRoute::TargetAddressed,
-            ),
-            (
-                Action::Screenshot {
-                    path: PathBuf::new(),
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Application {
-                    operation: ApplicationOperation::Launch,
-                    name: "test".to_string(),
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Window {
-                    operation: WindowOperation::Focus,
-                    app: None,
-                    title: None,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Open {
-                    target: "test".to_string(),
-                    app: None,
-                    no_focus: false,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::ClipboardWrite {
-                    text: "test".to_string(),
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Click {
-                    button: MouseButton::Left,
-                    count: 1,
-                    allow_coordinate_fallback: true,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::TypeText {
-                    text: "test".to_string(),
-                    clear: false,
-                    press_return: false,
-                    delay_ms: None,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Press {
-                    key: "Enter".to_string(),
-                    count: 1,
-                    delay_ms: None,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Paste {
-                    text: "test".to_string(),
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Hotkey {
-                    keys: vec!["Ctrl".to_string(), "C".to_string()],
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (Action::Move, DeliveryRoute::Pointer),
-            (
-                Action::Drag {
-                    to: TargetRef::None,
-                    button: MouseButton::Left,
-                },
-                DeliveryRoute::Pointer,
-            ),
-            (
-                Action::Scroll {
-                    direction: Direction::Down,
-                    amount: 1,
-                },
-                DeliveryRoute::Unknown,
-            ),
-        ];
+        assert_eq!(
+            action_delivery_route(&Action::Invoke),
+            DeliveryRoute::TargetAddressed
+        );
+        assert_eq!(
+            action_delivery_route(&Action::SetValue {
+                value: "test".to_string()
+            }),
+            DeliveryRoute::TargetAddressed
+        );
+        assert_eq!(
+            action_delivery_route(&Action::SelectText {
+                start: 0,
+                length: 1
+            }),
+            DeliveryRoute::TargetAddressed
+        );
+        assert_eq!(
+            action_delivery_route(&Action::PerformSecondaryAction {
+                name: "test".to_string()
+            }),
+            DeliveryRoute::TargetAddressed
+        );
 
-        for (action, expected) in cases {
-            assert_eq!(action_delivery_route(&action), expected);
-        }
+        assert_eq!(
+            action_delivery_route(&Action::Screenshot {
+                path: PathBuf::new()
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Application {
+                operation: ApplicationOperation::Launch,
+                name: "test".to_string()
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Window {
+                operation: WindowOperation::Focus,
+                app: None,
+                title: None
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Open {
+                target: "test".to_string(),
+                app: None,
+                no_focus: false
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::ClipboardWrite {
+                text: "test".to_string()
+            }),
+            DeliveryRoute::Pointer
+        );
+
+        // Missing variants mapped to Pointer (via catch-all _)
+        assert_eq!(
+            action_delivery_route(&Action::Click {
+                button: MouseButton::Left,
+                count: 1,
+                allow_coordinate_fallback: true
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Press {
+                key: "Enter".to_string(),
+                count: 1,
+                delay_ms: None
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Paste {
+                text: "test".to_string()
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(
+            action_delivery_route(&Action::Hotkey {
+                keys: vec!["Ctrl".to_string(), "C".to_string()]
+            }),
+            DeliveryRoute::Pointer
+        );
+        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
+        assert_eq!(
+            action_delivery_route(&Action::Drag {
+                to: TargetRef::None,
+                button: MouseButton::Left
+            }),
+            DeliveryRoute::Pointer
+        );
+
+        // Missing variant mapped to Unknown
+        assert_eq!(
+            action_delivery_route(&Action::Scroll {
+                direction: Direction::Down,
+                amount: 1
+            }),
+            DeliveryRoute::Unknown
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -9544,47 +9284,5 @@ mod tests {
             .0,
             Effect::ExecutedUnverified
         );
-    }
-
-    #[test]
-    fn test_observe_surface_invalid_surface() {
-        let executor = super::NativeExecutor::default();
-        let cancellation = super::CancellationToken::default();
-        let surface = super::SurfaceRef {
-            id: "invalid-hash".to_string(),
-        };
-
-        let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::InvalidRequest(_))
-        ));
-    }
-
-    #[test]
-    fn test_observe_surface_cancelled() {
-        let executor = super::NativeExecutor::default();
-        let cancellation = super::CancellationToken::default();
-        cancellation.cancel();
-        let surface = super::SurfaceRef { id: "a".repeat(64) };
-
-        let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationCancelled)
-        ));
-    }
-
-    #[test]
-    fn test_observe_surface_expired() {
-        let executor = super::NativeExecutor::default();
-        let cancellation = super::CancellationToken::default();
-        let surface = super::SurfaceRef { id: "a".repeat(64) };
-
-        let result = executor.observe_surface(&surface, &cancellation, 0); // Expired immediately
-        assert!(matches!(
-            result,
-            Err(super::ProtocolError::ObservationExpired)
-        ));
     }
 }

@@ -1,0 +1,10 @@
+--- src/cdp.rs
++++ src/cdp.rs
+@@ -3941,7 +3941,6 @@
+         let directory = tempfile::tempdir().expect("temporary directory");
+         crate::restrict_directory(directory.path()).expect("restrict temporary directory");
+         let report = Engine::new(
+-            "1".to_string(),
+             executor,
+             directory.path().join("ledger.jsonl"),
+             AllowAuthority,

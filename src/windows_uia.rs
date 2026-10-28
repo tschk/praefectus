@@ -490,7 +490,7 @@ pub(crate) fn snapshot(
         window,
         process_id,
         process_generation,
-        &display_geometry_hash,
+        display_geometry_hash,
         &displays,
     )?
     .ok_or_else(|| ProtocolError::TargetNotFound("foreground window is unavailable".to_string()))?;
@@ -781,7 +781,7 @@ fn validate_surface_record(
         window,
         expected.process_id,
         expected.process_generation.clone(),
-        &display_geometry_hash,
+        display_geometry_hash,
         &displays,
     )?
     .ok_or_else(|| ProtocolError::StaleTarget("selected surface changed".to_string()))?;
@@ -843,7 +843,7 @@ fn surface_records(
             window,
             process_id,
             process_generation,
-            &display_geometry_hash,
+            display_geometry_hash.clone(),
             &displays,
         )? {
             records.push(SurfaceRecord { descriptor, window });
@@ -857,7 +857,7 @@ fn surface_descriptor(
     window: HWND,
     process_id: u32,
     expected_process_generation: String,
-    display_geometry_hash: &str,
+    display_geometry_hash: String,
     displays: &Value,
 ) -> Result<Option<SurfaceDescriptor>, ProtocolError> {
     if window.is_invalid()
@@ -905,7 +905,7 @@ fn surface_descriptor(
         process_id,
         process_generation: expected_process_generation,
         window_id,
-        display_geometry_hash: display_geometry_hash.to_string(),
+        display_geometry_hash,
         bounds: Some(Rect {
             x: bounds.x,
             y: bounds.y,
@@ -1221,7 +1221,7 @@ fn resolve(
         window,
         mapping.process_id,
         mapping.process_generation.clone(),
-        &mapping.display_geometry_hash,
+        mapping.display_geometry_hash.clone(),
         &displays,
     )
     .map_err(|_| no_effect("semantic surface is unavailable"))?
