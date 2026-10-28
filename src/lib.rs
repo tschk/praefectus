@@ -5850,6 +5850,20 @@ impl NativeExecutor {
         Ok(())
     }
 
+    fn check_partial_dispatch(
+        index: u32,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+        interrupted_message: &'static str,
+    ) -> Result<(), DispatchError> {
+        if index == 0 {
+            Self::check_before_effect(cancellation, deadline_at_ms)?;
+        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+            return Err(ambiguous(interrupted_message));
+        }
+        Ok(())
+    }
+
     fn dispatch_type_text(
         &self,
         text: &str,
@@ -6304,11 +6318,12 @@ impl Executor for NativeExecutor {
                     ));
                 }
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("click interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "click interrupted after partial dispatch",
+                    )?;
                     self.runtime.click(native_target()?, button.as_str())?;
                 }
                 if matches!(verification, VerificationPolicy::None) {
@@ -6328,11 +6343,12 @@ impl Executor for NativeExecutor {
                 delay_ms,
             } => {
                 for index in 0..*count {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("press interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "press interrupted after partial dispatch",
+                    )?;
                     self.runtime
                         .press(key, 1, None)
                         .map_err(ambiguous_dispatch)?;
@@ -6356,11 +6372,12 @@ impl Executor for NativeExecutor {
             }
             Action::Scroll { direction, amount } => {
                 for index in 0..*amount {
-                    if index == 0 {
-                        Self::check_before_effect(cancellation, deadline_at_ms)?;
-                    } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-                        return Err(ambiguous("scroll interrupted after partial dispatch"));
-                    }
+                    Self::check_partial_dispatch(
+                        index,
+                        cancellation,
+                        deadline_at_ms,
+                        "scroll interrupted after partial dispatch",
+                    )?;
                     self.runtime
                         .scroll(
                             match direction {
@@ -8090,11 +8107,12 @@ fn mac_semantic_scroll(
 
     let name = CFString::new(name);
     for index in 0..amount {
-        if index == 0 {
-            NativeExecutor::check_before_effect(cancellation, deadline_at_ms)?;
-        } else if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
-            return Err(ambiguous("scroll interrupted after partial dispatch"));
-        }
+        NativeExecutor::check_partial_dispatch(
+            index,
+            cancellation,
+            deadline_at_ms,
+            "scroll interrupted after partial dispatch",
+        )?;
         if unsafe { AXUIElementPerformAction(element.0, name.as_concrete_TypeRef()) }
             != kAXErrorSuccess
         {
