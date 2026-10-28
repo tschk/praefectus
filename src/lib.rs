@@ -478,7 +478,13 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
         | Action::Open { .. }
         | Action::ClipboardWrite { .. } => DeliveryRoute::Pointer,
         Action::Scroll { .. } => DeliveryRoute::Unknown,
-        _ => DeliveryRoute::Pointer,
+        Action::Click { .. }
+        | Action::TypeText { .. }
+        | Action::Press { .. }
+        | Action::Paste { .. }
+        | Action::Hotkey { .. }
+        | Action::Move
+        | Action::Drag { .. } => DeliveryRoute::Pointer,
     }
 }
 
