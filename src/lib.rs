@@ -8507,11 +8507,18 @@ mod tests {
         {
             let result = executor.list_applications(&active_token, i64::MAX);
             // It could succeed or fail with backend error due to missing permissions in CI.
-            assert!(
-                result.is_ok() || matches!(result, Err(super::ProtocolError::Executor(_))),
-                "Unexpected result on macOS: {:?}",
-                result
-            );
+            match result {
+                Ok(serde_json::Value::Array(arr)) => {
+                    assert!(arr.iter().all(|v| v.is_string()));
+                }
+                Err(super::ProtocolError::Executor(msg)) => {
+                    assert!(
+                        msg == "desktop backend error" || msg == "application enumeration failed",
+                        "Unexpected executor error on macOS: {msg}"
+                    );
+                }
+                _ => panic!("Unexpected result on macOS: {:?}", result),
+            }
         }
     }
 
