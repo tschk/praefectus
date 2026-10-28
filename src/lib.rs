@@ -6379,15 +6379,7 @@ impl Executor for NativeExecutor {
                         "scroll interrupted after partial dispatch",
                     )?;
                     self.runtime
-                        .scroll(
-                            match direction {
-                                Direction::Up => Direction::Up,
-                                Direction::Down => Direction::Down,
-                                Direction::Left => Direction::Left,
-                                Direction::Right => Direction::Right,
-                            },
-                            1,
-                        )
+                        .scroll(*direction, 1)
                         .map_err(ambiguous_dispatch)?;
                 }
                 return Self::check_after_effect(cancellation, deadline_at_ms).map(|()| {
