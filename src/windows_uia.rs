@@ -489,8 +489,8 @@ pub(crate) fn snapshot(
     let descriptor = surface_descriptor(
         window,
         process_id,
-        &process_generation,
-        &display_geometry_hash,
+        process_generation,
+        display_geometry_hash,
         &displays,
     )?
     .ok_or_else(|| ProtocolError::TargetNotFound("foreground window is unavailable".to_string()))?;
@@ -780,8 +780,8 @@ fn validate_surface_record(
     let current = surface_descriptor(
         window,
         expected.process_id,
-        &expected.process_generation,
-        &display_geometry_hash,
+        expected.process_generation.clone(),
+        display_geometry_hash,
         &displays,
     )?
     .ok_or_else(|| ProtocolError::StaleTarget("selected surface changed".to_string()))?;
@@ -842,8 +842,8 @@ fn surface_records(
         if let Some(descriptor) = surface_descriptor(
             window,
             process_id,
-            &process_generation,
-            &display_geometry_hash,
+            process_generation,
+            display_geometry_hash.clone(),
             &displays,
         )? {
             records.push(SurfaceRecord { descriptor, window });
@@ -856,8 +856,8 @@ fn surface_records(
 fn surface_descriptor(
     window: HWND,
     process_id: u32,
-    expected_process_generation: &str,
-    display_geometry_hash: &str,
+    expected_process_generation: String,
+    display_geometry_hash: String,
     displays: &Value,
 ) -> Result<Option<SurfaceDescriptor>, ProtocolError> {
     if window.is_invalid()
@@ -878,11 +878,12 @@ fn surface_descriptor(
         _ => return Ok(None),
     };
     if window_process_id(window).ok() != Some(process_id)
-        || process_generation(process_id).ok().as_deref() != Some(expected_process_generation)
+        || process_generation(process_id).ok().as_deref()
+            != Some(expected_process_generation.as_str())
     {
         return Ok(None);
     }
-    let window_id = window_identity(window, expected_process_generation)
+    let window_id = window_identity(window, &expected_process_generation)
         .map_err(|_| ProtocolError::Executor("surface identity is unavailable".to_string()))?;
     let surface = SurfaceRef {
         id: semantic_fingerprint(&(
@@ -890,9 +891,9 @@ fn surface_descriptor(
             BACKEND,
             window.0 as usize,
             process_id,
-            expected_process_generation,
+            &expected_process_generation,
             &window_id,
-            display_geometry_hash,
+            &display_geometry_hash,
             &bounds,
         ))
         .map_err(|_| ProtocolError::Executor("surface identity is unavailable".to_string()))?,
@@ -902,9 +903,9 @@ fn surface_descriptor(
         surface,
         backend: BACKEND.to_string(),
         process_id,
-        process_generation: expected_process_generation.to_string(),
+        process_generation: expected_process_generation,
         window_id,
-        display_geometry_hash: display_geometry_hash.to_string(),
+        display_geometry_hash,
         bounds: Some(Rect {
             x: bounds.x,
             y: bounds.y,
@@ -1219,8 +1220,8 @@ fn resolve(
     let descriptor = surface_descriptor(
         window,
         mapping.process_id,
-        &mapping.process_generation,
-        &mapping.display_geometry_hash,
+        mapping.process_generation.clone(),
+        mapping.display_geometry_hash.clone(),
         &displays,
     )
     .map_err(|_| no_effect("semantic surface is unavailable"))?
