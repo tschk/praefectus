@@ -3268,6 +3268,7 @@ fn mac_resolve_observed_element(
     result
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unique_focused_surface(matches: impl Iterator<Item = bool>) -> Result<usize, NativeError> {
     let mut selected = None;
     for (index, matches) in matches.enumerate() {
@@ -8184,17 +8185,61 @@ mod tests {
         AckState, Action, ActionAck, ActionRequest, AuthorityGrant, CancellationToken,
         ContextPreservation, DeliveryRoute, Effect, EffectKnowledge, ElementFingerprint, Evidence,
         Executor, FailureCode, InteractionMode, MouseButton, NativeBounds, NativeElement,
-        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, Receipt, Rect,
-        ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef, Terminal,
-        VerificationPolicy, canonical_authority_bytes, canonicalize_json, default_ledger_path,
-        element_fingerprint_hash, hash_serializable, native_snapshot_id, target_capture_bounds,
-        validate_matching_live_element, verify,
+        NativeExecutor, NativePoint, Observation, OperationLedger, PROTOCOL_VERSION, ProtocolError,
+        Receipt, Rect, ResolvedTarget, SafetyClass, SessionIsolation, SignedAuthority, TargetRef,
+        Terminal, VerificationPolicy, canonical_authority_bytes, canonicalize_json,
+        default_ledger_path, element_fingerprint_hash, hash_serializable, native_snapshot_id,
+        target_capture_bounds, validate_matching_live_element, verify,
     };
     use serde_json::json;
     use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use super::macos_semantic_actions;
+
+    #[test]
+    fn test_list_surfaces() {
+        let executor = NativeExecutor::default();
+
+        // Test 1: Cancelled token
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationCancelled)
+        ));
+
+        // Test 2: Expired deadline
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() - 1000; // Past
+        let result = executor.list_surfaces(&cancellation, deadline);
+        assert!(matches!(
+            result,
+            Err(crate::ProtocolError::ObservationExpired)
+        ));
+
+        // Test 3: Valid arguments (might succeed or return executor error depending on environment)
+        let cancellation = CancellationToken::default();
+        let deadline = super::now_ms() + 10_000;
+        let result = executor.list_surfaces(&cancellation, deadline);
+        match result {
+            Err(crate::ProtocolError::ObservationCancelled) => panic!("Should not be cancelled"),
+            Err(crate::ProtocolError::ObservationExpired) => panic!("Should not be expired"),
+            _ => {} // OK
+        }
+    }
+
+    #[test]
+    fn test_with_session_isolation() {
+        assert_eq!(
+            NativeExecutor::default().session_isolation,
+            SessionIsolation::SharedDesktop
+        );
+        let executor = NativeExecutor::with_session_isolation(SessionIsolation::HostIsolated);
+        assert_eq!(executor.session_isolation, SessionIsolation::HostIsolated);
+    }
 
     #[test]
     fn test_canonicalize_json() {
@@ -8255,6 +8300,103 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_observe_focused_cancelled() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let res = executor.observe_focused(&token, i64::MAX);
+        assert!(matches!(
+            res,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_observe_focused_expired() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let res = executor.observe_focused(&token, 0);
+        assert!(matches!(res, Err(super::ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
+    fn test_list_surfaces_cancellation() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        token.cancel();
+        let result = executor.list_surfaces(&token, i64::MAX);
+        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_list_surfaces_expiration() {
+        let executor = NativeExecutor::default();
+        let token = CancellationToken::default();
+        let result = executor.list_surfaces(&token, 0);
+        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
+    }
+
+    #[test]
+    fn test_list_applications() {
+        let executor = NativeExecutor::default();
+
+        let cancelled_token = CancellationToken::default();
+        cancelled_token.cancel();
+
+        let result = executor.list_applications(&cancelled_token, i64::MAX);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+
+        let active_token = CancellationToken::default();
+        let past_deadline = 0;
+        let result = executor.list_applications(&active_token, past_deadline);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let result = executor.list_applications(&active_token, i64::MAX);
+            if let Err(super::ProtocolError::Executor(msg)) = result {
+                assert_eq!(msg, "application enumeration is unavailable");
+            } else {
+                panic!("Expected application enumeration unavailable error on non-macOS");
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let result = executor.list_applications(&active_token, i64::MAX);
+            // It could succeed or fail with backend error due to missing permissions in CI.
+            assert!(
+                result.is_ok() || matches!(result, Err(super::ProtocolError::Executor(_))),
+                "Unexpected result on macOS: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_observe_semantic_cancelled() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let result = executor.observe_semantic(&cancellation, i64::MAX);
+        assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+    }
+
+    #[test]
+    fn test_observe_semantic_expired() {
+        let executor = NativeExecutor::default();
+        let cancellation = CancellationToken::default();
+        let result = executor.observe_semantic(&cancellation, 0);
+        assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
     }
 
     #[test]
@@ -8364,121 +8506,119 @@ mod tests {
         };
         use std::path::PathBuf;
 
-        assert_eq!(
-            action_delivery_route(&Action::Invoke),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::SetValue {
-                value: "test".to_string()
-            }),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::SelectText {
-                start: 0,
-                length: 1
-            }),
-            DeliveryRoute::TargetAddressed
-        );
-        assert_eq!(
-            action_delivery_route(&Action::PerformSecondaryAction {
-                name: "test".to_string()
-            }),
-            DeliveryRoute::TargetAddressed
-        );
+        let cases = [
+            (Action::Invoke, DeliveryRoute::TargetAddressed),
+            (
+                Action::SetValue {
+                    value: "test".to_string(),
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::SelectText {
+                    start: 0,
+                    length: 1,
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::PerformSecondaryAction {
+                    name: "test".to_string(),
+                },
+                DeliveryRoute::TargetAddressed,
+            ),
+            (
+                Action::Screenshot {
+                    path: PathBuf::new(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Application {
+                    operation: ApplicationOperation::Launch,
+                    name: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Window {
+                    operation: WindowOperation::Focus,
+                    app: None,
+                    title: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Open {
+                    target: "test".to_string(),
+                    app: None,
+                    no_focus: false,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::ClipboardWrite {
+                    text: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Click {
+                    button: MouseButton::Left,
+                    count: 1,
+                    allow_coordinate_fallback: true,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::TypeText {
+                    text: "test".to_string(),
+                    clear: false,
+                    press_return: false,
+                    delay_ms: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Press {
+                    key: "Enter".to_string(),
+                    count: 1,
+                    delay_ms: None,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Paste {
+                    text: "test".to_string(),
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Hotkey {
+                    keys: vec!["Ctrl".to_string(), "C".to_string()],
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (Action::Move, DeliveryRoute::Pointer),
+            (
+                Action::Drag {
+                    to: TargetRef::None,
+                    button: MouseButton::Left,
+                },
+                DeliveryRoute::Pointer,
+            ),
+            (
+                Action::Scroll {
+                    direction: Direction::Down,
+                    amount: 1,
+                },
+                DeliveryRoute::Unknown,
+            ),
+        ];
 
-        assert_eq!(
-            action_delivery_route(&Action::Screenshot {
-                path: PathBuf::new()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Application {
-                operation: ApplicationOperation::Launch,
-                name: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Window {
-                operation: WindowOperation::Focus,
-                app: None,
-                title: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Open {
-                target: "test".to_string(),
-                app: None,
-                no_focus: false
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::ClipboardWrite {
-                text: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-
-        // Missing variants mapped to Pointer (via catch-all _)
-        assert_eq!(
-            action_delivery_route(&Action::Click {
-                button: MouseButton::Left,
-                count: 1,
-                allow_coordinate_fallback: true
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::TypeText {
-                text: "test".to_string(),
-                clear: false,
-                press_return: false,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Press {
-                key: "Enter".to_string(),
-                count: 1,
-                delay_ms: None
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Paste {
-                text: "test".to_string()
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(
-            action_delivery_route(&Action::Hotkey {
-                keys: vec!["Ctrl".to_string(), "C".to_string()]
-            }),
-            DeliveryRoute::Pointer
-        );
-        assert_eq!(action_delivery_route(&Action::Move), DeliveryRoute::Pointer);
-        assert_eq!(
-            action_delivery_route(&Action::Drag {
-                to: TargetRef::None,
-                button: MouseButton::Left
-            }),
-            DeliveryRoute::Pointer
-        );
-
-        // Missing variant mapped to Unknown
-        assert_eq!(
-            action_delivery_route(&Action::Scroll {
-                direction: Direction::Down,
-                amount: 1
-            }),
-            DeliveryRoute::Unknown
-        );
+        for (action, expected) in cases {
+            assert_eq!(action_delivery_route(&action), expected);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -9280,5 +9420,47 @@ mod tests {
             .0,
             Effect::ExecutedUnverified
         );
+    }
+
+    #[test]
+    fn test_observe_surface_invalid_surface() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+        let surface = super::SurfaceRef {
+            id: "invalid-hash".to_string(),
+        };
+
+        let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn test_observe_surface_cancelled() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+        cancellation.cancel();
+        let surface = super::SurfaceRef { id: "a".repeat(64) };
+
+        let result = executor.observe_surface(&surface, &cancellation, i64::MAX);
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_observe_surface_expired() {
+        let executor = super::NativeExecutor::default();
+        let cancellation = super::CancellationToken::default();
+        let surface = super::SurfaceRef { id: "a".repeat(64) };
+
+        let result = executor.observe_surface(&surface, &cancellation, 0); // Expired immediately
+        assert!(matches!(
+            result,
+            Err(super::ProtocolError::ObservationExpired)
+        ));
     }
 }
