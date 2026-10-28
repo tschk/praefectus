@@ -23,7 +23,7 @@ Policy-neutral Rust library and JSON CLI for host-authorized computer-use execut
 
 ## Build and test
 
-MSRV is Rust 1.88 (edition 2024).
+MSRV is Rust 1.89 (edition 2024).
 
 ```sh
 cargo fmt --all -- --check
