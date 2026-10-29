@@ -18,6 +18,19 @@ const PORTAL_RD_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
 static PORTAL_SESSION: Mutex<Option<(String, zbus::Connection)>> = Mutex::new(None);
 
 fn secure_command(name: &str) -> Result<Command, NativeError> {
+    if ![
+        "xclip",
+        "wl-copy",
+        "scrot",
+        "grim",
+        "wlr-randr",
+        "swaymsg",
+        "true",
+    ]
+    .contains(&name)
+    {
+        return Err(NativeError);
+    }
     if name.is_empty() || name.contains('/') || name.contains('\0') {
         return Err(NativeError);
     }

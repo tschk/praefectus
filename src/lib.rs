@@ -1088,6 +1088,9 @@ impl Drop for MacDeliveryPidGuard {
 
 #[cfg(target_os = "macos")]
 fn secure_command(name: &str) -> Result<Command, NativeError> {
+    if !["pbcopy", "screencapture", "open", "osascript", "pbpaste"].contains(&name) {
+        return Err(NativeError);
+    }
     if name.is_empty() || name.contains('/') || name.contains('\0') {
         return Err(NativeError);
     }
