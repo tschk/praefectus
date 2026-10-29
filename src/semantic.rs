@@ -547,6 +547,53 @@ mod tests {
     }
 
     #[test]
+    fn route_action_propagates_resolve_errors() {
+        let observation = observation();
+        let mut target = observation.target(&observation.elements[0].tag).unwrap();
+
+        // 1. Target not found (modify element_id to something invalid for this observation but a valid hash)
+        target.element_id = "0".repeat(64);
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::TargetNotFound)
+        );
+
+        // Reset target
+        target = observation.target(&observation.elements[0].tag).unwrap();
+
+        // 2. Stale Target (modify generation)
+        target.generation += 1;
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::StaleTarget)
+        );
+
+        // Reset target
+        target = observation.target(&observation.elements[0].tag).unwrap();
+
+        // 3. Stale Observation (now_ms > expires_at_ms)
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 40_000, // expires_at_ms is 31_000
+            }),
+            Err(SemanticError::StaleObservation)
+        );
+    }
+
+    #[test]
     fn semantic_tag_formats_and_bounds_index() {
         assert_eq!(semantic_tag(0), Ok("e0".to_string()));
         assert_eq!(semantic_tag(42), Ok("e42".to_string()));
