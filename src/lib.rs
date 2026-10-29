@@ -822,7 +822,10 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
-fn win_make_keybd(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+fn win_make_keybd(
+    vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
     windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
         r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
         Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
