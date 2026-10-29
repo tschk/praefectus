@@ -489,24 +489,18 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
 }
 
 fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute {
-    match (action, target) {
-        (
-            Action::Invoke
-            | Action::SetValue { .. }
-            | Action::SelectText { .. }
-            | Action::PerformSecondaryAction { .. },
-            TargetRef::Element { .. },
-        ) => DeliveryRoute::TargetAddressed,
-        (Action::Scroll { .. }, TargetRef::Element { .. }) => {
-            if cfg!(target_os = "macos") {
-                native_pointer_delivery_route()
-            } else {
-                DeliveryRoute::TargetAddressed
-            }
-        }
-        (_, TargetRef::Element { .. }) => native_pointer_delivery_route(),
-        _ => DeliveryRoute::Pointer,
+    let TargetRef::Element { .. } = target else {
+        return DeliveryRoute::Pointer;
+    };
+
+    let route = action_delivery_route(action);
+    if matches!(route, DeliveryRoute::TargetAddressed)
+        || (matches!(action, Action::Scroll { .. }) && !cfg!(target_os = "macos"))
+    {
+        return DeliveryRoute::TargetAddressed;
     }
+
+    native_pointer_delivery_route()
 }
 
 fn claim_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute {
