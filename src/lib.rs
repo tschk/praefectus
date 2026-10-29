@@ -6588,49 +6588,46 @@ impl OperationLedger {
         )
     }
 
+    fn find_operation_records(
+        &self,
+        operation_id: &str,
+    ) -> Result<(Option<LedgerRecord>, Option<Box<ActionAck>>), ProtocolError> {
+        let mut claim_record = None;
+        let mut terminal = None;
+        for record in self.records()? {
+            match record {
+                LedgerRecord::Claim {
+                    operation_id: ref claimed_id,
+                    ..
+                } if claimed_id == operation_id => {
+                    claim_record = Some(record);
+                }
+                LedgerRecord::Terminal { acknowledgement }
+                    if acknowledgement.operation_id == operation_id =>
+                {
+                    terminal = Some(acknowledgement);
+                }
+                _ => {}
+            }
+        }
+        Ok((claim_record, terminal))
+    }
+
     fn claim(
         &self,
         request: &ActionRequest,
         action_hash: &str,
         session_isolation: SessionIsolation,
     ) -> Result<ClaimResult, ProtocolError> {
-        let records = self.records()?;
-        let mut claim = None;
-        let mut terminal = None;
-        for record in records {
-            match record {
-                LedgerRecord::Claim {
-                    operation_id,
-                    action_hash,
-                    action_name,
-                    delivery_route,
-                    session_isolation,
-                    interaction_mode,
-                    ..
-                } if operation_id == request.operation_id => {
-                    claim = Some((
-                        action_hash,
-                        action_name,
-                        delivery_route,
-                        session_isolation,
-                        interaction_mode,
-                    ));
-                }
-                LedgerRecord::Terminal { acknowledgement }
-                    if acknowledgement.operation_id == request.operation_id =>
-                {
-                    terminal = Some(acknowledgement)
-                }
-                _ => {}
-            }
-        }
-        if let Some((
-            existing_hash,
+        let (claim_record, terminal) = self.find_operation_records(&request.operation_id)?;
+        if let Some(LedgerRecord::Claim {
+            action_hash: existing_hash,
             action_name,
             delivery_route,
             session_isolation,
             interaction_mode,
-        )) = claim
+            ..
+        }) = claim_record
         {
             if existing_hash != action_hash {
                 return Err(ProtocolError::Conflict);
@@ -6678,47 +6675,19 @@ impl OperationLedger {
     fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
         let _guard = self.execution_lock()?;
         self.repair_tail()?;
-        let mut claim = None;
-        let mut terminal = None;
-        for record in self.records()? {
-            match record {
-                LedgerRecord::Claim {
-                    operation_id: claimed_operation_id,
-                    action_hash,
-                    claimed_at_ms,
-                    action_name,
-                    delivery_route,
-                    session_isolation,
-                    interaction_mode,
-                } if claimed_operation_id == operation_id => {
-                    claim = Some((
-                        action_hash,
-                        claimed_at_ms,
-                        action_name,
-                        delivery_route,
-                        session_isolation,
-                        interaction_mode,
-                    ));
-                }
-                LedgerRecord::Terminal { acknowledgement }
-                    if acknowledgement.operation_id == operation_id =>
-                {
-                    terminal = Some(*acknowledgement);
-                }
-                _ => {}
-            }
+        let (claim_record, terminal) = self.find_operation_records(operation_id)?;
+        if let Some(terminal) = terminal {
+            return Ok(Some(*terminal));
         }
-        if terminal.is_some() {
-            return Ok(terminal);
-        }
-        let Some((
+        let Some(LedgerRecord::Claim {
             action_hash,
             claimed_at_ms,
             action_name,
             delivery_route,
             session_isolation,
             interaction_mode,
-        )) = claim
+            ..
+        }) = claim_record
         else {
             return Ok(None);
         };
