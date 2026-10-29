@@ -1593,36 +1593,29 @@ impl NativeRuntime {
 
             let vk = win_key_code(_key).ok_or(NativeError)?;
 
+            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                }
+            };
+
             for i in 0.._count {
                 if i > 0 {
                     if let Some(delay) = _delay_ms {
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
                 }
-                let down = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYBD_EVENT_FLAGS::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let up = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
+                let down = make_keybd(vk, KEYBD_EVENT_FLAGS::default());
+                let up = make_keybd(vk, KEYEVENTF_KEYUP);
                 let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
             }
             return Ok(());
