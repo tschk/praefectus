@@ -910,137 +910,153 @@ fn windows_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> 
 }
 
 #[cfg(windows)]
+static WIN_KEY_MAP: phf::Map<
+    &'static str,
+    windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+> = phf::phf_map! {
+    "return" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN,
+    "enter" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN,
+    "tab" => windows::Win32::UI::Input::KeyboardAndMouse::VK_TAB,
+    "escape" => windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE,
+    "esc" => windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE,
+    "backspace" => windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK,
+    "delete" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE,
+    "del" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE,
+    "space" => windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE,
+    "up" => windows::Win32::UI::Input::KeyboardAndMouse::VK_UP,
+    "down" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN,
+    "left" => windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT,
+    "right" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT,
+    "home" => windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME,
+    "end" => windows::Win32::UI::Input::KeyboardAndMouse::VK_END,
+    "pageup" => windows::Win32::UI::Input::KeyboardAndMouse::VK_PRIOR,
+    "pagedown" => windows::Win32::UI::Input::KeyboardAndMouse::VK_NEXT,
+    "f1" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F1,
+    "f2" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F2,
+    "f3" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F3,
+    "f4" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F4,
+    "f5" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F5,
+    "f6" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F6,
+    "f7" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F7,
+    "f8" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F8,
+    "f9" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F9,
+    "f10" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F10,
+    "f11" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F11,
+    "f12" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F12,
+};
+
+#[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    match key {
-        "return" | "enter" => Some(VK_RETURN),
-        "tab" => Some(VK_TAB),
-        "escape" | "esc" => Some(VK_ESCAPE),
-        "backspace" => Some(VK_BACK),
-        "delete" | "del" => Some(VK_DELETE),
-        "space" => Some(VK_SPACE),
-        "up" => Some(VK_UP),
-        "down" => Some(VK_DOWN),
-        "left" => Some(VK_LEFT),
-        "right" => Some(VK_RIGHT),
-        "home" => Some(VK_HOME),
-        "end" => Some(VK_END),
-        "pageup" => Some(VK_PRIOR),
-        "pagedown" => Some(VK_NEXT),
-        "f1" => Some(VK_F1),
-        "f2" => Some(VK_F2),
-        "f3" => Some(VK_F3),
-        "f4" => Some(VK_F4),
-        "f5" => Some(VK_F5),
-        "f6" => Some(VK_F6),
-        "f7" => Some(VK_F7),
-        "f8" => Some(VK_F8),
-        "f9" => Some(VK_F9),
-        "f10" => Some(VK_F10),
-        "f11" => Some(VK_F11),
-        "f12" => Some(VK_F12),
-        k if k.len() == 1 => {
-            let ch = k.chars().next().unwrap().to_ascii_uppercase();
-            if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
-                Some(VIRTUAL_KEY(ch as u16))
-            } else {
-                None
-            }
-        }
-        _ => None,
+    if let Some(&vk) = WIN_KEY_MAP.get(key) {
+        return Some(vk);
     }
+    if key.len() == 1 {
+        let ch = key.chars().next().unwrap().to_ascii_uppercase();
+        if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+            return Some(VIRTUAL_KEY(ch as u16));
+        }
+    }
+    None
 }
+
+#[cfg(target_os = "macos")]
+static MAC_KEY_MAP: phf::Map<char, u16> = phf::phf_map! {
+    'a' => 0x00,
+    's' => 0x01,
+    'd' => 0x02,
+    'f' => 0x03,
+    'h' => 0x04,
+    'g' => 0x05,
+    'z' => 0x06,
+    'x' => 0x07,
+    'c' => 0x08,
+    'v' => 0x09,
+    'b' => 0x0B,
+    'q' => 0x0C,
+    'w' => 0x0D,
+    'e' => 0x0E,
+    'r' => 0x0F,
+    'y' => 0x10,
+    't' => 0x11,
+    '1' => 0x12,
+    '2' => 0x13,
+    '3' => 0x14,
+    '4' => 0x15,
+    '6' => 0x16,
+    '5' => 0x17,
+    '=' => 0x18,
+    '9' => 0x19,
+    '7' => 0x1A,
+    '-' => 0x1B,
+    '8' => 0x1C,
+    '0' => 0x1D,
+    ']' => 0x1E,
+    'o' => 0x1F,
+    'u' => 0x20,
+    '[' => 0x21,
+    'i' => 0x22,
+    'p' => 0x23,
+    'l' => 0x25,
+    'j' => 0x26,
+    '\'' => 0x27,
+    'k' => 0x28,
+    ';' => 0x29,
+    '\\' => 0x2A,
+    ',' => 0x2B,
+    '/' => 0x2C,
+    'n' => 0x2D,
+    'm' => 0x2E,
+    '.' => 0x2F,
+    '\t' => 0x30,
+    ' ' => 0x31,
+    '`' => 0x32,
+    '\x7F' => 0x33,
+};
 
 #[cfg(target_os = "macos")]
 fn mac_key_code(ch: char) -> Option<u16> {
-    match ch {
-        'a' => Some(0x00),
-        's' => Some(0x01),
-        'd' => Some(0x02),
-        'f' => Some(0x03),
-        'h' => Some(0x04),
-        'g' => Some(0x05),
-        'z' => Some(0x06),
-        'x' => Some(0x07),
-        'c' => Some(0x08),
-        'v' => Some(0x09),
-        'b' => Some(0x0B),
-        'q' => Some(0x0C),
-        'w' => Some(0x0D),
-        'e' => Some(0x0E),
-        'r' => Some(0x0F),
-        'y' => Some(0x10),
-        't' => Some(0x11),
-        '1' => Some(0x12),
-        '2' => Some(0x13),
-        '3' => Some(0x14),
-        '4' => Some(0x15),
-        '6' => Some(0x16),
-        '5' => Some(0x17),
-        '=' => Some(0x18),
-        '9' => Some(0x19),
-        '7' => Some(0x1A),
-        '-' => Some(0x1B),
-        '8' => Some(0x1C),
-        '0' => Some(0x1D),
-        ']' => Some(0x1E),
-        'o' => Some(0x1F),
-        'u' => Some(0x20),
-        '[' => Some(0x21),
-        'i' => Some(0x22),
-        'p' => Some(0x23),
-        'l' => Some(0x25),
-        'j' => Some(0x26),
-        '\'' => Some(0x27),
-        'k' => Some(0x28),
-        ';' => Some(0x29),
-        '\\' => Some(0x2A),
-        ',' => Some(0x2B),
-        '/' => Some(0x2C),
-        'n' => Some(0x2D),
-        'm' => Some(0x2E),
-        '.' => Some(0x2F),
-        '\t' => Some(0x30),
-        ' ' => Some(0x31),
-        '`' => Some(0x32),
-        '\x7F' => Some(0x33),
-        _ => None,
-    }
+    MAC_KEY_MAP.get(&ch).copied()
 }
 
 #[cfg(target_os = "macos")]
+static MAC_KEY_NAME_MAP: phf::Map<&'static str, u16> = phf::phf_map! {
+    "return" => 0x24,
+    "enter" => 0x24,
+    "tab" => 0x30,
+    "escape" => 0x35,
+    "esc" => 0x35,
+    "delete" => 0x75,
+    "del" => 0x75,
+    "backspace" => 0x33,
+    "space" => 0x31,
+    "up" => 0x7E,
+    "down" => 0x7D,
+    "left" => 0x7B,
+    "right" => 0x7C,
+    "home" => 0x73,
+    "end" => 0x77,
+    "pageup" => 0x74,
+    "pagedown" => 0x79,
+    "f1" => 0x7A,
+    "f2" => 0x78,
+    "f3" => 0x63,
+    "f4" => 0x76,
+    "f5" => 0x60,
+    "f6" => 0x61,
+    "f7" => 0x62,
+    "f8" => 0x64,
+    "f9" => 0x65,
+    "f10" => 0x6D,
+    "f11" => 0x67,
+    "f12" => 0x6F,
+    "insert" => 0x72,
+    "printscreen" => 0x69,
+};
+
+#[cfg(target_os = "macos")]
 fn mac_key_name_code(name: &str) -> Option<u16> {
-    match name {
-        "return" | "enter" => Some(0x24),
-        "tab" => Some(0x30),
-        "escape" | "esc" => Some(0x35),
-        "delete" | "del" => Some(0x75),
-        "backspace" => Some(0x33),
-        "space" => Some(0x31),
-        "up" => Some(0x7E),
-        "down" => Some(0x7D),
-        "left" => Some(0x7B),
-        "right" => Some(0x7C),
-        "home" => Some(0x73),
-        "end" => Some(0x77),
-        "pageup" => Some(0x74),
-        "pagedown" => Some(0x79),
-        "f1" => Some(0x7A),
-        "f2" => Some(0x78),
-        "f3" => Some(0x63),
-        "f4" => Some(0x76),
-        "f5" => Some(0x60),
-        "f6" => Some(0x61),
-        "f7" => Some(0x62),
-        "f8" => Some(0x64),
-        "f9" => Some(0x65),
-        "f10" => Some(0x6D),
-        "f11" => Some(0x67),
-        "f12" => Some(0x6F),
-        "insert" => Some(0x72),
-        "printscreen" => Some(0x69),
-        _ => None,
-    }
+    MAC_KEY_NAME_MAP.get(name).copied()
 }
 
 #[cfg(target_os = "macos")]
