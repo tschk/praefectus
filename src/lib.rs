@@ -7497,18 +7497,7 @@ fn fallback_temp_dir() -> PathBuf {
                 getrandom::fill(&mut random)
                     .expect("secure entropy for Praefectus fallback directory");
                 let path = std::env::temp_dir().join(format!("praefectus-{}", hex::encode(random)));
-                let created = {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::DirBuilderExt;
-                        std::fs::DirBuilder::new().mode(0o700).create(&path)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        std::fs::create_dir(&path)
-                    }
-                };
-                match created {
+                match create_fallback_dir(&path) {
                     Ok(()) => break path,
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                     Err(error) => {
@@ -7518,6 +7507,17 @@ fn fallback_temp_dir() -> PathBuf {
             }
         })
         .clone()
+}
+
+#[cfg(unix)]
+fn create_fallback_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_fallback_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
 }
 
 #[cfg(not(windows))]
