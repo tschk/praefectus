@@ -508,6 +508,36 @@ mod tests {
     }
 
     #[test]
+    fn route_action_propagates_resolve_errors() {
+        let observation = observation();
+        let mut target = observation.target(&observation.elements[0].tag).unwrap();
+
+        // Make the target stale by modifying fingerprint hash
+        target.fingerprint_hash = "f".repeat(64);
+
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::StaleTarget)
+        );
+
+        // Make observation stale
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: observation.expires_at_ms + 1,
+            }),
+            Err(SemanticError::StaleObservation)
+        );
+    }
+
+    #[test]
     fn route_action_returns_element_when_actionable() {
         let mut observation = observation();
         let target = observation.target(&observation.elements[0].tag).unwrap();
