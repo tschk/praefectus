@@ -1245,6 +1245,18 @@ fn input_delivery(pid: i32, global_allowed: bool) -> InputDelivery {
 }
 
 #[cfg(target_os = "macos")]
+fn mac_post_to_pid(event: &core_graphics::event::CGEvent, pid: i32) {
+    #[cfg(feature = "skylight")]
+    {
+        use foreign_types::ForeignType;
+        if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
+            return;
+        }
+    }
+    event.post_to_pid(pid);
+}
+
+#[cfg(target_os = "macos")]
 fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeError> {
     use core_graphics::event::CGEventTapLocation;
 
@@ -1253,14 +1265,7 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
         global_input_allowed(),
     ) {
         InputDelivery::PerProcess(pid) => {
-            #[cfg(feature = "skylight")]
-            {
-                use foreign_types::ForeignType;
-                if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-                    return Ok(());
-                }
-            }
-            event.post_to_pid(pid);
+            mac_post_to_pid(event, pid);
             Ok(())
         }
         InputDelivery::GlobalTap => {
