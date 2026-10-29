@@ -2777,6 +2777,56 @@ mod tests {
     }
 
     #[test]
+    fn localhost_accepts_valid_config() {
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config = CdpConfig::localhost(9222, "page-1", process_id, process_generation)
+            .expect("valid configuration");
+
+        assert_eq!(config.target_id(), "page-1");
+        assert_eq!(config.session_isolation(), SessionIsolation::SharedDesktop);
+    }
+
+    #[test]
+    fn localhost_rejects_invalid_config() {
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+
+        assert!(matches!(
+            CdpConfig::localhost(0, "page-1", process_id, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::localhost(9222, "", process_id, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::localhost(
+                9222,
+                "page/1",
+                process_id,
+                process_generation.clone()
+            ),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::localhost(9222, "page-1", 0, process_generation.clone()),
+            Err(CdpError::InvalidConfig)
+        ));
+        assert!(matches!(
+            CdpConfig::localhost(
+                9222,
+                "page-1",
+                process_id,
+                format!("{process_generation}-stale")
+            ),
+            Err(CdpError::InvalidConfig)
+        ));
+    }
+
+    #[test]
     fn host_isolated_localhost_rejects_invalid_config() {
         let process_id = std::process::id();
         let process_generation =
