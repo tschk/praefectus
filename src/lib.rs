@@ -6970,17 +6970,7 @@ impl Drop for LedgerLock {
     }
 }
 
-fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
-    if request.protocol_version != PROTOCOL_VERSION
-        || request.action_version != PROTOCOL_VERSION
-        || request.target_version != PROTOCOL_VERSION
-        || request.verification_version != PROTOCOL_VERSION
-        || request.interaction_mode == InteractionMode::Unknown
-    {
-        return Err(ProtocolError::InvalidRequest(
-            "unsupported protocol version".to_string(),
-        ));
-    }
+fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -6995,6 +6985,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
+    Ok(())
+}
+
+fn validate_request_action_target(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -7054,6 +7048,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn validate_request_authority_and_provenance(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.deadline_at_ms <= 0
         || request.authority.signature.len() != 128
         || !request
@@ -7099,6 +7097,23 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid snapshot ID".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+    if request.protocol_version != PROTOCOL_VERSION
+        || request.action_version != PROTOCOL_VERSION
+        || request.target_version != PROTOCOL_VERSION
+        || request.verification_version != PROTOCOL_VERSION
+        || request.interaction_mode == InteractionMode::Unknown
+    {
+        return Err(ProtocolError::InvalidRequest(
+            "unsupported protocol version".to_string(),
+        ));
+    }
+    validate_request_identifiers(request)?;
+    validate_request_action_target(request)?;
+    validate_request_authority_and_provenance(request)?;
     Ok(())
 }
 
