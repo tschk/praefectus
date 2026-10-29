@@ -489,22 +489,21 @@ pub fn action_delivery_route(action: &Action) -> DeliveryRoute {
 }
 
 fn request_delivery_route(action: &Action, target: &TargetRef) -> DeliveryRoute {
-    match (action, target) {
-        (
+    match target {
+        TargetRef::Element { .. } => match action {
             Action::Invoke
             | Action::SetValue { .. }
             | Action::SelectText { .. }
-            | Action::PerformSecondaryAction { .. },
-            TargetRef::Element { .. },
-        ) => DeliveryRoute::TargetAddressed,
-        (Action::Scroll { .. }, TargetRef::Element { .. }) => {
-            if cfg!(target_os = "macos") {
-                native_pointer_delivery_route()
-            } else {
-                DeliveryRoute::TargetAddressed
+            | Action::PerformSecondaryAction { .. } => DeliveryRoute::TargetAddressed,
+            Action::Scroll { .. } => {
+                if cfg!(target_os = "macos") {
+                    native_pointer_delivery_route()
+                } else {
+                    DeliveryRoute::TargetAddressed
+                }
             }
-        }
-        (_, TargetRef::Element { .. }) => native_pointer_delivery_route(),
+            _ => native_pointer_delivery_route(),
+        },
         _ => DeliveryRoute::Pointer,
     }
 }
