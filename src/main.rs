@@ -12,7 +12,10 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_PROTOCOL: u8 = 3;
 
 fn main() -> ExitCode {
-    let result = run(std::env::args().skip(1).collect());
+    print_result(run(std::env::args().skip(1).collect()))
+}
+
+fn print_result(result: Result<(serde_json::Value, u8), CliError>) -> ExitCode {
     let (value, exit) = match result {
         Ok((output, exit)) => (
             serde_json::to_value(SuccessEnvelope { ok: true, data: output }).unwrap_or_else(|_| {
