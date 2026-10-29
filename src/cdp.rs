@@ -2553,15 +2553,19 @@ mod tests {
     }
 
     fn live_ax(role: &str, name: &str, protected: bool, properties: Value) -> Value {
+        let mut props = vec![json!({"name":"protected","value":{"value":protected}})];
+        if let Some(arr) = properties.as_array() {
+            props.extend(arr.clone());
+        } else if !properties.as_object().map_or(false, |o| o.is_empty()) {
+            props.push(properties);
+        }
+
         json!({"nodes":[{
             "nodeId":"live-ax",
             "backendDOMNodeId":7,
             "role":{"value":role},
             "name":{"value":name},
-            "properties":[
-                {"name":"protected","value":{"value":protected}},
-                properties
-            ]
+            "properties": props
         }]})
     }
 
