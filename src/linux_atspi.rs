@@ -294,46 +294,49 @@ impl X11TopologyWorker {
         let (requests, receiver) = mpsc::sync_channel::<X11Request>(1);
         std::thread::Builder::new()
             .name("praefectus-x11-topology".to_string())
-            .spawn(move || {
-                let mut connection = None;
-                while let Ok(request) = receiver.recv() {
-                    if connection.is_none() {
-                        connection = connect_x11().ok();
-                    }
-                    match request {
-                        X11Request::Topology(response) => {
-                            process_x11_request(&mut connection, response, x11_topology_hash);
-                        }
-                        X11Request::Desktop(response) => {
-                            process_x11_request(&mut connection, response, x11_desktop_sentinel);
-                        }
-                    }
-                }
-            })
+            .spawn(move || Self::worker_loop(receiver))
             .map_err(executor_error)?;
         Ok(Self { requests })
     }
 
-    fn hash(&self) -> Result<String, ProtocolError> {
+    fn worker_loop(receiver: mpsc::Receiver<X11Request>) {
+        let mut connection = None;
+        while let Ok(request) = receiver.recv() {
+            if connection.is_none() {
+                connection = connect_x11().ok();
+            }
+            match request {
+                X11Request::Topology(response) => {
+                    process_x11_request(&mut connection, response, x11_topology_hash);
+                }
+                X11Request::Desktop(response) => {
+                    process_x11_request(&mut connection, response, x11_desktop_sentinel);
+                }
+            }
+        }
+    }
+
+    fn send_request<T>(
+        &self,
+        request_builder: impl FnOnce(mpsc::Sender<Result<T, ()>>) -> X11Request,
+        error_fn: fn() -> ProtocolError,
+    ) -> Result<T, ProtocolError> {
         let (response, receiver) = mpsc::channel();
         self.requests
-            .try_send(X11Request::Topology(response))
-            .map_err(|_| topology_unavailable())?;
+            .try_send(request_builder(response))
+            .map_err(|_| error_fn())?;
         receiver
             .recv_timeout(TOPOLOGY_TIMEOUT)
-            .map_err(|_| topology_unavailable())?
-            .map_err(|_| topology_unavailable())
+            .map_err(|_| error_fn())?
+            .map_err(|_| error_fn())
+    }
+
+    fn hash(&self) -> Result<String, ProtocolError> {
+        self.send_request(X11Request::Topology, topology_unavailable)
     }
 
     fn desktop_sentinel(&self) -> Result<X11DesktopSentinel, ProtocolError> {
-        let (response, receiver) = mpsc::channel();
-        self.requests
-            .try_send(X11Request::Desktop(response))
-            .map_err(|_| desktop_state_unavailable())?;
-        receiver
-            .recv_timeout(TOPOLOGY_TIMEOUT)
-            .map_err(|_| desktop_state_unavailable())?
-            .map_err(|_| desktop_state_unavailable())
+        self.send_request(X11Request::Desktop, desktop_state_unavailable)
     }
 }
 
