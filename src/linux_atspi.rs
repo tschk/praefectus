@@ -879,7 +879,7 @@ impl LinuxAtspiBackend {
         let window_id = window.window_id.clone();
         let mut queue = VecDeque::from([(window.object.clone(), None::<Rc<String>>, 0_usize)]);
         let mut seen = BTreeSet::new();
-        let mut elements = Vec::new();
+        let mut elements = Vec::with_capacity(MAX_ELEMENTS);
         let mut targets = BTreeMap::new();
         let mut truncated = false;
 
