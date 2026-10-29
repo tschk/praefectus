@@ -2782,13 +2782,9 @@ mod tests {
         let process_generation =
             CdpConfig::process_generation(process_id).expect("process generation");
 
-        let config = CdpConfig::host_isolated_localhost(
-            9222,
-            "page-1",
-            process_id,
-            process_generation,
-        )
-        .expect("valid configuration");
+        let config =
+            CdpConfig::host_isolated_localhost(9222, "page-1", process_id, process_generation)
+                .expect("valid configuration");
 
         assert_eq!(config.endpoint().port(), 9222);
         assert_eq!(config.target_id(), "page-1");
