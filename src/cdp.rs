@@ -3501,10 +3501,7 @@ mod tests {
                     &[json!({"name":"disabled","value":{"value":true}})],
                 ),
             ),
-            (
-                changed_viewport,
-                live_ax("button", "Submit", false, &[]),
-            ),
+            (changed_viewport, live_ax("button", "Submit", false, &[])),
         ] {
             let (error, methods) = rejected_invoke(final_viewport, final_ax);
             assert_eq!(error.effect, EffectKnowledge::NoEffect);
