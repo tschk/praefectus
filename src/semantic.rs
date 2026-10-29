@@ -524,7 +524,8 @@ mod tests {
         );
         target.generation -= 1;
 
-        target.element_id = opaque_element_id(&observation.observation_id, "backend-node-2").unwrap();
+        target.element_id =
+            opaque_element_id(&observation.observation_id, "backend-node-2").unwrap();
         assert_eq!(
             route_action(RouteActionParams {
                 action: &Action::Invoke,
