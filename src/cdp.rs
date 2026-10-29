@@ -1493,10 +1493,7 @@ fn parse_http_content_length(headers: &[u8]) -> Result<usize, CdpError> {
         }
     }
     content_length
-        .filter(|length| {
-            *length as u64
-                <= MAX_HTTP_BYTES.saturating_sub(headers.len() as u64)
-        })
+        .filter(|length| *length as u64 <= MAX_HTTP_BYTES.saturating_sub(headers.len() as u64))
         .ok_or(CdpError::Protocol)
 }
 
