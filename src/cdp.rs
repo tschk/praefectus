@@ -2378,6 +2378,18 @@ mod tests {
     };
 
     #[test]
+    fn test_localhost_config() {
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config =
+            CdpConfig::localhost(9222, "page-1", process_id, process_generation).expect("config");
+        assert_eq!(config.session_isolation(), SessionIsolation::SharedDesktop);
+        assert_eq!(config.endpoint().port(), 9222);
+        assert_eq!(config.target_id(), "page-1");
+    }
+
+    #[test]
     fn test_boundary_ok() {
         let cancellation = CancellationToken::default();
         assert!(matches!(boundary(&cancellation, i64::MAX), Ok(())));
