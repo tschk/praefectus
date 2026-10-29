@@ -1422,6 +1422,22 @@ impl<C: CdpChannel + Send> Executor for CdpExecutor<C> {
     }
 }
 
+fn read_http_headers<R: std::io::Read>(stream: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        if headers.len() as u64 >= MAX_HTTP_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP headers too large",
+            ));
+        }
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+    }
+    Ok(headers)
+}
+
 fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     let mut stream = TcpStream::connect_timeout(&config.endpoint(), MAX_IO_TIMEOUT)
         .map_err(|_| CdpError::Protocol)?;
@@ -1436,17 +1452,7 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     )
     .and_then(|()| stream.flush())
     .map_err(|_| CdpError::Protocol)?;
-    let mut headers = Vec::new();
-    while !headers.ends_with(b"\r\n\r\n") {
-        if headers.len() as u64 >= MAX_HTTP_BYTES {
-            return Err(CdpError::Protocol);
-        }
-        let mut byte = [0u8; 1];
-        stream
-            .read_exact(&mut byte)
-            .map_err(|_| CdpError::Protocol)?;
-        headers.push(byte[0]);
-    }
+    let headers = read_http_headers(&mut stream).map_err(|_| CdpError::Protocol)?;
     let headers =
         std::str::from_utf8(&headers[..headers.len() - 4]).map_err(|_| CdpError::Protocol)?;
     let mut lines = headers.split("\r\n");
@@ -3161,12 +3167,7 @@ mod tests {
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("connection");
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0u8; 1];
-                stream.read_exact(&mut byte).expect("request");
-                request.push(byte[0]);
-            }
+            let _request = read_http_headers(&mut stream).expect("request");
             let body = format!(
                 "[{{\"id\":\"page-1\",\"type\":\"page\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{port}/devtools/page/page-1\"}}]"
             );
