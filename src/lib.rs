@@ -8557,6 +8557,12 @@ mod tests {
         let hash1 = element_fingerprint_hash(&fingerprint1).expect("hash successful");
         let hash2 = element_fingerprint_hash(&fingerprint2).expect("hash successful");
 
+        // The hash should match a known, expected value to ensure it never changes unintentionally
+        assert_eq!(
+            hash1,
+            "cba6e8d08825a0269beebad48fae7280dbe2320d18fe65258b1ee7cbcebc9507"
+        );
+
         // Identical fingerprints produce same hash
         assert_eq!(hash1, hash2);
 
