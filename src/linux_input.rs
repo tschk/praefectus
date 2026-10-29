@@ -769,18 +769,23 @@ fn parse_wlr_randr(stdout: &[u8]) -> Result<Value, NativeError> {
     let mut displays = Vec::new();
     let mut current_name: Option<String> = None;
     let mut current_enabled = false;
+
+    let push_display = |name: Option<String>, enabled: bool, displays: &mut Vec<Value>| {
+        if let Some(n) = name {
+            if enabled {
+                displays.push(serde_json::json!({
+                    "display_id": n,
+                    "x": 0_i64, "y": 0_i64,
+                    "width": 1920_i64, "height": 1080_i64,
+                }));
+            }
+        }
+    };
+
     for line in text.lines() {
         let trimmed = line.trim();
         if !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty() {
-            if let Some(name) = current_name.take() {
-                if current_enabled {
-                    displays.push(serde_json::json!({
-                        "display_id": name,
-                        "x": 0_i64, "y": 0_i64,
-                        "width": 1920_i64, "height": 1080_i64,
-                    }));
-                }
-            }
+            push_display(current_name.take(), current_enabled, &mut displays);
             current_name = Some(trimmed.split_whitespace().next().unwrap_or("").to_string());
             current_enabled = false;
         } else if trimmed.starts_with("Enabled:") {
@@ -790,15 +795,8 @@ fn parse_wlr_randr(stdout: &[u8]) -> Result<Value, NativeError> {
             // wlr-randr: "Current: 1920x1080 px"
         }
     }
-    if let Some(name) = current_name {
-        if current_enabled {
-            displays.push(serde_json::json!({
-                "display_id": name,
-                "x": 0_i64, "y": 0_i64,
-                "width": 1920_i64, "height": 1080_i64,
-            }));
-        }
-    }
+    push_display(current_name, current_enabled, &mut displays);
+
     if displays.is_empty() {
         return Err(NativeError);
     }
