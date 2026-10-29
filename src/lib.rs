@@ -6970,7 +6970,7 @@ impl Drop for LedgerLock {
     }
 }
 
-fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+fn validate_request_headers(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.action_version != PROTOCOL_VERSION
         || request.target_version != PROTOCOL_VERSION
@@ -6981,6 +6981,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "unsupported protocol version".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request_identifiers(request: &ActionRequest) -> Result<(), ProtocolError> {
     for (name, value) in [
         ("operation_id", request.operation_id.as_str()),
         ("subject", request.subject.as_str()),
@@ -6995,6 +6999,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidRequest(format!("invalid {name}")));
         }
     }
+    Ok(())
+}
+
+fn validate_request_semantics(request: &ActionRequest) -> Result<(), ProtocolError> {
     let auxiliary = matches!(
         request.action,
         Action::Screenshot { .. }
@@ -7016,7 +7024,6 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "desktop action requires no target and no target verification".to_string(),
         ));
     }
-    validate_action(&request.action)?;
     if matches!(request.target, TargetRef::Coordinates { .. })
         && !matches!(
             request.action,
@@ -7043,7 +7050,6 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "action requires a fenced semantic element target".to_string(),
         ));
     }
-    validate_verification(&request.verification)?;
     match (&request.action, &request.verification) {
         (Action::SetValue { value }, VerificationPolicy::TargetValueHash { sha256 })
             if semantic_hash(sha256) && hash_bytes(value.as_bytes()) == *sha256 => {}
@@ -7054,6 +7060,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn validate_request_credentials(request: &ActionRequest) -> Result<(), ProtocolError> {
     if request.deadline_at_ms <= 0
         || request.authority.signature.len() != 128
         || !request
@@ -7066,6 +7076,10 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid deadline or authority signature".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request_provenance(request: &ActionRequest) -> Result<(), ProtocolError> {
     let valid_snapshot = target_provenance_is_valid(&request.target);
     if !valid_snapshot {
         return Err(ProtocolError::InvalidRequest(
@@ -7099,6 +7113,17 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
             "invalid snapshot ID".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
+    validate_request_headers(request)?;
+    validate_request_identifiers(request)?;
+    validate_request_semantics(request)?;
+    validate_action(&request.action)?;
+    validate_verification(&request.verification)?;
+    validate_request_credentials(request)?;
+    validate_request_provenance(request)?;
     Ok(())
 }
 
