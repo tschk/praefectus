@@ -2423,15 +2423,15 @@ impl AxElement {
         if length > maximum || length > MAX_MAC_AX_COLLECTION_ITEMS {
             return Err(NativeError);
         }
-        let mut elements = Vec::new();
-        for raw in values.get_all_values() {
-            if unsafe { CFGetTypeID(raw.cast()) } != unsafe { AXUIElementGetTypeID() } {
-                continue;
-            }
-            unsafe { CFRetain(raw.cast()) };
-            elements.push(Self::created(raw.cast_mut().cast())?);
-        }
-        Ok(elements)
+        values
+            .get_all_values()
+            .into_iter()
+            .filter(|&raw| unsafe { CFGetTypeID(raw.cast()) } == unsafe { AXUIElementGetTypeID() })
+            .map(|raw| {
+                unsafe { CFRetain(raw.cast()) };
+                Self::created(raw.cast_mut().cast())
+            })
+            .collect()
     }
 
     fn actions(&self) -> Result<Vec<String>, NativeError> {
