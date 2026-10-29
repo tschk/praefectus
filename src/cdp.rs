@@ -2556,7 +2556,7 @@ mod tests {
         let mut props = vec![json!({"name":"protected","value":{"value":protected}})];
         if let Some(arr) = properties.as_array() {
             props.extend(arr.clone());
-        } else if !properties.as_object().map_or(false, |o| o.is_empty()) {
+        } else if !properties.as_object().is_some_and(|o| o.is_empty()) {
             props.push(properties);
         }
 
