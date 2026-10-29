@@ -18,7 +18,7 @@ const PORTAL_RD_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
 static PORTAL_SESSION: Mutex<Option<(String, zbus::Connection)>> = Mutex::new(None);
 
 fn secure_command(name: &str) -> Result<Command, NativeError> {
-    if name.is_empty() || name.contains('/') || name.contains('\0') {
+    if name.is_empty() || name.contains('/') || name.contains('\0') || name.starts_with('.') {
         return Err(NativeError);
     }
     for directory in ["/usr/bin", "/usr/sbin", "/bin", "/sbin"] {
@@ -986,6 +986,8 @@ mod tests {
         assert!(secure_command("../bin/sh").is_err());
         assert!(secure_command("/usr/bin/true").is_err());
         assert!(secure_command("true\0x").is_err());
+        assert!(secure_command("..").is_err());
+        assert!(secure_command(".").is_err());
         if let Ok(command) = secure_command("true") {
             let program = command.get_program().to_string_lossy();
             assert!(
