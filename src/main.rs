@@ -11,9 +11,8 @@ use serde::Serialize;
 const EXIT_USAGE: u8 = 2;
 const EXIT_PROTOCOL: u8 = 3;
 
-fn main() -> ExitCode {
-    let result = run(std::env::args().skip(1).collect());
-    let (value, exit) = match result {
+fn format_result(result: Result<(serde_json::Value, u8), CliError>) -> (serde_json::Value, u8) {
+    match result {
         Ok((output, exit)) => (
             serde_json::to_value(SuccessEnvelope { ok: true, data: output }).unwrap_or_else(|_| {
                 serde_json::json!({"ok":false,"error":{"code":"serialization_error","message":"failed to serialize CLI output"}})
@@ -25,7 +24,12 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| serde_json::json!({"error":{"code":"serialization_error","message":"failed to serialize CLI error"}})),
             error.exit,
         ),
-    };
+    }
+}
+
+fn main() -> ExitCode {
+    let result = run(std::env::args().skip(1).collect());
+    let (value, exit) = format_result(result);
     match serde_json::to_writer(io::stdout().lock(), &value) {
         Ok(()) => {
             println!();
