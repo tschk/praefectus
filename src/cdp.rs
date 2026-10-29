@@ -2449,7 +2449,7 @@ mod tests {
         editable_channel(true)
     }
 
-    fn editable_channel(protected: bool) -> FakeChannel {
+    fn base_channel(nodes: Value) -> FakeChannel {
         FakeChannel {
             endpoint: config().endpoint(),
             target_id: "page-1".to_string(),
@@ -2467,16 +2467,7 @@ mod tests {
                         {"frameId":"frame-1","nodes":{"backendNodeId":[7]}},
                         {"frameId":"child-frame","nodes":{"backendNodeId":[8]}}
                     ]}),
-                    json!({"nodes":[{
-                        "nodeId":"ax-1",
-                        "backendDOMNodeId":7,
-                        "role":{"value":"textbox"},
-                        "name":{"value":"secret"},
-                        "properties":[
-                            {"name":"protected","value":{"value":protected}},
-                            {"name":"editable","value":{"value":"plaintext"}}
-                        ]
-                    }]}),
+                    nodes,
                     json!({"frameTree":{"frame":{"id":"frame-1","loaderId":"loader-1"}}}),
                 ]
                 .map(Ok),
@@ -2484,43 +2475,34 @@ mod tests {
         }
     }
 
+    fn editable_channel(protected: bool) -> FakeChannel {
+        base_channel(json!({"nodes":[{
+            "nodeId":"ax-1",
+            "backendDOMNodeId":7,
+            "role":{"value":"textbox"},
+            "name":{"value":"secret"},
+            "properties":[
+                {"name":"protected","value":{"value":protected}},
+                {"name":"editable","value":{"value":"plaintext"}}
+            ]
+        }]}))
+    }
+
     fn button_channel() -> FakeChannel {
-        FakeChannel {
-            endpoint: config().endpoint(),
-            target_id: "page-1".to_string(),
-            methods: Vec::new(),
-            parameters: Vec::new(),
-            delay_ms: 0,
-            cancellation: None,
-            responses: VecDeque::from(
-                [
-                    json!({"targetInfo":{"targetId":"page-1","type":"page"}}),
-                    json!({"frameTree":{"frame":{"id":"frame-1","loaderId":"loader-1"}}}),
-                    json!({"executionContextId":9}),
-                    viewport(),
-                    json!({"documents":[
-                        {"frameId":"frame-1","nodes":{"backendNodeId":[7]}},
-                        {"frameId":"child-frame","nodes":{"backendNodeId":[8]}}
-                    ]}),
-                    json!({"nodes":[
-                        {
-                            "nodeId":"ax-1",
-                            "backendDOMNodeId":7,
-                            "role":{"value":"button"},
-                            "name":{"value":"Submit"}
-                        },
-                        {
-                            "nodeId":"ax-child",
-                            "backendDOMNodeId":8,
-                            "role":{"value":"button"},
-                            "name":{"value":"Child"}
-                        }
-                    ]}),
-                    json!({"frameTree":{"frame":{"id":"frame-1","loaderId":"loader-1"}}}),
-                ]
-                .map(Ok),
-            ),
-        }
+        base_channel(json!({"nodes":[
+            {
+                "nodeId":"ax-1",
+                "backendDOMNodeId":7,
+                "role":{"value":"button"},
+                "name":{"value":"Submit"}
+            },
+            {
+                "nodeId":"ax-child",
+                "backendDOMNodeId":8,
+                "role":{"value":"button"},
+                "name":{"value":"Child"}
+            }
+        ]}))
     }
 
     fn scroll_channel() -> FakeChannel {
