@@ -1186,37 +1186,48 @@ pub fn persist_no_yolo(restricted: bool) -> Result<GlobalInputAllowance, Protoco
 
 fn persist_no_yolo_at(path: &Path, restricted: bool) -> Result<(), ProtocolError> {
     if restricted {
-        if let Some(parent) = path.parent() {
-            match std::fs::symlink_metadata(parent) {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-                _ => ensure_directory(parent, false)?,
-            }
+        apply_no_yolo_restriction(path)
+    } else {
+        remove_no_yolo_restriction(path)
+    }
+}
+
+fn apply_no_yolo_restriction(path: &Path) -> Result<(), ProtocolError> {
+    if let Some(parent) = path.parent() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => ensure_directory(parent, false)?,
         }
-        #[cfg(windows)]
-        let _path_guard = windows_acl::lock_path(path)?;
-        match private_open_options()
-            .create_new(true)
-            .write(true)
-            .open(path)
-        {
-            Ok(file) => {
-                restrict_file(&file)?;
-                file.sync_all()?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !restriction_file_is_present(path) {
-                    return Err(ProtocolError::Io(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "Praefectus state directory is not private",
-                    )));
-                }
-                let file = private_open_options().read(true).write(true).open(path)?;
-                restrict_file(&file)?;
-            }
-            Err(error) => return Err(error.into()),
+    }
+    #[cfg(windows)]
+    let _path_guard = windows_acl::lock_path(path)?;
+    match private_open_options()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => {
+            restrict_file(&file)?;
+            file.sync_all()?;
         }
-        sync_parent(path)?;
-    } else if restriction_file_is_present(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !restriction_file_is_present(path) {
+                return Err(ProtocolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Praefectus state directory is not private",
+                )));
+            }
+            let file = private_open_options().read(true).write(true).open(path)?;
+            restrict_file(&file)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    sync_parent(path)?;
+    Ok(())
+}
+
+fn remove_no_yolo_restriction(path: &Path) -> Result<(), ProtocolError> {
+    if restriction_file_is_present(path) {
         #[cfg(windows)]
         let _path_guard = windows_acl::lock_path(path)?;
         std::fs::remove_file(path)?;
