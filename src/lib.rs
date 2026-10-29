@@ -910,45 +910,54 @@ fn windows_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> 
 }
 
 #[cfg(windows)]
+static WIN_KEY_MAP: phf::Map<
+    &'static str,
+    windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+> = phf::phf_map! {
+    "return" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN,
+    "enter" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN,
+    "tab" => windows::Win32::UI::Input::KeyboardAndMouse::VK_TAB,
+    "escape" => windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE,
+    "esc" => windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE,
+    "backspace" => windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK,
+    "delete" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE,
+    "del" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE,
+    "space" => windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE,
+    "up" => windows::Win32::UI::Input::KeyboardAndMouse::VK_UP,
+    "down" => windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN,
+    "left" => windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT,
+    "right" => windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT,
+    "home" => windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME,
+    "end" => windows::Win32::UI::Input::KeyboardAndMouse::VK_END,
+    "pageup" => windows::Win32::UI::Input::KeyboardAndMouse::VK_PRIOR,
+    "pagedown" => windows::Win32::UI::Input::KeyboardAndMouse::VK_NEXT,
+    "f1" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F1,
+    "f2" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F2,
+    "f3" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F3,
+    "f4" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F4,
+    "f5" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F5,
+    "f6" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F6,
+    "f7" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F7,
+    "f8" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F8,
+    "f9" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F9,
+    "f10" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F10,
+    "f11" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F11,
+    "f12" => windows::Win32::UI::Input::KeyboardAndMouse::VK_F12,
+};
+
+#[cfg(windows)]
 fn win_key_code(key: &str) -> Option<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    match key {
-        "return" | "enter" => Some(VK_RETURN),
-        "tab" => Some(VK_TAB),
-        "escape" | "esc" => Some(VK_ESCAPE),
-        "backspace" => Some(VK_BACK),
-        "delete" | "del" => Some(VK_DELETE),
-        "space" => Some(VK_SPACE),
-        "up" => Some(VK_UP),
-        "down" => Some(VK_DOWN),
-        "left" => Some(VK_LEFT),
-        "right" => Some(VK_RIGHT),
-        "home" => Some(VK_HOME),
-        "end" => Some(VK_END),
-        "pageup" => Some(VK_PRIOR),
-        "pagedown" => Some(VK_NEXT),
-        "f1" => Some(VK_F1),
-        "f2" => Some(VK_F2),
-        "f3" => Some(VK_F3),
-        "f4" => Some(VK_F4),
-        "f5" => Some(VK_F5),
-        "f6" => Some(VK_F6),
-        "f7" => Some(VK_F7),
-        "f8" => Some(VK_F8),
-        "f9" => Some(VK_F9),
-        "f10" => Some(VK_F10),
-        "f11" => Some(VK_F11),
-        "f12" => Some(VK_F12),
-        k if k.len() == 1 => {
-            let ch = k.chars().next().unwrap().to_ascii_uppercase();
-            if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
-                Some(VIRTUAL_KEY(ch as u16))
-            } else {
-                None
-            }
-        }
-        _ => None,
+    if let Some(vk) = WIN_KEY_MAP.get(key) {
+        return Some(*vk);
     }
+    if key.len() == 1 {
+        let ch = key.chars().next().unwrap().to_ascii_uppercase();
+        if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+            return Some(VIRTUAL_KEY(ch as u16));
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -1009,38 +1018,43 @@ fn mac_key_code(ch: char) -> Option<u16> {
 }
 
 #[cfg(target_os = "macos")]
+static MAC_KEY_NAME_MAP: phf::Map<&'static str, u16> = phf::phf_map! {
+    "return" => 0x24,
+    "enter" => 0x24,
+    "tab" => 0x30,
+    "escape" => 0x35,
+    "esc" => 0x35,
+    "delete" => 0x75,
+    "del" => 0x75,
+    "backspace" => 0x33,
+    "space" => 0x31,
+    "up" => 0x7E,
+    "down" => 0x7D,
+    "left" => 0x7B,
+    "right" => 0x7C,
+    "home" => 0x73,
+    "end" => 0x77,
+    "pageup" => 0x74,
+    "pagedown" => 0x79,
+    "f1" => 0x7A,
+    "f2" => 0x78,
+    "f3" => 0x63,
+    "f4" => 0x76,
+    "f5" => 0x60,
+    "f6" => 0x61,
+    "f7" => 0x62,
+    "f8" => 0x64,
+    "f9" => 0x65,
+    "f10" => 0x6D,
+    "f11" => 0x67,
+    "f12" => 0x6F,
+    "insert" => 0x72,
+    "printscreen" => 0x69,
+};
+
+#[cfg(target_os = "macos")]
 fn mac_key_name_code(name: &str) -> Option<u16> {
-    match name {
-        "return" | "enter" => Some(0x24),
-        "tab" => Some(0x30),
-        "escape" | "esc" => Some(0x35),
-        "delete" | "del" => Some(0x75),
-        "backspace" => Some(0x33),
-        "space" => Some(0x31),
-        "up" => Some(0x7E),
-        "down" => Some(0x7D),
-        "left" => Some(0x7B),
-        "right" => Some(0x7C),
-        "home" => Some(0x73),
-        "end" => Some(0x77),
-        "pageup" => Some(0x74),
-        "pagedown" => Some(0x79),
-        "f1" => Some(0x7A),
-        "f2" => Some(0x78),
-        "f3" => Some(0x63),
-        "f4" => Some(0x76),
-        "f5" => Some(0x60),
-        "f6" => Some(0x61),
-        "f7" => Some(0x62),
-        "f8" => Some(0x64),
-        "f9" => Some(0x65),
-        "f10" => Some(0x6D),
-        "f11" => Some(0x67),
-        "f12" => Some(0x6F),
-        "insert" => Some(0x72),
-        "printscreen" => Some(0x69),
-        _ => None,
-    }
+    MAC_KEY_NAME_MAP.get(name).copied()
 }
 
 #[cfg(target_os = "macos")]
