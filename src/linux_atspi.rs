@@ -294,24 +294,26 @@ impl X11TopologyWorker {
         let (requests, receiver) = mpsc::sync_channel::<X11Request>(1);
         std::thread::Builder::new()
             .name("praefectus-x11-topology".to_string())
-            .spawn(move || {
-                let mut connection = None;
-                while let Ok(request) = receiver.recv() {
-                    if connection.is_none() {
-                        connection = connect_x11().ok();
-                    }
-                    match request {
-                        X11Request::Topology(response) => {
-                            process_x11_request(&mut connection, response, x11_topology_hash);
-                        }
-                        X11Request::Desktop(response) => {
-                            process_x11_request(&mut connection, response, x11_desktop_sentinel);
-                        }
-                    }
-                }
-            })
+            .spawn(move || Self::worker_loop(receiver))
             .map_err(executor_error)?;
         Ok(Self { requests })
+    }
+
+    fn worker_loop(receiver: mpsc::Receiver<X11Request>) {
+        let mut connection = None;
+        while let Ok(request) = receiver.recv() {
+            if connection.is_none() {
+                connection = connect_x11().ok();
+            }
+            match request {
+                X11Request::Topology(response) => {
+                    process_x11_request(&mut connection, response, x11_topology_hash);
+                }
+                X11Request::Desktop(response) => {
+                    process_x11_request(&mut connection, response, x11_desktop_sentinel);
+                }
+            }
+        }
     }
 
     fn hash(&self) -> Result<String, ProtocolError> {
