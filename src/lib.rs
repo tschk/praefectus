@@ -7486,6 +7486,22 @@ fn coordinate_observation_path(snapshot_id: &str) -> Result<PathBuf, ProtocolErr
         .join(format!("{snapshot_id}.json")))
 }
 
+fn create_fallback_dir() -> Result<PathBuf, std::io::Error> {
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).expect("secure entropy for Praefectus fallback directory");
+    let path = std::env::temp_dir().join(format!("praefectus-{}", hex::encode(random)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&path)?;
+    }
+    Ok(path)
+}
+
 fn fallback_temp_dir() -> PathBuf {
     use std::io::ErrorKind;
     use std::sync::OnceLock;
@@ -7493,27 +7509,10 @@ fn fallback_temp_dir() -> PathBuf {
     FALLBACK
         .get_or_init(|| {
             loop {
-                let mut random = [0u8; 16];
-                getrandom::fill(&mut random)
-                    .expect("secure entropy for Praefectus fallback directory");
-                let path = std::env::temp_dir().join(format!("praefectus-{}", hex::encode(random)));
-                let created = {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::DirBuilderExt;
-                        std::fs::DirBuilder::new().mode(0o700).create(&path)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        std::fs::create_dir(&path)
-                    }
-                };
-                match created {
-                    Ok(()) => break path,
+                match create_fallback_dir() {
+                    Ok(path) => break path,
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                    Err(error) => {
-                        panic!("failed to create Praefectus fallback directory: {error}")
-                    }
+                    Err(error) => panic!("failed to create Praefectus fallback directory: {error}"),
                 }
             }
         })
