@@ -2397,25 +2397,32 @@ impl AxElement {
         self.optional_element(name)?.ok_or(NativeError)
     }
 
-    fn optional_element(&self, name: &str) -> Result<Option<Self>, NativeError> {
+    fn retain_cf_type(
+        raw: core_foundation::base::CFTypeRef,
+    ) -> Option<accessibility_sys::AXUIElementRef> {
         use accessibility_sys::AXUIElementGetTypeID;
-        use core_foundation::base::{CFGetTypeID, CFRetain, TCFType};
+        use core_foundation::base::{CFGetTypeID, CFRetain};
+
+        if unsafe { CFGetTypeID(raw) } == unsafe { AXUIElementGetTypeID() } {
+            unsafe { CFRetain(raw) };
+            Some(raw.cast_mut().cast())
+        } else {
+            None
+        }
+    }
+
+    fn optional_element(&self, name: &str) -> Result<Option<Self>, NativeError> {
+        use core_foundation::base::TCFType;
 
         let Some(value) = self.optional_attribute(name)? else {
             return Ok(None);
         };
-        let raw = value.as_CFTypeRef();
-        if unsafe { CFGetTypeID(raw) } != unsafe { AXUIElementGetTypeID() } {
-            return Err(NativeError);
-        }
-        unsafe { CFRetain(raw) };
-        Self::created(raw.cast_mut().cast()).map(Some)
+        let ax_raw = Self::retain_cf_type(value.as_CFTypeRef()).ok_or(NativeError)?;
+        Self::created(ax_raw).map(Some)
     }
 
     fn elements(&self, name: &str, maximum: usize) -> Result<Vec<Self>, NativeError> {
-        use accessibility_sys::AXUIElementGetTypeID;
         use core_foundation::array::CFArray;
-        use core_foundation::base::{CFGetTypeID, CFRetain};
 
         let values = self.attribute(name)?;
         let values = values.downcast::<CFArray>().ok_or(NativeError)?;
@@ -2425,11 +2432,9 @@ impl AxElement {
         }
         let mut elements = Vec::new();
         for raw in values.get_all_values() {
-            if unsafe { CFGetTypeID(raw.cast()) } != unsafe { AXUIElementGetTypeID() } {
-                continue;
+            if let Some(ax_raw) = Self::retain_cf_type(raw.cast()) {
+                elements.push(Self::created(ax_raw)?);
             }
-            unsafe { CFRetain(raw.cast()) };
-            elements.push(Self::created(raw.cast_mut().cast())?);
         }
         Ok(elements)
     }
