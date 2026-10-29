@@ -2399,6 +2399,40 @@ mod tests {
         assert!(matches!(boundary(&cancellation, 0), Err(CdpError::Expired)));
     }
 
+    #[test]
+    fn test_process_generation_ok() {
+        let pid = std::process::id();
+        let result = CdpConfig::process_generation(pid);
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            assert!(result.is_ok());
+            let generation = result.unwrap();
+            #[cfg(target_os = "linux")]
+            assert!(generation.starts_with("linux-"));
+            #[cfg(target_os = "macos")]
+            assert!(generation.starts_with("macos-"));
+            #[cfg(windows)]
+            assert!(generation.starts_with("windows-"));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            assert!(matches!(result, Err(CdpError::Unsupported)));
+        }
+    }
+
+    #[test]
+    fn test_process_generation_invalid() {
+        let pid = 0;
+        let result = CdpConfig::process_generation(pid);
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        assert!(
+            matches!(result, Err(CdpError::StaleTarget))
+                || matches!(result, Err(CdpError::InvalidConfig))
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        assert!(matches!(result, Err(CdpError::Unsupported)));
+    }
+
     struct FakeChannel {
         endpoint: SocketAddr,
         target_id: String,
