@@ -508,6 +508,57 @@ mod tests {
     }
 
     #[test]
+    fn route_action_propagates_resolve_errors() {
+        let mut observation = observation();
+        let mut target = observation.target(&observation.elements[0].tag).unwrap();
+
+        target.generation += 1;
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::StaleTarget)
+        );
+        target.generation -= 1;
+
+        target.element_id = opaque_element_id(&observation.observation_id, "backend-node-2").unwrap();
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::TargetNotFound)
+        );
+        target.element_id = observation.elements[0].element_id.clone();
+
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: observation.expires_at_ms,
+            }),
+            Err(SemanticError::StaleObservation)
+        );
+
+        observation.elements.push(observation.elements[0].clone());
+        assert_eq!(
+            route_action(RouteActionParams {
+                action: &Action::Invoke,
+                observation: &observation,
+                target: &target,
+                now_ms: 2_000,
+            }),
+            Err(SemanticError::AmbiguousTarget)
+        );
+    }
+
+    #[test]
     fn route_action_returns_element_when_actionable() {
         let mut observation = observation();
         let target = observation.target(&observation.elements[0].tag).unwrap();
