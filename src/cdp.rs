@@ -2777,6 +2777,28 @@ mod tests {
     }
 
     #[test]
+    fn test_host_isolated_localhost() {
+        let process_id = std::process::id();
+        let process_generation =
+            CdpConfig::process_generation(process_id).expect("process generation");
+        let config = CdpConfig::host_isolated_localhost(
+            9222,
+            "page-1",
+            process_id,
+            process_generation.clone(),
+        )
+        .expect("config");
+        assert!(matches!(
+            config.session_isolation,
+            SessionIsolation::HostIsolated
+        ));
+        assert_eq!(config.port, 9222);
+        assert_eq!(config.target_id, "page-1");
+        assert_eq!(config.browser_process_id, process_id);
+        assert_eq!(config.process_generation, process_generation);
+    }
+
+    #[test]
     fn host_isolated_localhost_rejects_invalid_config() {
         let process_id = std::process::id();
         let process_generation =
