@@ -890,21 +890,34 @@ fn windows_scroll(direction: Direction, amount: u32) -> Result<(), NativeError> 
         Direction::Left => (MOUSEEVENTF_HWHEEL, (-120i32) as u32),
         Direction::Right => (MOUSEEVENTF_HWHEEL, 120u32),
     };
-    for _ in 0..amount {
-        let input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: delta,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: delta,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
             },
+        },
+    };
+    // To prevent out of memory issues for very large scroll amounts,
+    // we use a statically sized array for the chunks and loop over them.
+    let chunk_size = std::cmp::min(amount, 250) as usize;
+    let inputs = vec![input; chunk_size];
+
+    let mut remaining = amount as usize;
+    while remaining > 0 {
+        let current_chunk_size = std::cmp::min(remaining, 250);
+        let _ = unsafe {
+            SendInput(
+                &inputs[..current_chunk_size],
+                std::mem::size_of::<INPUT>() as i32,
+            )
         };
-        let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        remaining -= current_chunk_size;
     }
     Ok(())
 }
