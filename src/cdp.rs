@@ -2399,6 +2399,39 @@ mod tests {
         assert!(matches!(boundary(&cancellation, 0), Err(CdpError::Expired)));
     }
 
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn test_process_generation_ok() {
+        assert!(CdpConfig::process_generation(std::process::id()).is_ok());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn test_process_generation_stale() {
+        assert!(matches!(
+            CdpConfig::process_generation(u32::MAX),
+            Err(CdpError::StaleTarget)
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_process_generation_stale_macos() {
+        assert!(matches!(
+            CdpConfig::process_generation(u32::MAX),
+            Err(CdpError::InvalidConfig)
+        ));
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    fn test_process_generation_unsupported() {
+        assert!(matches!(
+            CdpConfig::process_generation(std::process::id()),
+            Err(CdpError::Unsupported)
+        ));
+    }
+
     struct FakeChannel {
         endpoint: SocketAddr,
         target_id: String,
