@@ -1436,6 +1436,21 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
     )
     .and_then(|()| stream.flush())
     .map_err(|_| CdpError::Protocol)?;
+
+    let headers_vec = read_http_headers(&mut stream)?;
+    let content_length = parse_http_content_length(&headers_vec)?;
+    let mut body = vec![0u8; content_length];
+    stream
+        .read_exact(&mut body)
+        .map_err(|_| CdpError::Protocol)?;
+    if body.len() != content_length {
+        return Err(CdpError::Protocol);
+    }
+
+    parse_websocket_url(&body, config)
+}
+
+fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>, CdpError> {
     let mut headers = Vec::new();
     while !headers.ends_with(b"\r\n\r\n") {
         if headers.len() as u64 >= MAX_HTTP_BYTES {
@@ -1447,9 +1462,13 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
             .map_err(|_| CdpError::Protocol)?;
         headers.push(byte[0]);
     }
-    let headers =
+    Ok(headers)
+}
+
+fn parse_http_content_length(headers: &[u8]) -> Result<usize, CdpError> {
+    let headers_str =
         std::str::from_utf8(&headers[..headers.len() - 4]).map_err(|_| CdpError::Protocol)?;
-    let mut lines = headers.split("\r\n");
+    let mut lines = headers_str.split("\r\n");
     if !matches!(lines.next(), Some("HTTP/1.1 200 OK" | "HTTP/1.0 200 OK")) {
         return Err(CdpError::Protocol);
     }
@@ -1473,20 +1492,13 @@ fn discover_websocket_url(config: &CdpConfig) -> Result<String, CdpError> {
             );
         }
     }
-    let content_length = content_length
-        .filter(|length| {
-            *length as u64
-                <= MAX_HTTP_BYTES.saturating_sub(headers.len() as u64 + b"\r\n\r\n".len() as u64)
-        })
-        .ok_or(CdpError::Protocol)?;
-    let mut body = vec![0u8; content_length];
-    stream
-        .read_exact(&mut body)
-        .map_err(|_| CdpError::Protocol)?;
-    if body.len() != content_length {
-        return Err(CdpError::Protocol);
-    }
-    let targets: Value = serde_json::from_slice(&body).map_err(|_| CdpError::Protocol)?;
+    content_length
+        .filter(|length| *length as u64 <= MAX_HTTP_BYTES.saturating_sub(headers.len() as u64))
+        .ok_or(CdpError::Protocol)
+}
+
+fn parse_websocket_url(body: &[u8], config: &CdpConfig) -> Result<String, CdpError> {
+    let targets: Value = serde_json::from_slice(body).map_err(|_| CdpError::Protocol)?;
     let mut matches = targets
         .as_array()
         .ok_or(CdpError::Protocol)?
