@@ -8565,6 +8565,31 @@ mod tests {
         let hash3 = element_fingerprint_hash(&fingerprint1).expect("hash successful");
         assert_ne!(hash1, hash3);
 
+        // Modifying backend changes hash
+        let mut f_backend = fingerprint2.clone();
+        f_backend.backend = "wayland".to_string();
+        assert_ne!(hash1, element_fingerprint_hash(&f_backend).expect("hash"));
+
+        // Modifying id changes hash
+        let mut f_id = fingerprint2.clone();
+        f_id.id = "456".to_string();
+        assert_ne!(hash1, element_fingerprint_hash(&f_id).expect("hash"));
+
+        // Modifying app changes hash
+        let mut f_app = fingerprint2.clone();
+        f_app.app = "other-app".to_string();
+        assert_ne!(hash1, element_fingerprint_hash(&f_app).expect("hash"));
+
+        // Modifying window changes hash
+        let mut f_window = fingerprint2.clone();
+        f_window.window = "other-window".to_string();
+        assert_ne!(hash1, element_fingerprint_hash(&f_window).expect("hash"));
+
+        // Modifying role changes hash
+        let mut f_role = fingerprint2.clone();
+        f_role.role = "checkbox".to_string();
+        assert_ne!(hash1, element_fingerprint_hash(&f_role).expect("hash"));
+
         // Modifying an integer field changes hash
         let mut fingerprint3 = fingerprint2.clone();
         fingerprint3.process_id = 789;
