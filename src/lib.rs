@@ -1583,78 +1583,7 @@ impl NativeRuntime {
     }
 
     fn press(&self, _key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
-        #[cfg(target_os = "linux")]
-        {
-            return linux_input::native_press(_key, _count, _delay_ms);
-        }
-        #[cfg(windows)]
-        {
-            use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-            let vk = win_key_code(_key).ok_or(NativeError)?;
-
-            for i in 0.._count {
-                if i > 0 {
-                    if let Some(delay) = _delay_ms {
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                    }
-                }
-                let down = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYBD_EVENT_FLAGS::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let up = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-            }
-            return Ok(());
-        }
-        #[cfg(target_os = "macos")]
-        {
-            if !native_permissions()
-                .get("accessibility")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(NativeError);
-            }
-            let code = mac_key_name_code(_key)
-                .or_else(|| {
-                    _key.chars()
-                        .next()
-                        .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
-                })
-                .ok_or(NativeError)?;
-            for i in 0.._count {
-                if i > 0
-                    && let Some(delay) = _delay_ms
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                }
-                let _ = mac_post_key(code, 0);
-            }
-            Ok(())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-        Err(NativeError)
+        native_press(_key, _count, _delay_ms)
     }
 
     fn paste(&self, _text: &str) -> Result<(), NativeError> {
@@ -2069,6 +1998,98 @@ fn native_drag(
     {
         let _ = (origin, destination, button, cancellation, deadline_at_ms);
         Err(unsupported("drag is unavailable on this backend"))
+    }
+}
+
+#[cfg(windows)]
+fn native_press_windows(
+    _key: &str,
+    _count: u32,
+    _delay_ms: Option<u64>,
+) -> Result<(), NativeError> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let vk = win_key_code(_key).ok_or(NativeError)?;
+
+    for i in 0.._count {
+        if i > 0 {
+            if let Some(delay) = _delay_ms {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+        }
+        let down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS::default(),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn native_press_macos(_key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
+    if !native_permissions()
+        .get("accessibility")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(NativeError);
+    }
+    let code = mac_key_name_code(_key)
+        .or_else(|| {
+            _key.chars()
+                .next()
+                .and_then(|ch| mac_key_code(ch.to_ascii_lowercase()))
+        })
+        .ok_or(NativeError)?;
+    for i in 0.._count {
+        if i > 0
+            && let Some(delay) = _delay_ms
+        {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        let _ = mac_post_key(code, 0);
+    }
+    Ok(())
+}
+
+fn native_press(_key: &str, _count: u32, _delay_ms: Option<u64>) -> Result<(), NativeError> {
+    #[cfg(target_os = "macos")]
+    {
+        return native_press_macos(_key, _count, _delay_ms);
+    }
+    #[cfg(windows)]
+    {
+        return native_press_windows(_key, _count, _delay_ms);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_input::native_press(_key, _count, _delay_ms);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (_key, _count, _delay_ms);
+        Err(NativeError)
     }
 }
 
