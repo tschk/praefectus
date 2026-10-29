@@ -822,6 +822,44 @@ impl std::error::Error for NativeError {}
 struct NativeRuntime;
 
 #[cfg(windows)]
+fn win_make_keybd(
+    vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+            ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+#[cfg(windows)]
+fn win_make_keybd_unicode(
+    scan: u16,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+            ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+#[cfg(windows)]
 fn win_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
@@ -843,36 +881,21 @@ fn win_hotkey(_keys: &[&str]) -> Result<(), NativeError> {
         })
         .collect::<Result<_, _>>()?;
 
-    let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    };
-
     for vk in &modifier_vks {
         let _ = unsafe {
             SendInput(
-                &[make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
+                &[win_make_keybd(*vk, KEYBD_EVENT_FLAGS::default())],
                 std::mem::size_of::<INPUT>() as i32,
             )
         };
     }
-    let down = make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
-    let up = make_keybd(action_vk, KEYEVENTF_KEYUP);
+    let down = win_make_keybd(action_vk, KEYBD_EVENT_FLAGS::default());
+    let up = win_make_keybd(action_vk, KEYEVENTF_KEYUP);
     let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
     for vk in modifier_vks.iter().rev() {
         let _ = unsafe {
             SendInput(
-                &[make_keybd(*vk, KEYEVENTF_KEYUP)],
+                &[win_make_keybd(*vk, KEYEVENTF_KEYUP)],
                 std::mem::size_of::<INPUT>() as i32,
             )
         };
@@ -1480,56 +1503,19 @@ impl NativeRuntime {
         {
             use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            };
-
             if _clear {
                 let ctrl_a = [
-                    make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
-                    make_keybd(VIRTUAL_KEY(0x41), KEYBD_EVENT_FLAGS::default()),
-                    make_keybd(VIRTUAL_KEY(0x41), KEYEVENTF_KEYUP),
-                    make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
+                    win_make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
+                    win_make_keybd(VIRTUAL_KEY(0x41), KEYBD_EVENT_FLAGS::default()),
+                    win_make_keybd(VIRTUAL_KEY(0x41), KEYEVENTF_KEYUP),
+                    win_make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
                 ];
                 let _ = unsafe { SendInput(&ctrl_a, std::mem::size_of::<INPUT>() as i32) };
             }
 
             for code_unit in _text.encode_utf16() {
-                let down = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VIRTUAL_KEY(0),
-                            wScan: code_unit,
-                            dwFlags: KEYEVENTF_UNICODE,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let up = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VIRTUAL_KEY(0),
-                            wScan: code_unit,
-                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
+                let down = win_make_keybd_unicode(code_unit, KEYEVENTF_UNICODE);
+                let up = win_make_keybd_unicode(code_unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
                 let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
                 if let Some(delay) = _delay_ms {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
@@ -1538,8 +1524,8 @@ impl NativeRuntime {
 
             if _press_return {
                 let enter = [
-                    make_keybd(VK_RETURN, KEYBD_EVENT_FLAGS::default()),
-                    make_keybd(VK_RETURN, KEYEVENTF_KEYUP),
+                    win_make_keybd(VK_RETURN, KEYBD_EVENT_FLAGS::default()),
+                    win_make_keybd(VK_RETURN, KEYEVENTF_KEYUP),
                 ];
                 let _ = unsafe { SendInput(&enter, std::mem::size_of::<INPUT>() as i32) };
             }
@@ -1599,30 +1585,8 @@ impl NativeRuntime {
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
                 }
-                let down = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYBD_EVENT_FLAGS::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
-                let up = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                };
+                let down = win_make_keybd(vk, KEYBD_EVENT_FLAGS::default());
+                let up = win_make_keybd(vk, KEYEVENTF_KEYUP);
                 let _ = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
             }
             return Ok(());
@@ -1705,25 +1669,11 @@ impl NativeRuntime {
             }
             drop(_guard);
 
-            let make_keybd = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            };
             let ctrl_v = [
-                make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
-                make_keybd(VIRTUAL_KEY(0x56), KEYBD_EVENT_FLAGS::default()),
-                make_keybd(VIRTUAL_KEY(0x56), KEYEVENTF_KEYUP),
-                make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
+                win_make_keybd(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
+                win_make_keybd(VIRTUAL_KEY(0x56), KEYBD_EVENT_FLAGS::default()),
+                win_make_keybd(VIRTUAL_KEY(0x56), KEYEVENTF_KEYUP),
+                win_make_keybd(VK_CONTROL, KEYEVENTF_KEYUP),
             ];
             let _ = unsafe { SendInput(&ctrl_v, std::mem::size_of::<INPUT>() as i32) };
             return Ok(());
