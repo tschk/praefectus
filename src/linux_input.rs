@@ -55,6 +55,18 @@ fn keysym_for_name(name: &str) -> Option<u32> {
     KEY_NAME_TO_KEYSYM.get(name).copied()
 }
 
+fn parse_keysym(key: &str) -> Option<u32> {
+    keysym_for_name(key).or_else(|| key.chars().next().map(character_to_keysym))
+}
+
+fn sleep_delay(delay_ms: Option<u64>) {
+    if let Some(delay) = delay_ms {
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+    }
+}
+
 fn character_to_keysym(ch: char) -> u32 {
     match ch {
         ' '..='~' => ch as u32,
@@ -390,11 +402,7 @@ fn x11_type_text(
                 .map_err(|_| NativeError)?;
             connection.flush().map_err(|_| NativeError)?;
         }
-        if let Some(delay) = delay_ms {
-            if delay > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-            }
-        }
+        sleep_delay(delay_ms);
     }
     if press_return {
         let return_keysym = 0xff0d;
@@ -428,11 +436,7 @@ fn portal_type_text(
         let keysym = character_to_keysym(ch);
         portal_notify_keyboard_keysym(&connection, &session_handle, keysym, 1)?;
         portal_notify_keyboard_keysym(&connection, &session_handle, keysym, 0)?;
-        if let Some(delay) = delay_ms {
-            if delay > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-            }
-        }
+        sleep_delay(delay_ms);
     }
     if press_return {
         portal_notify_keyboard_keysym(&connection, &session_handle, 0xff0d, 1)?;
@@ -459,19 +463,11 @@ pub(crate) fn native_press(
 fn x11_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
     let (connection, screen) = connect_x11()?;
     let root = connection.setup().roots[screen].root;
-    let keysym = keysym_for_name(key)
-        .unwrap_or_else(|| key.chars().next().map(character_to_keysym).unwrap_or(0));
-    if keysym == 0 {
-        return Err(NativeError);
-    }
+    let keysym = parse_keysym(key).ok_or(NativeError)?;
     let keycode = keysym_to_keycode(&connection, keysym)?;
     for i in 0..count {
         if i > 0 {
-            if let Some(delay) = delay_ms {
-                if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                }
-            }
+            sleep_delay(delay_ms);
         }
         connection
             .xtest_fake_input(2, keycode, 0, root, 0, 0, 0)
@@ -486,19 +482,11 @@ fn x11_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeE
 }
 
 fn portal_press(key: &str, count: u32, delay_ms: Option<u64>) -> Result<(), NativeError> {
-    let keysym = keysym_for_name(key)
-        .unwrap_or_else(|| key.chars().next().map(character_to_keysym).unwrap_or(0));
-    if keysym == 0 {
-        return Err(NativeError);
-    }
+    let keysym = parse_keysym(key).ok_or(NativeError)?;
     let (session_handle, connection) = ensure_portal_session()?;
     for i in 0..count {
         if i > 0 {
-            if let Some(delay) = delay_ms {
-                if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                }
-            }
+            sleep_delay(delay_ms);
         }
         portal_notify_keyboard_keysym(&connection, &session_handle, keysym, 1)?;
         portal_notify_keyboard_keysym(&connection, &session_handle, keysym, 0)?;
@@ -566,9 +554,7 @@ fn x11_hotkey(keys: &[&str]) -> Result<(), NativeError> {
     let root = connection.setup().roots[screen].root;
     let mut keycodes = Vec::with_capacity(keys.len());
     for key in keys {
-        let keysym = keysym_for_name(key)
-            .or_else(|| key.chars().next().map(character_to_keysym))
-            .ok_or(NativeError)?;
+        let keysym = parse_keysym(key).ok_or(NativeError)?;
         let keycode = keysym_to_keycode(&connection, keysym)?;
         keycodes.push(keycode);
     }
@@ -591,9 +577,7 @@ fn portal_hotkey(keys: &[&str]) -> Result<(), NativeError> {
     let (session_handle, connection) = ensure_portal_session()?;
     let mut keysyms = Vec::with_capacity(keys.len());
     for key in keys {
-        let keysym = keysym_for_name(key)
-            .or_else(|| key.chars().next().map(character_to_keysym))
-            .ok_or(NativeError)?;
+        let keysym = parse_keysym(key).ok_or(NativeError)?;
         keysyms.push(keysym);
     }
     for keysym in &keysyms {
