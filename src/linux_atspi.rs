@@ -1148,7 +1148,7 @@ impl LinuxAtspiBackend {
                     "accessibility target left its surface".to_string(),
                 ));
             }
-            current = StoredObject::from_ref(&parent)?;
+            current.update_from_ref(&parent)?;
         }
         Err(ProtocolError::StaleTarget(
             "accessibility ancestry limit exceeded".to_string(),
@@ -2053,6 +2053,16 @@ fn surface_states(states: StateSet) -> u64 {
 }
 
 impl StoredObject {
+    fn update_from_ref(&mut self, object: &ObjectRef) -> Result<(), ProtocolError> {
+        self.bus_name.clear();
+        self.bus_name.push_str(object.name_as_str().ok_or_else(|| {
+            ProtocolError::StaleTarget("accessibility object disappeared".to_string())
+        })?);
+        self.path.clear();
+        self.path.push_str(object.path_as_str());
+        self.validate()
+    }
+
     fn from_ref(object: &ObjectRef) -> Result<Self, ProtocolError> {
         let stored = Self {
             bus_name: object
