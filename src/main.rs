@@ -13,7 +13,12 @@ const EXIT_PROTOCOL: u8 = 3;
 
 fn main() -> ExitCode {
     let result = run(std::env::args().skip(1).collect());
-    let (value, exit) = match result {
+    let (value, exit) = format_result(result);
+    write_result(&value, exit)
+}
+
+fn format_result(result: Result<(serde_json::Value, u8), CliError>) -> (serde_json::Value, u8) {
+    match result {
         Ok((output, exit)) => (
             serde_json::to_value(SuccessEnvelope { ok: true, data: output }).unwrap_or_else(|_| {
                 serde_json::json!({"ok":false,"error":{"code":"serialization_error","message":"failed to serialize CLI output"}})
@@ -21,12 +26,16 @@ fn main() -> ExitCode {
             exit,
         ),
         Err(error) => (
-            serde_json::to_value(ErrorEnvelope::new(&error))
-                .unwrap_or_else(|_| serde_json::json!({"error":{"code":"serialization_error","message":"failed to serialize CLI error"}})),
+            serde_json::to_value(ErrorEnvelope::new(&error)).unwrap_or_else(|_| {
+                serde_json::json!({"ok":false,"error":{"code":"serialization_error","message":"failed to serialize CLI error"}})
+            }),
             error.exit,
         ),
-    };
-    match serde_json::to_writer(io::stdout().lock(), &value) {
+    }
+}
+
+fn write_result(value: &serde_json::Value, exit: u8) -> ExitCode {
+    match serde_json::to_writer(io::stdout().lock(), value) {
         Ok(()) => {
             println!();
             ExitCode::from(exit)
