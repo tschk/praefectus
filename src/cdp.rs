@@ -2552,16 +2552,15 @@ mod tests {
         }})
     }
 
-    fn live_ax(role: &str, name: &str, protected: bool, properties: Value) -> Value {
+    fn live_ax(role: &str, name: &str, protected: bool, properties: &[Value]) -> Value {
+        let mut props = vec![json!({"name":"protected","value":{"value":protected}})];
+        props.extend_from_slice(properties);
         json!({"nodes":[{
             "nodeId":"live-ax",
             "backendDOMNodeId":7,
             "role":{"value":role},
             "name":{"value":name},
-            "properties":[
-                {"name":"protected","value":{"value":protected}},
-                properties
-            ]
+            "properties": props
         }]})
     }
 
@@ -3279,7 +3278,7 @@ mod tests {
                 "textbox",
                 "secret",
                 true,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
         ]);
         let observed = executor
@@ -3306,7 +3305,7 @@ mod tests {
                 "button",
                 "Changed",
                 false,
-                json!({"name":"focusable","value":{"value":true}}),
+                &[json!({"name":"focusable","value":{"value":true}})],
             )),
         ]);
 
@@ -3407,7 +3406,7 @@ mod tests {
         let mut channel = executor.channel.lock().expect("channel");
         channel.responses.extend(invoke_pre_effect_responses(
             viewport(),
-            live_ax("button", "Submit", false, json!({})),
+            live_ax("button", "Submit", false, &[]),
         ));
         channel
             .responses
@@ -3466,7 +3465,7 @@ mod tests {
         let mut channel = executor.channel.lock().expect("channel");
         channel.responses.extend(invoke_pre_effect_responses(
             viewport(),
-            live_ax("button", "Submit", false, json!({})),
+            live_ax("button", "Submit", false, &[]),
         ));
         channel.responses.push_back(Err(CdpChannelError::AfterSend));
         drop(channel);
@@ -3492,19 +3491,19 @@ mod tests {
             "scale":1
         }});
         for (final_viewport, final_ax) in [
-            (viewport(), live_ax("button", "Cancel", false, json!({}))),
+            (viewport(), live_ax("button", "Cancel", false, &[])),
             (
                 viewport(),
                 live_ax(
                     "button",
                     "Submit",
                     false,
-                    json!({"name":"disabled","value":{"value":true}}),
+                    &[json!({"name":"disabled","value":{"value":true}})],
                 ),
             ),
             (
                 changed_viewport,
-                live_ax("button", "Submit", false, json!({})),
+                live_ax("button", "Submit", false, &[]),
             ),
         ] {
             let (error, methods) = rejected_invoke(final_viewport, final_ax);
@@ -3523,7 +3522,7 @@ mod tests {
         let mut channel = executor.channel.lock().expect("channel");
         channel.responses.extend(scroll_pre_effect_responses(
             7,
-            live_ax("list", "Feed", false, json!({})),
+            live_ax("list", "Feed", false, &[]),
         ));
         channel
             .responses
@@ -3591,7 +3590,7 @@ mod tests {
         let mut channel = executor.channel.lock().expect("channel");
         channel.responses.extend(scroll_pre_effect_responses(
             7,
-            live_ax("list", "Feed", false, json!({})),
+            live_ax("list", "Feed", false, &[]),
         ));
         channel
             .responses
@@ -3636,8 +3635,8 @@ mod tests {
     #[test]
     fn scroll_rejects_alternate_and_stale_targets_before_effect() {
         for (hit_backend_node_id, final_ax) in [
-            (8, live_ax("list", "Feed", false, json!({}))),
-            (7, live_ax("list", "Other", false, json!({}))),
+            (8, live_ax("list", "Feed", false, &[])),
+            (7, live_ax("list", "Other", false, &[])),
         ] {
             let (executor, resolved) = resolved_scroll();
             executor
@@ -3684,7 +3683,7 @@ mod tests {
             let mut channel = executor.channel.lock().expect("channel");
             channel.responses.extend(scroll_pre_effect_responses(
                 7,
-                live_ax("list", "Feed", false, json!({})),
+                live_ax("list", "Feed", false, &[]),
             ));
             channel.responses.push_back(effect);
             drop(channel);
@@ -3764,7 +3763,7 @@ mod tests {
                 "textbox",
                 "secret",
                 true,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
             Err(CdpChannelError::AfterSend),
         ]);
@@ -3819,7 +3818,7 @@ mod tests {
                 "textbox",
                 "secret",
                 true,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
             Ok(json!({"result":{"value":{"eligible":true}}})),
             Ok(probe(true, &value_hash, value.len())),
@@ -3887,7 +3886,7 @@ mod tests {
                 "textbox",
                 "secret",
                 false,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
             Ok(frame.clone()),
             Ok(object.clone()),
@@ -3898,7 +3897,7 @@ mod tests {
                 "textbox",
                 "secret",
                 false,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
             Ok(json!({"result":{"value":{"eligible":true}}})),
             Ok(probe(true, &value_hash, value.len())),
@@ -3910,7 +3909,7 @@ mod tests {
                 "textbox",
                 "secret",
                 false,
-                json!({"name":"editable","value":{"value":"plaintext"}}),
+                &[json!({"name":"editable","value":{"value":"plaintext"}})],
             )),
         ]);
         drop(channel);
