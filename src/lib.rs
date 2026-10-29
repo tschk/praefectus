@@ -6683,22 +6683,10 @@ impl OperationLedger {
         for record in self.records()? {
             match record {
                 LedgerRecord::Claim {
-                    operation_id: claimed_operation_id,
-                    action_hash,
-                    claimed_at_ms,
-                    action_name,
-                    delivery_route,
-                    session_isolation,
-                    interaction_mode,
+                    operation_id: ref claimed_operation_id,
+                    ..
                 } if claimed_operation_id == operation_id => {
-                    claim = Some((
-                        action_hash,
-                        claimed_at_ms,
-                        action_name,
-                        delivery_route,
-                        session_isolation,
-                        interaction_mode,
-                    ));
+                    claim = Some(record);
                 }
                 LedgerRecord::Terminal { acknowledgement }
                     if acknowledgement.operation_id == operation_id =>
@@ -6711,14 +6699,15 @@ impl OperationLedger {
         if terminal.is_some() {
             return Ok(terminal);
         }
-        let Some((
+        let Some(LedgerRecord::Claim {
             action_hash,
             claimed_at_ms,
             action_name,
             delivery_route,
             session_isolation,
             interaction_mode,
-        )) = claim
+            ..
+        }) = claim
         else {
             return Ok(None);
         };
