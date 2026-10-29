@@ -1252,23 +1252,29 @@ fn mac_post_event(event: &core_graphics::event::CGEvent) -> Result<(), NativeErr
         MAC_DELIVERY_PID.with(std::cell::Cell::get),
         global_input_allowed(),
     ) {
-        InputDelivery::PerProcess(pid) => {
-            #[cfg(feature = "skylight")]
-            {
-                use foreign_types::ForeignType;
-                if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
-                    return Ok(());
-                }
-            }
-            event.post_to_pid(pid);
-            Ok(())
-        }
+        InputDelivery::PerProcess(pid) => mac_post_event_to_pid(event, pid),
         InputDelivery::GlobalTap => {
             event.post(CGEventTapLocation::HID);
             Ok(())
         }
         InputDelivery::Refused => Err(NativeError),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_post_event_to_pid(
+    event: &core_graphics::event::CGEvent,
+    pid: i32,
+) -> Result<(), NativeError> {
+    #[cfg(feature = "skylight")]
+    {
+        use foreign_types::ForeignType;
+        if skylight::post_to_pid(pid, event.as_ptr().cast::<std::ffi::c_void>()) {
+            return Ok(());
+        }
+    }
+    event.post_to_pid(pid);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
