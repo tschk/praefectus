@@ -593,19 +593,22 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         #[cfg(windows)]
         {
-            let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-                    $acl = Get-Acl -LiteralPath $env:PRAEFECTUS_TEST_ACL -ErrorAction Stop
-                    'DACL protected: {0}' -f $acl.AreAccessRulesProtected
-                    foreach ($ace in $acl.Access) {
-                        'ACE: {0} | {1} | {2} | inherited={3} | inheritance={4} | propagation={5}' -f $ace.IdentityReference, $ace.AccessControlType, $ace.FileSystemRights, $ace.IsInherited, $ace.InheritanceFlags, $ace.PropagationFlags
-                    }
-                "#])
-                .env("PRAEFECTUS_TEST_ACL", directory.path())
+            let output = std::process::Command::new("icacls.exe")
+                .arg(directory.path())
                 .output()
                 .unwrap();
             assert!(output.status.success(), "ACL diagnostic failed");
-            eprint!("{}", String::from_utf8_lossy(&output.stdout));
+            let text = String::from_utf8_lossy(&output.stdout);
+            let path = directory.path().to_string_lossy();
+            let mut count = 0;
+            for line in text.lines() {
+                let ace = line.strip_prefix(path.as_ref()).unwrap_or(line).trim();
+                if ace.contains(":(") {
+                    eprintln!("ACE: {ace}");
+                    count += 1;
+                }
+            }
+            assert!(count > 0, "ACL diagnostic returned no ACEs");
         }
         let observation = observation();
         let expected = observation.target("e1").unwrap();
