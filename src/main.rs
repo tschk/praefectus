@@ -591,43 +591,11 @@ mod tests {
     #[test]
     fn signed_execution_reports_verification_failure_and_rejects_changed_fence() {
         let directory = tempfile::tempdir().unwrap();
-        let ledger = directory.path().join("success");
-        #[cfg(windows)]
-        {
-            eprintln!("ACL probe directory: {}", directory.path().display());
-            eprintln!("Engine ledger path: {}", ledger.display());
-            eprintln!(
-                "Engine ledger parent: {}",
-                ledger.parent().unwrap().display()
-            );
-            assert!(
-                directory.path().is_dir(),
-                "ACL probe directory does not exist"
-            );
-            let output = std::process::Command::new("icacls.exe")
-                .arg(directory.path())
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "ACL descriptor read failed");
-            let text = String::from_utf8_lossy(&output.stdout);
-            let path = directory.path().to_string_lossy();
-            let mut count = 0;
-            for line in text.lines() {
-                let ace = line.strip_prefix(path.as_ref()).unwrap_or(line).trim();
-                if ace.contains(":(") {
-                    eprintln!("ACE: {ace}");
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                eprintln!("ACL descriptor read succeeded; no ACEs found (empty or null DACL)");
-            }
-        }
         let observation = observation();
         let expected = observation.target("e1").unwrap();
         let (success, exit) = execute_input(
             input(observation.clone(), VerificationPolicy::None),
-            ledger,
+            directory.path().join("success"),
             TestExecutor {
                 expected: expected.clone(),
             },
