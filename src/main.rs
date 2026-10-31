@@ -48,6 +48,20 @@ struct CliError {
     message: String,
     exit: u8,
     report: Option<serde_json::Value>,
+    #[cfg(test)]
+    diagnostic: Option<String>,
+}
+
+impl std::fmt::Debug for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("CliError");
+        debug
+            .field("code", &self.code)
+            .field("message", &self.message);
+        #[cfg(test)]
+        debug.field("diagnostic", &self.diagnostic);
+        debug.finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -277,6 +291,8 @@ fn execute_input<E: praefectus::Executor + 'static>(
             message: "action did not succeed; reconcile before retrying".into(),
             exit: EXIT_PROTOCOL,
             report: Some(report),
+            #[cfg(test)]
+            diagnostic: None,
         })
     }
 }
@@ -438,6 +454,8 @@ fn usage(message: impl Into<String>) -> CliError {
         message: message.into(),
         exit: EXIT_USAGE,
         report: None,
+        #[cfg(test)]
+        diagnostic: None,
     }
 }
 
@@ -447,6 +465,8 @@ fn protocol(code: &'static str, _error: impl ToString) -> CliError {
         message: "protocol operation failed".to_string(),
         exit: EXIT_PROTOCOL,
         report: None,
+        #[cfg(test)]
+        diagnostic: Some(_error.to_string()),
     }
 }
 
@@ -580,7 +600,6 @@ mod tests {
                 expected: expected.clone(),
             },
         )
-        .ok()
         .unwrap();
         assert_eq!(exit, 0);
         assert_eq!(
