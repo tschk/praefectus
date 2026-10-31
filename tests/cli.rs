@@ -151,7 +151,7 @@ fn no_yolo_persists_global_input_restriction() {
 }
 
 #[test]
-fn execute_requires_a_trusted_library_host() {
+fn execute_requires_explicit_self_authorization() {
     let output = run(&["execute"], "{}");
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(error(&output)["error"]["code"], "usage");
@@ -159,9 +159,23 @@ fn execute_requires_a_trusted_library_host() {
         error(&output)["error"]["message"]
             .as_str()
             .expect("message")
-            .contains("host-injected trusted AuthorityVerifier")
+            .contains("--self-authorize-no-host-boundary")
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn execute_rejects_unfenced_and_malformed_inputs_without_echoing_them() {
+    for input in [
+        r#"{"tag":"e1","action":{"kind":"invoke"}}"#,
+        r#"{"observation":{},"tag":"e1","action":{"kind":"paste","text":"private-value"}}"#,
+    ] {
+        let output = run(&["execute", "--self-authorize-no-host-boundary"], input);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(error(&output)["ok"], false);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-value"));
+        assert!(output.stderr.is_empty());
+    }
 }
 
 #[test]

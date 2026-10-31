@@ -66,6 +66,7 @@ CLI path: `src/main.rs`, binary name `praefectus`. Existing commands:
 - `surfaces`
 - `observe`
 - `observe-surface SURFACE_ID`
+- `execute --self-authorize-no-host-boundary`, with an observation, tag, and action on stdin
 - `--no-yolo` on any command persists the global-input restriction
 - `allow-global-input` `[allow|deny|--no-yolo]`
 
@@ -77,7 +78,7 @@ Library path: `Engine::new(executor, ledger_path, authority)` in `src/lib.rs`. T
 
 ## Do not invent
 
-- Do not add, document, or demo a working `praefectus execute` CLI. `execute` is library-only and requires a host-injected trusted `AuthorityVerifier`.
+- Do not describe the self-signing CLI as an independent host-authority boundary. Trusted hosts inject their own verifier through the library.
 - Do not invent credentials, keys, signatures, issuer IDs, authority paths, or model-facing authority parameters.
 - Do not print secrets, screenshot bytes, typed text, clipboard contents, selectors, or backend-error detail.
 - Do not invent remote CDP endpoints, arbitrary JavaScript execution, or CLI/model CDP configuration.

@@ -1,12 +1,17 @@
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use ed25519_dalek::{Signer, SigningKey};
 use praefectus::{
-    CancellationToken, DenyAuthority, Engine, NativeExecutor, SurfaceRef, default_ledger_path,
-    global_input_allowance, persist_no_yolo,
+    AckState, Action, ActionRequest, AuthorityGrant, CancellationToken, DenyAuthority,
+    Ed25519AuthorityVerifier, Engine, InteractionMode, NativeExecutor, PROTOCOL_VERSION,
+    SafetyClass, SignedAuthority, SurfaceRef, TargetRef, Terminal, VerificationPolicy,
+    canonical_authority_bytes, default_ledger_path, global_input_allowance, normalized_action_hash,
+    persist_no_yolo, semantic::SemanticObservation,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const EXIT_USAGE: u8 = 2;
 const EXIT_PROTOCOL: u8 = 3;
@@ -42,6 +47,7 @@ struct CliError {
     code: &'static str,
     message: String,
     exit: u8,
+    report: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +66,8 @@ struct ErrorEnvelope<'a> {
 struct ErrorBody<'a> {
     code: &'static str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<&'a serde_json::Value>,
 }
 
 impl<'a> From<&'a CliError> for ErrorBody<'a> {
@@ -67,6 +75,7 @@ impl<'a> From<&'a CliError> for ErrorBody<'a> {
         Self {
             code: error.code,
             message: &error.message,
+            report: error.report.as_ref(),
         }
     }
 }
@@ -100,14 +109,21 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
             "usage: praefectus [--no-yolo] execute|status|capabilities|surfaces|observe|observe-surface|allow-global-input",
         ));
     };
+    let self_authorize = command == "execute"
+        && arguments
+            .iter()
+            .any(|argument| argument == "--self-authorize-no-host-boundary");
+    let arguments: Vec<String> = arguments
+        .iter()
+        .filter(|argument| command != "execute" || *argument != "--self-authorize-no-host-boundary")
+        .cloned()
+        .collect();
     let (ledger, positional, parsed_no_yolo) = parse_arguments(&arguments)?;
     if parsed_no_yolo {
         persist_no_yolo(true).map_err(|error| protocol("protocol_error", error))?;
     }
     match command {
-        "execute" => Err(usage(
-            "execute is library-only and requires a host-injected trusted AuthorityVerifier",
-        )),
+        "execute" => run_execute(positional, ledger, self_authorize),
         "status" => run_status(positional, ledger),
         "capabilities" => run_capabilities(positional, ledger),
         "observe" => run_observe(positional),
@@ -115,6 +131,153 @@ fn run(arguments: Vec<String>) -> Result<(serde_json::Value, u8), CliError> {
         "observe-surface" => run_observe_surface(positional),
         "allow-global-input" => run_allow_global_input(positional),
         _ => Err(usage(format!("unknown command: {command}"))),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteInput {
+    observation: SemanticObservation,
+    tag: String,
+    action: Action,
+    verification: Option<VerificationPolicy>,
+    interaction_mode: Option<InteractionMode>,
+}
+
+fn run_execute(
+    positional: Vec<&str>,
+    ledger: PathBuf,
+    self_authorize: bool,
+) -> Result<(serde_json::Value, u8), CliError> {
+    if !self_authorize || !positional.is_empty() {
+        return Err(usage(
+            "execute requires --self-authorize-no-host-boundary and JSON on stdin",
+        ));
+    }
+    let mut input = Vec::new();
+    io::stdin()
+        .lock()
+        .take(3 * 1024 * 1024 + 1)
+        .read_to_end(&mut input)
+        .map_err(|error| protocol("protocol_error", error))?;
+    if input.len() > 3 * 1024 * 1024 {
+        return Err(usage("execute input is too large"));
+    }
+    let input: ExecuteInput = serde_json::from_slice(&input)
+        .map_err(|_| usage("execute requires a valid action and fenced observation"))?;
+    execute_input(input, ledger, NativeExecutor::default())
+}
+
+fn execute_input<E: praefectus::Executor + 'static>(
+    input: ExecuteInput,
+    ledger: PathBuf,
+    executor: E,
+) -> Result<(serde_json::Value, u8), CliError> {
+    if !matches!(
+        input.action,
+        Action::Invoke
+            | Action::SetValue { .. }
+            | Action::TypeText { .. }
+            | Action::Press { .. }
+            | Action::Click { .. }
+            | Action::Hotkey { .. }
+            | Action::Paste { .. }
+            | Action::Move
+            | Action::Scroll { .. }
+            | Action::SelectText { .. }
+            | Action::PerformSecondaryAction { .. }
+    ) {
+        return Err(usage("unsupported execute action"));
+    }
+    let now = now_ms();
+    input
+        .observation
+        .validate(now)
+        .map_err(|error| protocol("observation_error", error))?;
+    let target = input
+        .observation
+        .target(&input.tag)
+        .map_err(|error| protocol("observation_error", error))?;
+    input
+        .observation
+        .resolve(&target, now)
+        .map_err(|error| protocol("observation_error", error))?;
+    let deadline = now
+        .saturating_add(20_000)
+        .min(input.observation.expires_at_ms);
+    let verification = match (&input.action, input.verification) {
+        (Action::SetValue { value }, None) => VerificationPolicy::TargetValueHash {
+            sha256: hex::encode(Sha256::digest(value.as_bytes())),
+        },
+        (_, verification) => verification.unwrap_or(VerificationPolicy::None),
+    };
+    let mut seed = [0_u8; 32];
+    getrandom::fill(&mut seed).map_err(|error| protocol("protocol_error", error))?;
+    let key = SigningKey::from_bytes(&seed);
+    let operation_id = format!("cli-{}", hex::encode(&key.verifying_key().to_bytes()[..16]));
+    let mut request = ActionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        action_version: PROTOCOL_VERSION,
+        target_version: PROTOCOL_VERSION,
+        verification_version: PROTOCOL_VERSION,
+        operation_id: operation_id.clone(),
+        subject: "cli-user".into(),
+        session_id: "cli-session".into(),
+        authority: SignedAuthority {
+            grant: AuthorityGrant {
+                protocol_version: PROTOCOL_VERSION,
+                issuer: "self-authorized-cli".into(),
+                key_id: "ephemeral".into(),
+                operation_id,
+                subject: "cli-user".into(),
+                session_id: "cli-session".into(),
+                risk: SafetyClass::External,
+                expires_at_ms: deadline,
+                policy_generation: "cli-v1".into(),
+                action_hash: String::new(),
+            },
+            signature: String::new(),
+        },
+        action: input.action,
+        target: TargetRef::Element { target },
+        interaction_mode: input
+            .interaction_mode
+            .unwrap_or(InteractionMode::Interactive),
+        deadline_at_ms: deadline,
+        verification,
+        safety: SafetyClass::External,
+    };
+    request.authority.grant.action_hash =
+        normalized_action_hash(&request).map_err(|error| protocol("protocol_error", error))?;
+    request.authority.signature = hex::encode(
+        key.sign(
+            &canonical_authority_bytes(&request.authority.grant)
+                .map_err(|error| protocol("protocol_error", error))?,
+        )
+        .to_bytes(),
+    );
+    let authority = Ed25519AuthorityVerifier::new([(
+        "self-authorized-cli".into(),
+        "ephemeral".into(),
+        "cli-v1".into(),
+        key.verifying_key(),
+    )])
+    .map_err(|error| protocol("protocol_error", error))?;
+    let report = Engine::new(executor, ledger, authority)
+        .execute(&request, &CancellationToken::default())
+        .map_err(|error| protocol("protocol_error", error))?;
+    let succeeded = matches!(report.acknowledgements.last().map(|ack| &ack.state),
+        Some(AckState::Terminal { terminal }) if matches!(terminal.as_ref(), Terminal::Succeeded { .. }));
+    let report = serialize(report)?;
+    if succeeded {
+        Ok((report, 0))
+    } else {
+        Err(CliError {
+            code: "execution_failed",
+            message: "action did not succeed; reconcile before retrying".into(),
+            exit: EXIT_PROTOCOL,
+            report: Some(report),
+        })
     }
 }
 
@@ -274,6 +437,7 @@ fn usage(message: impl Into<String>) -> CliError {
         code: "usage",
         message: message.into(),
         exit: EXIT_USAGE,
+        report: None,
     }
 }
 
@@ -282,12 +446,197 @@ fn protocol(code: &'static str, _error: impl ToString) -> CliError {
         code,
         message: "protocol operation failed".to_string(),
         exit: EXIT_PROTOCOL,
+        report: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use praefectus::semantic::{
+        Actionability, SemanticBackend, SemanticElement, SemanticProvenance,
+    };
+    use praefectus::{
+        ActionCapability, BackgroundSupport, Capabilities, DeliveryRoute, DispatchError,
+        DispatchReceipt, Evidence, Observation, ProtocolError, ResolvedTarget, SessionIsolation,
+    };
+
+    struct TestExecutor {
+        expected: praefectus::semantic::SemanticTargetRef,
+    }
+
+    impl praefectus::Executor for TestExecutor {
+        fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
+            Ok(Capabilities {
+                platform: "test".into(),
+                backend: "test".into(),
+                session_isolation: SessionIsolation::SharedDesktop,
+                supported_actions: vec!["invoke".into()],
+                action_capabilities: vec![ActionCapability {
+                    action: "invoke".into(),
+                    delivery_route: DeliveryRoute::TargetAddressed,
+                    background_support: BackgroundSupport::Guarded,
+                }],
+                permissions: Default::default(),
+                display_geometry_hash: "c".repeat(64),
+            })
+        }
+
+        fn observe(&self, _: &TargetRef) -> Result<Observation, ProtocolError> {
+            Ok(Observation {
+                evidence: Evidence {
+                    observation_hash: "same".into(),
+                    target_fingerprint_hash: Some(self.expected.fingerprint_hash.clone()),
+                    display_geometry_hash: "c".repeat(64),
+                    observed_at_ms: now_ms(),
+                },
+                element: None,
+                state: serde_json::json!({}),
+            })
+        }
+
+        fn resolve(&self, target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
+            if matches!(target, TargetRef::Element { target } if *target == self.expected) {
+                Ok(ResolvedTarget::None)
+            } else {
+                Err(ProtocolError::StaleTarget("target changed".into()))
+            }
+        }
+
+        fn dispatch(
+            &self,
+            _: &Action,
+            _: &ResolvedTarget,
+            _: &VerificationPolicy,
+            _: &CancellationToken,
+            _: i64,
+        ) -> Result<DispatchReceipt, DispatchError> {
+            Ok(DispatchReceipt {
+                backend: "test".into(),
+                fallback_chain: vec![],
+            })
+        }
+    }
+
+    fn observation() -> SemanticObservation {
+        let now = now_ms();
+        SemanticObservation {
+            protocol_version: PROTOCOL_VERSION,
+            observation_id: "a".repeat(64),
+            generation: 1,
+            provenance: SemanticProvenance {
+                backend: SemanticBackend::Accessibility,
+                backend_name: "test".into(),
+                process_id: 42,
+                process_generation: "generation".into(),
+                window_id: "window".into(),
+                document_id: None,
+                display_geometry_hash: "c".repeat(64),
+                host_opt_ins: vec![],
+            },
+            observed_at_ms: now - 1,
+            expires_at_ms: now + 20_000,
+            truncated: false,
+            elements: vec![SemanticElement {
+                tag: "e1".into(),
+                element_id: "b".repeat(64),
+                parent_id: None,
+                fingerprint_hash: "d".repeat(64),
+                role: "button".into(),
+                name: None,
+                bounds: None,
+                actionability: Actionability {
+                    visible: true,
+                    enabled: true,
+                    unambiguous: true,
+                    stable: true,
+                    receives_events: true,
+                    invokable: true,
+                    editable: false,
+                },
+            }],
+        }
+    }
+
+    fn input(observation: SemanticObservation, verification: VerificationPolicy) -> ExecuteInput {
+        ExecuteInput {
+            observation,
+            tag: "e1".into(),
+            action: Action::Invoke,
+            verification: Some(verification),
+            interaction_mode: None,
+        }
+    }
+
+    #[test]
+    fn signed_execution_reports_verification_failure_and_rejects_changed_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let observation = observation();
+        let expected = observation.target("e1").unwrap();
+        let (success, exit) = execute_input(
+            input(observation.clone(), VerificationPolicy::None),
+            directory.path().join("success"),
+            TestExecutor {
+                expected: expected.clone(),
+            },
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(exit, 0);
+        assert_eq!(
+            success["acknowledgements"][2]["state"]["terminal"]["kind"],
+            "succeeded"
+        );
+        let error = execute_input(
+            input(observation.clone(), VerificationPolicy::SnapshotChanged),
+            directory.path().join("first"),
+            TestExecutor {
+                expected: expected.clone(),
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.exit, 3);
+        let envelope = serde_json::to_value(ErrorEnvelope::new(&error)).unwrap();
+        assert_eq!(envelope["ok"], false);
+        let terminal = &envelope["error"]["report"]["acknowledgements"][2]["state"]["terminal"];
+        assert_eq!(terminal["kind"], "outcome_unknown");
+        assert_eq!(terminal["receipt"]["effect"], "executed_unverified");
+        assert_eq!(terminal["receipt"]["delivery_route"], "target_addressed");
+
+        let mut changed = observation.clone();
+        changed.elements[0].fingerprint_hash = "e".repeat(64);
+        let error = execute_input(
+            input(changed, VerificationPolicy::None),
+            directory.path().join("second"),
+            TestExecutor {
+                expected: expected.clone(),
+            },
+        )
+        .err()
+        .unwrap();
+        let report = error.report.unwrap();
+        let terminal = &report["acknowledgements"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["state"]["terminal"];
+        assert_eq!(terminal["kind"], "rejected");
+        assert_eq!(terminal["code"], "stale_target");
+
+        let mut stale = observation;
+        stale.expires_at_ms = now_ms() - 1;
+        stale.observed_at_ms = stale.expires_at_ms - 1_000;
+        let error = execute_input(
+            input(stale, VerificationPolicy::None),
+            directory.path().join("third"),
+            TestExecutor { expected },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "observation_error");
+        assert!(error.report.is_none());
+    }
 
     fn args(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()

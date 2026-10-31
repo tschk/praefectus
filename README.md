@@ -15,7 +15,7 @@ cargo run --example capabilities
 
 `capabilities` returns the native executor's advertised platform, backend, session isolation, and actions. `surfaces` lists bounded opaque native surface references when observation is available. `status` returns the durable terminal acknowledgement when one exists. The library hello in [`examples/capabilities.rs`](examples/capabilities.rs) constructs `Engine` with `NativeExecutor` and `DenyAuthority` and does not execute an action.
 
-The standalone CLI has no `execute` command: a same-user process cannot establish an independent host-authority boundary from a caller-selected file. Trusted hosts execute through the library with an injected `Ed25519AuthorityVerifier`.
+The standalone CLI can execute a fenced action only with explicit self-authorization. A self-signing same-user CLI establishes no independent host-authority boundary, including when it reads a caller-selected file. Trusted hosts should still execute through the library with their own injected `Ed25519AuthorityVerifier`.
 
 ## Trust model
 
@@ -41,7 +41,9 @@ cargo run -- allow-global-input allow
 
 `observe` returns one bounded semantic accessibility snapshot from the active surface with short tags such as `e1`; a trusted host resolves a selected tag to its fully fenced `SemanticTargetRef` through the library. `surfaces` lists bounded opaque native surface references, and `observe-surface` observes one exact host-selected surface without activating it. Observation commands use a 30-second deadline and return `observation_error` with exit code `3` when observation is unavailable. `status` returns the durable terminal acknowledgement when one exists.
 
-`execute` is intentionally unavailable in the standalone CLI because a same-user process cannot establish an independent host-authority boundary from a caller-selected file. Trusted hosts execute through the library with an injected `Ed25519AuthorityVerifier`. Screenshot bytes, typed text, clipboard contents, selectors, credentials, and backend detail are excluded from trajectory logs and plugin results.
+`execute --self-authorize-no-host-boundary` reads one JSON object from stdin with `observation` (the `data` from a recent `observe` or `observe-surface` response), `tag` (a short tag from that exact observation), and `action` (a protocol action object). Optional `interaction_mode` defaults to `interactive`; optional `verification` defaults to `none`, except `set_value`, which defaults to a hash of the supplied value. For example, select an observed tag, then send `{"observation": OBSERVATION, "tag": "e1", "action": {"kind": "invoke"}}` on stdin. `OBSERVATION` represents the actual observation object, not a literal JSON value. The snapshot expires quickly and the native backend revalidates its stored fence and live target before dispatch. Do not reuse a tag with a different snapshot.
+
+The command supports `invoke`, `set_value`, `type_text`, `press`, `click`, `hotkey`, `paste`, `move`, `scroll`, `select_text`, and `perform_secondary_action`, subject to native platform capabilities. The action object uses the library's strict protocol fields. The command generates an ephemeral key, signs one short-lived grant bound to the complete request, and verifies it using `Ed25519AuthorityVerifier`. This self-signing same-user CLI establishes no independent host-authority boundary; trusted hosts should inject their own verifier through the library. It never retries an action. A successful terminal returns the full report in `data`; a non-success terminal returns exit 3 with the full report in `error.report`, including `outcome_unknown` when verification cannot establish the result. Reconcile the actual state before any retry. Screenshot bytes, typed text, clipboard contents, selectors, credentials, and backend detail are excluded from output and trajectory logs.
 
 ## Library
 
