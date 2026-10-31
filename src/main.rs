@@ -591,6 +591,22 @@ mod tests {
     #[test]
     fn signed_execution_reports_verification_failure_and_rejects_changed_fence() {
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+                    $acl = Get-Acl -LiteralPath $env:PRAEFECTUS_TEST_ACL -ErrorAction Stop
+                    'DACL protected: {0}' -f $acl.AreAccessRulesProtected
+                    foreach ($ace in $acl.Access) {
+                        'ACE: {0} | {1} | {2} | inherited={3} | inheritance={4} | propagation={5}' -f $ace.IdentityReference, $ace.AccessControlType, $ace.FileSystemRights, $ace.IsInherited, $ace.InheritanceFlags, $ace.PropagationFlags
+                    }
+                "#])
+                .env("PRAEFECTUS_TEST_ACL", directory.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "ACL diagnostic failed");
+            eprint!("{}", String::from_utf8_lossy(&output.stdout));
+        }
         let observation = observation();
         let expected = observation.target("e1").unwrap();
         let (success, exit) = execute_input(
