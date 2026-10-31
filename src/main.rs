@@ -595,7 +595,7 @@ mod tests {
         let expected = observation.target("e1").unwrap();
         let (success, exit) = execute_input(
             input(observation.clone(), VerificationPolicy::None),
-            directory.path().join("success"),
+            directory.path().join("state").join("success"),
             TestExecutor {
                 expected: expected.clone(),
             },
@@ -608,7 +608,7 @@ mod tests {
         );
         let error = execute_input(
             input(observation.clone(), VerificationPolicy::SnapshotChanged),
-            directory.path().join("first"),
+            directory.path().join("state").join("first"),
             TestExecutor {
                 expected: expected.clone(),
             },
@@ -627,7 +627,7 @@ mod tests {
         changed.elements[0].fingerprint_hash = "e".repeat(64);
         let error = execute_input(
             input(changed, VerificationPolicy::None),
-            directory.path().join("second"),
+            directory.path().join("state").join("second"),
             TestExecutor {
                 expected: expected.clone(),
             },
@@ -648,7 +648,7 @@ mod tests {
         stale.observed_at_ms = stale.expires_at_ms - 1_000;
         let error = execute_input(
             input(stale, VerificationPolicy::None),
-            directory.path().join("third"),
+            directory.path().join("state").join("third"),
             TestExecutor { expected },
         )
         .err()
