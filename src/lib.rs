@@ -3334,6 +3334,39 @@ fn mac_current_focused_window(
 }
 
 #[cfg(target_os = "macos")]
+fn mac_focused_surface_window(
+    focused: &AxElement,
+    focused_pid: i32,
+    surfaces: &[(i32, i64, AxElement)],
+) -> Result<AxElement, NativeError> {
+    use accessibility_sys::{AXUIElementGetPid, kAXErrorSuccess};
+
+    if surfaces
+        .iter()
+        .any(|(_, _, window)| window.identity_eq(focused))
+    {
+        return focused.retained();
+    }
+    // A modal sheet can be AXFocusedWindow without appearing in AXWindows. Resolve only
+    // its immediate owning window; arbitrary ancestors must not become focus claims.
+    if focused.string("AXRole").as_deref() != Some("AXSheet") {
+        return Err(NativeError);
+    }
+    let owner = focused.element("AXParent")?;
+    if owner.string("AXRole").as_deref() != Some("AXWindow") {
+        return Err(NativeError);
+    }
+    let mut owner_pid = 0;
+    owner.prepare()?;
+    if unsafe { AXUIElementGetPid(owner.0, &mut owner_pid) } != kAXErrorSuccess
+        || owner_pid != focused_pid
+    {
+        return Err(NativeError);
+    }
+    Ok(owner)
+}
+
+#[cfg(target_os = "macos")]
 fn mac_frontmost_window(
     cancellation: &CancellationToken,
     deadline_at_ms: i64,
@@ -3350,16 +3383,21 @@ fn mac_frontmost_window(
     {
         return Err(NativeError);
     }
-    // CG stacking order includes utility panels; only the exact AX-focused onscreen surface qualifies.
+    let candidate = mac_focused_surface_window(&focused, focused_pid, &surfaces)?;
+    // CG stacking order includes utility panels; only an exact, unique focus match qualifies.
     let selected = unique_focused_surface(
         surfaces
             .iter()
-            .map(|(pid, _, window)| *pid == focused_pid && window.identity_eq(&focused)),
+            .map(|(pid, _, window)| *pid == focused_pid && window.identity_eq(&candidate)),
     )?;
     let current = mac_current_focused_window(&surfaces, cancellation, deadline_at_ms)?;
-    if !current.identity_eq(&focused) {
+    // Recheck the original focus too: two different sheets with one owner are not the same context.
+    if !current.identity_eq(&focused)
+        || !mac_focused_surface_window(&current, focused_pid, &surfaces)?.identity_eq(&candidate)
+    {
         return Err(NativeError);
     }
+    mac_native_boundary(cancellation, deadline_at_ms)?;
     Ok(surfaces.swap_remove(selected).2)
 }
 
@@ -8309,6 +8347,45 @@ mod focused_surface_tests {
         );
         assert!(unique_focused_surface([false, false].into_iter()).is_err());
         assert!(unique_focused_surface([true, true].into_iter()).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Requires AX permission and a focused AXSheet absent from AXWindows; open FaceTime's New composer"]
+    fn unenumerated_focused_sheet_resolves_to_exact_owner() {
+        use super::{
+            CancellationToken, mac_current_focused_window, mac_frontmost_window,
+            mac_shared_desktop_context_hash, mac_surface_windows, now_ms,
+        };
+
+        let cancellation = CancellationToken::default();
+        let deadline = now_ms() + 20_000;
+        let surfaces = mac_surface_windows(&cancellation, deadline).unwrap();
+        let focused = mac_current_focused_window(&surfaces, &cancellation, deadline).unwrap();
+        assert_eq!(focused.string("AXRole").as_deref(), Some("AXSheet"));
+        assert!(
+            surfaces
+                .iter()
+                .all(|(_, _, window)| !window.identity_eq(&focused))
+        );
+        let owner = focused.element("AXParent").unwrap();
+        assert_eq!(owner.string("AXRole").as_deref(), Some("AXWindow"));
+        assert_eq!(
+            surfaces
+                .iter()
+                .filter(|(_, _, window)| window.identity_eq(&owner))
+                .count(),
+            1
+        );
+
+        let resolved = mac_frontmost_window(&cancellation, deadline).unwrap();
+        assert!(resolved.identity_eq(&owner));
+        assert!(
+            mac_current_focused_window(&surfaces, &cancellation, deadline)
+                .unwrap()
+                .identity_eq(&focused)
+        );
+        assert!(mac_shared_desktop_context_hash(&cancellation, deadline).is_ok());
     }
 }
 
