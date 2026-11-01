@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signer, SigningKey};
 use praefectus::{
     AckState, Action, ActionRequest, ApplicationOperation, AuthorityGrant, CancellationToken,
-    Ed25519AuthorityVerifier, Engine, InteractionMode, NativeExecutor, PROTOCOL_VERSION,
+    Ed25519AuthorityVerifier, Engine, Executor, InteractionMode, NativeExecutor, PROTOCOL_VERSION,
     SafetyClass, SignedAuthority, SurfaceRef, TargetRef, Terminal, VerificationPolicy,
     canonical_authority_bytes, normalized_action_hash,
 };
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expected = match command {
         "permissions" | "observe" | "activate" => 2,
         "invoke" | "commit-destination" => 6,
-        "set-destination" | "type-destination" => 7,
+        "set-destination" | "type-destination" | "read-destination" => 7,
         _ => return Err("unsupported command; no effect dispatched".into()),
     };
     if args.len() != expected {
@@ -160,12 +160,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::json!({"kind":"selected_target", "surface":args[2], "observation_id":observation.observation_id, "element":element})
         );
+        if command == "read-destination" {
+            let readback =
+                executor.observe_with_boundary(&target, &cancellation, now_ms()? + 15_000)?;
+            let expected = hex::encode(Sha256::digest(args[6].as_bytes()));
+            let matches = readback
+                .state
+                .get("value_hash")
+                .and_then(serde_json::Value::as_str)
+                == Some(expected.as_str());
+            println!(
+                "{}",
+                serde_json::json!({"kind":"destination_readback", "matches_approved_destination":matches, "state":readback.state})
+            );
+            if !matches {
+                return Err(
+                    "destination readback is missing or does not match; do not dial".into(),
+                );
+            }
+            return Ok(());
+        }
         let (action, verification) = match command {
             "invoke" if actionable.invokable => (Action::Invoke, VerificationPolicy::None),
             "set-destination" | "type-destination" if actionable.editable => {
                 let value = args[6].clone();
-                let verification = VerificationPolicy::TargetValueHash {
-                    sha256: hex::encode(Sha256::digest(value.as_bytes())),
+                let verification = if command == "set-destination" {
+                    VerificationPolicy::TargetValueHash {
+                        sha256: hex::encode(Sha256::digest(value.as_bytes())),
+                    }
+                } else {
+                    // TypeText requires independent readback before committing the destination.
+                    VerificationPolicy::None
                 };
                 let action = if command == "set-destination" {
                     Action::SetValue { value }
@@ -189,13 +214,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             _ => return Err("target does not support the requested action".into()),
         };
-        (
-            action,
-            target,
-            verification,
-            InteractionMode::BackgroundOnly,
-            SafetyClass::External,
-        )
+        let mode = if matches!(&action, Action::TypeText { .. } | Action::Press { .. }) {
+            InteractionMode::Interactive
+        } else {
+            InteractionMode::BackgroundOnly
+        };
+        (action, target, verification, mode, SafetyClass::External)
     };
     let now = now_ms()?;
     let operation_id = format!(
