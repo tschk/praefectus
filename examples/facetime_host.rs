@@ -13,6 +13,8 @@ use praefectus::{
 use sha2::{Digest, Sha256};
 
 const FACETIME: &str = "/System/Applications/FaceTime.app/Contents/MacOS/FaceTime";
+const FACETIME_NOTIFICATION: &str = "/System/Library/ExtensionKit/Extensions/FaceTimeNotificationExtension.appex/Contents/MacOS/FaceTimeNotificationExtension";
+const FACETIME_NOTIFICATION_BRIDGE: &str = "/System/Library/PrivateFrameworks/FaceTimeNotificationViewBridge.framework/Versions/A/XPCServices/FaceTimeNotificationViewBridgeService.xpc/Contents/MacOS/FaceTimeNotificationViewBridgeService";
 
 fn approve_destination(configured: Option<&str>, destination: &str) -> Result<(), &'static str> {
     let approved: Vec<_> = configured
@@ -40,7 +42,11 @@ fn is_facetime(pid: u32) -> Result<bool, Box<dyn std::error::Error>> {
     let process = std::process::Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()?;
-    Ok(process.status.success() && String::from_utf8(process.stdout)?.trim() == FACETIME)
+    Ok(process.status.success()
+        && matches!(
+            String::from_utf8(process.stdout)?.trim(),
+            FACETIME | FACETIME_NOTIFICATION | FACETIME_NOTIFICATION_BRIDGE
+        ))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
