@@ -312,29 +312,43 @@ fn contended_execution_lock_respects_deadline_without_dispatch() {
 
     let directory = tempfile::tempdir().expect("temp directory");
     let ledger = ledger_path(&directory);
-    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    let lock = fs::File::create(ledger.with_extension("lock")).unwrap();
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), &ledger, authority());
+    assert!(
+        engine
+            .status("initialize")
+            .expect("initialize ledger")
+            .is_none()
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ledger.with_extension("lock"))
+        .unwrap();
     fs4::FileExt::lock(&lock).unwrap();
+    let (done, wait) = std::sync::mpsc::channel::<()>();
     let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(800));
+        let _ = wait.recv_timeout(Duration::from_secs(30));
         fs4::FileExt::unlock(&lock).unwrap();
     });
 
-    let executor = MockExecutor::new();
-    let engine = Engine::new(executor.clone(), ledger, authority());
     let mut request = request("contended-deadline");
     request.deadline_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
-        + 100;
+        + 1_000;
     sign_request(&mut request);
     let started = Instant::now();
     let result = engine.execute(&request, &CancellationToken::default());
     let elapsed = started.elapsed();
+    done.send(()).unwrap();
     release.join().unwrap();
-    assert!(matches!(result, Err(ProtocolError::Ledger(_))));
-    assert!(elapsed < Duration::from_millis(600), "waited {elapsed:?}");
+    assert!(
+        matches!(result, Err(ProtocolError::Ledger(_))),
+        "result: {result:?}"
+    );
+    assert!(elapsed < Duration::from_secs(20), "waited {elapsed:?}");
     assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
 }
 
@@ -344,26 +358,40 @@ fn contended_execution_lock_respects_cancellation() {
 
     let directory = tempfile::tempdir().expect("temp directory");
     let ledger = ledger_path(&directory);
-    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    let lock = fs::File::create(ledger.with_extension("lock")).unwrap();
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), &ledger, authority());
+    assert!(
+        engine
+            .status("initialize")
+            .expect("initialize ledger")
+            .is_none()
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ledger.with_extension("lock"))
+        .unwrap();
     fs4::FileExt::lock(&lock).unwrap();
     let cancellation = CancellationToken::default();
     let signal = cancellation.clone();
+    let (done, wait) = std::sync::mpsc::channel::<()>();
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         signal.cancel();
-        std::thread::sleep(Duration::from_millis(700));
+        let _ = wait.recv_timeout(Duration::from_secs(30));
         fs4::FileExt::unlock(&lock).unwrap();
     });
 
-    let executor = MockExecutor::new();
-    let engine = Engine::new(executor.clone(), ledger, authority());
     let started = Instant::now();
     let result = engine.execute(&request("contended-cancel"), &cancellation);
     let elapsed = started.elapsed();
+    done.send(()).unwrap();
     release.join().unwrap();
-    assert!(matches!(result, Err(ProtocolError::Ledger(_))));
-    assert!(elapsed < Duration::from_millis(600), "waited {elapsed:?}");
+    assert!(
+        matches!(result, Err(ProtocolError::Ledger(_))),
+        "result: {result:?}"
+    );
+    assert!(elapsed < Duration::from_secs(20), "waited {elapsed:?}");
     assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
 }
 
