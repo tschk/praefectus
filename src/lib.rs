@@ -4185,6 +4185,7 @@ pub enum LedgerDecision {
 /// Host-owned durable record of which operations were dispatched and how they ended.
 pub trait OutcomeLedger: Send + Sync {
     /// Grants permission to dispatch the key exactly once, or resolves it from the record.
+    /// Recovery may call this for an existing local claim without dispatching, even if granted.
     fn begin(&self, key: &OutcomeKey) -> Result<LedgerDecision, ProtocolError>;
     /// Durably records the terminal outcome of a key that [`OutcomeLedger::begin`] granted.
     fn record(&self, key: &OutcomeKey, terminal: &Terminal) -> Result<(), ProtocolError>;
@@ -4426,13 +4427,17 @@ impl<E: Executor> Engine<E> {
             operation_id: request.operation_id.clone(),
             action_hash: action_hash.clone(),
         };
-        let _operation_guard = self.ledger.execution_lock()?;
+        let _operation_guard = self
+            .ledger
+            .execution_lock(Some((cancellation, effect_deadline_at_ms)))?;
         self.ledger.repair_tail()?;
         match self
             .ledger
             .claim(request, &action_hash, session_isolation)?
         {
             ClaimResult::Replay(mut acknowledgement) => {
+                self.ledger
+                    .reconcile_interrupted(&mut acknowledgement, self.outcomes.as_ref())?;
                 acknowledgement.replayed = true;
                 return Ok(ExecuteReport {
                     acknowledgements: vec![*acknowledgement],
@@ -4840,7 +4845,7 @@ impl<E: Executor> Engine<E> {
                 "invalid operation_id".to_string(),
             ));
         }
-        self.ledger.status(operation_id)
+        self.ledger.status(operation_id, self.outcomes.as_ref())
     }
 
     pub fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
@@ -6611,12 +6616,15 @@ impl OperationLedger {
         Self { path }
     }
 
-    fn execution_lock(&self) -> Result<LedgerLock, ProtocolError> {
-        acquire_ledger_lock(&self.path.with_extension("lock"))
+    fn execution_lock(
+        &self,
+        boundary: Option<(&CancellationToken, i64)>,
+    ) -> Result<LedgerLock, ProtocolError> {
+        acquire_ledger_lock(&self.path.with_extension("lock"), boundary)
     }
 
     fn trajectory_lock(&self) -> Result<LedgerLock, ProtocolError> {
-        acquire_ledger_lock(&self.path.with_extension("trajectory.lock"))
+        acquire_ledger_lock(&self.path.with_extension("trajectory.lock"), None)
     }
 
     fn repair_tail(&self) -> Result<(), ProtocolError> {
@@ -6715,8 +6723,35 @@ impl OperationLedger {
         acknowledgement
     }
 
-    fn status(&self, operation_id: &str) -> Result<Option<ActionAck>, ProtocolError> {
-        let _guard = self.execution_lock()?;
+    fn reconcile_interrupted(
+        &self,
+        acknowledgement: &mut ActionAck,
+        outcomes: &dyn OutcomeLedger,
+    ) -> Result<(), ProtocolError> {
+        if matches!(&acknowledgement.state, AckState::Terminal { terminal }
+            if matches!(terminal.as_ref(), Terminal::OutcomeUnknown { message, .. }
+                if *message == interrupted_outcome_message()))
+        {
+            let key = OutcomeKey {
+                operation_id: acknowledgement.operation_id.clone(),
+                action_hash: acknowledgement.action_hash.clone(),
+            };
+            if let LedgerDecision::Recorded(terminal) = outcomes.begin(&key)? {
+                acknowledgement.state = AckState::Terminal {
+                    terminal: Box::new(terminal),
+                };
+                self.finish(acknowledgement)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn status(
+        &self,
+        operation_id: &str,
+        outcomes: &dyn OutcomeLedger,
+    ) -> Result<Option<ActionAck>, ProtocolError> {
+        let _guard = self.execution_lock(None)?;
         self.repair_tail()?;
         let mut claim = None;
         let mut terminal = None;
@@ -6748,8 +6783,9 @@ impl OperationLedger {
                 _ => {}
             }
         }
-        if terminal.is_some() {
-            return Ok(terminal);
+        if let Some(mut acknowledgement) = terminal {
+            self.reconcile_interrupted(&mut acknowledgement, outcomes)?;
+            return Ok(Some(acknowledgement));
         }
         let Some((
             action_hash,
@@ -6763,7 +6799,11 @@ impl OperationLedger {
             return Ok(None);
         };
         let finished_at_ms = now_ms();
-        let acknowledgement = generate_interrupted_ack(InterruptedAckConfig {
+        let key = OutcomeKey {
+            operation_id: operation_id.to_string(),
+            action_hash: action_hash.clone(),
+        };
+        let mut acknowledgement = generate_interrupted_ack(InterruptedAckConfig {
             operation_id,
             action_hash,
             claimed_at_ms,
@@ -6773,6 +6813,11 @@ impl OperationLedger {
             session_isolation,
             interaction_mode,
         });
+        if let LedgerDecision::Recorded(terminal) = outcomes.begin(&key)? {
+            acknowledgement.state = AckState::Terminal {
+                terminal: Box::new(terminal),
+            };
+        }
         self.finish(&acknowledgement)?;
         Ok(Some(acknowledgement))
     }
@@ -6870,7 +6915,10 @@ impl OperationLedger {
     }
 }
 
-fn acquire_ledger_lock(path: &Path) -> Result<LedgerLock, ProtocolError> {
+fn acquire_ledger_lock(
+    path: &Path,
+    boundary: Option<(&CancellationToken, i64)>,
+) -> Result<LedgerLock, ProtocolError> {
     require_private_storage()?;
     if let Some(parent) = path.parent() {
         ensure_directory(parent, false)?;
@@ -6888,7 +6936,25 @@ fn acquire_ledger_lock(path: &Path) -> Result<LedgerLock, ProtocolError> {
     if !existed {
         sync_parent(path)?;
     }
-    fs4::FileExt::lock(&file)?;
+    if let Some((cancellation, deadline_at_ms)) = boundary {
+        loop {
+            match fs4::FileExt::try_lock(&file) {
+                Ok(()) => break,
+                Err(fs4::TryLockError::Error(error)) => return Err(error.into()),
+                Err(fs4::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    if cancellation.is_cancelled() || now_ms() >= deadline_at_ms {
+                        return Err(ProtocolError::Ledger(
+                            "ledger lock wait interrupted; another attempt may have an unknown outcome"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    } else {
+        fs4::FileExt::lock(&file)?;
+    }
     Ok(LedgerLock(file))
 }
 

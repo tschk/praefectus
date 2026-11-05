@@ -307,6 +307,67 @@ fn ledger_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 #[test]
+fn contended_execution_lock_respects_deadline_without_dispatch() {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let directory = tempfile::tempdir().expect("temp directory");
+    let ledger = ledger_path(&directory);
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let lock = fs::File::create(ledger.with_extension("lock")).unwrap();
+    fs4::FileExt::lock(&lock).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        fs4::FileExt::unlock(&lock).unwrap();
+    });
+
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger, authority());
+    let mut request = request("contended-deadline");
+    request.deadline_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 100;
+    sign_request(&mut request);
+    let started = Instant::now();
+    let result = engine.execute(&request, &CancellationToken::default());
+    let elapsed = started.elapsed();
+    release.join().unwrap();
+    assert!(matches!(result, Err(ProtocolError::Ledger(_))));
+    assert!(elapsed < Duration::from_millis(600), "waited {elapsed:?}");
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn contended_execution_lock_respects_cancellation() {
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().expect("temp directory");
+    let ledger = ledger_path(&directory);
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let lock = fs::File::create(ledger.with_extension("lock")).unwrap();
+    fs4::FileExt::lock(&lock).unwrap();
+    let cancellation = CancellationToken::default();
+    let signal = cancellation.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        signal.cancel();
+        std::thread::sleep(Duration::from_millis(700));
+        fs4::FileExt::unlock(&lock).unwrap();
+    });
+
+    let executor = MockExecutor::new();
+    let engine = Engine::new(executor.clone(), ledger, authority());
+    let started = Instant::now();
+    let result = engine.execute(&request("contended-cancel"), &cancellation);
+    let elapsed = started.elapsed();
+    release.join().unwrap();
+    assert!(matches!(result, Err(ProtocolError::Ledger(_))));
+    assert!(elapsed < Duration::from_millis(600), "waited {elapsed:?}");
+    assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn authority_keyring_rejects_duplicate_key_ids() {
     let key = signing_key().verifying_key();
     assert!(
@@ -1484,6 +1545,76 @@ fn recorded_outcome_replays_after_a_lost_engine_ledger_without_dispatch() {
 
     assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
     assert!(matches!(terminal(&recovered), Terminal::Succeeded { .. }));
+}
+
+#[test]
+fn status_recovers_a_host_recorded_outcome_before_replay() {
+    for status_first in [true, false] {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let ledger = ledger_path(&directory);
+        let executor = MockExecutor::new();
+        let outcomes = Arc::new(MemoryOutcomeLedger::new());
+        let engine =
+            Engine::new(executor.clone(), &ledger, authority()).with_outcome_ledger(outcomes);
+        let request = request("recorded-before-local-terminal");
+        let first = engine
+            .execute(&request, &CancellationToken::default())
+            .expect("first execution");
+        assert!(matches!(terminal(&first), Terminal::Succeeded { .. }));
+        let contents = fs::read_to_string(&ledger).expect("ledger");
+        let claim = contents.lines().next().expect("claim");
+        fs::write(&ledger, format!("{claim}\n")).expect("interrupted local ledger");
+
+        if status_first {
+            let status = engine
+                .status(&request.operation_id)
+                .expect("status")
+                .unwrap();
+            assert!(matches!(
+                status.state,
+                AckState::Terminal { terminal } if matches!(*terminal, Terminal::Succeeded { .. })
+            ));
+        }
+        let replay = engine
+            .execute(&request, &CancellationToken::default())
+            .expect("recovery");
+        assert!(matches!(terminal(&replay), Terminal::Succeeded { .. }));
+        assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn status_recovers_host_outcome_after_interrupted_terminal_was_persisted() {
+    for status_first in [true, false] {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let ledger = ledger_path(&directory);
+        let executor = MockExecutor::new();
+        let outcomes = Arc::new(MemoryOutcomeLedger::new());
+        let request = request("previously-masked-outcome");
+        let engine = Engine::new(executor.clone(), &ledger, authority())
+            .with_outcome_ledger(outcomes.clone());
+        engine
+            .execute(&request, &CancellationToken::default())
+            .expect("execute");
+        let contents = fs::read_to_string(&ledger).expect("ledger");
+        fs::write(&ledger, format!("{}\n", contents.lines().next().unwrap())).expect("claim");
+        let old_engine = Engine::new(executor.clone(), &ledger, authority());
+        assert!(
+            matches!(old_engine.status(&request.operation_id).unwrap().unwrap().state,
+        AckState::Terminal { terminal } if matches!(*terminal, Terminal::OutcomeUnknown { .. }))
+        );
+        if !status_first {
+            let replay = engine
+                .execute(&request, &CancellationToken::default())
+                .expect("replay");
+            assert!(matches!(terminal(&replay), Terminal::Succeeded { .. }));
+        }
+        assert!(
+            matches!(engine.status(&request.operation_id).unwrap().unwrap().state,
+        AckState::Terminal { terminal } if matches!(*terminal, Terminal::Succeeded { .. }))
+        );
+        assert_eq!(executor.dispatches.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[test]
