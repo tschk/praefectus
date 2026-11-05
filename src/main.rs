@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         ),
         Err(error) => (
             serde_json::to_value(ErrorEnvelope::new(&error))
-                .unwrap_or_else(|_| serde_json::json!({"error":{"code":"serialization_error","message":"failed to serialize CLI error"}})),
+                .unwrap_or_else(|_| serde_json::json!({"ok":false,"error":{"code":"serialization_error","message":"failed to serialize CLI error"}})),
             error.exit,
         ),
     };
