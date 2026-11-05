@@ -134,13 +134,9 @@ CAPABILITIES_SCHEMA = {
 }
 
 
-def _binary() -> str:
-    return os.environ.get("PRAEFECTUS_BIN", "praefectus")
-
-
 def _available() -> bool:
-    binary = _binary()
-    return Path(binary).is_file() or shutil.which(binary) is not None
+    bridge = os.environ.get("PRAEFECTUS_HOST_EXECUTOR")
+    return bool(bridge and (Path(bridge).is_file() or shutil.which(bridge) is not None))
 
 
 def _invoke(
@@ -269,22 +265,18 @@ def _invoke(
     return returncode, result
 
 
-def _run(
-    arguments: list[str], payload: dict[str, Any] | None = None
-) -> tuple[int, dict[str, Any]]:
-    return _invoke([_binary(), *arguments], payload, "praefectus command failed")
-
-
-def _run_host_executor(request: dict[str, Any]) -> dict[str, Any]:
+def _run_host_bridge(payload: dict[str, Any]) -> dict[str, Any]:
     bridge = os.environ.get("PRAEFECTUS_HOST_EXECUTOR")
     if not bridge:
         raise RuntimeError("host executor is not configured")
-    returncode, result = _invoke(
-        [bridge], {"operation": "execute", "request": request}, "host executor failed"
-    )
+    returncode, result = _invoke([bridge], payload, "host executor failed")
     if returncode != 0:
         raise RuntimeError("host executor failed")
     return result
+
+
+def _run_host_executor(request: dict[str, Any]) -> dict[str, Any]:
+    return _run_host_bridge({"operation": "execute", "request": request})
 
 
 def _only(value: dict[str, Any], keys: tuple[str, ...]) -> bool:
@@ -641,7 +633,7 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     pairs = {
         "macos": "praefectus-macos-ax",
         "windows": "praefectus-windows-uia",
-        "linux": "praefectus-atspi2",
+        "linux": ("praefectus-atspi2", "praefectus-linux"),
         "browser": "praefectus-chromium-cdp",
     }
     native_permissions = {
@@ -652,88 +644,79 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
     }
     linux_permissions = native_permissions | {"atspi2", "display_geometry"}
     permission_shapes = {
-        "macos": (native_permissions,),
-        "windows": (native_permissions,),
-        "linux": (linux_permissions, linux_permissions | {"wayland", "x11"}),
+        "macos": (native_permissions, native_permissions | {"global_input"}),
+        "windows": (native_permissions, native_permissions | {"global_input"}),
+        "linux": tuple(
+            linux_permissions | extra
+            for extra in (
+                set(),
+                {"global_input"},
+                {"wayland", "x11"},
+                {"wayland", "x11", "global_input"},
+            )
+        ),
         "browser": ({"cdp", "coordinates", "root_frame_only", "screenshots"},),
     }
     if (
         not isinstance(platform, str)
-        or pairs.get(platform) != backend
+        or (
+            backend not in pairs[platform]
+            if platform == "linux"
+            else pairs.get(platform) != backend
+        )
         or session_isolation not in ("shared_desktop", "host_isolated", "unknown")
         or not isinstance(display_geometry_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", display_geometry_hash) is None
         or not isinstance(supported_actions, list)
-        or len(supported_actions) > 9
+        or len(supported_actions) > 12
         or not all(isinstance(action, str) for action in supported_actions)
         or len(supported_actions) != len(set(supported_actions))
         or not isinstance(action_capabilities, list)
-        or len(action_capabilities) > 9
+        or len(action_capabilities) > 12
         or not isinstance(permissions, dict)
         or not all(isinstance(allowed, bool) for allowed in permissions.values())
         or set(permissions) not in permission_shapes.get(platform, ())
     ):
         return {"error": {"code": "praefectus_error"}}
-    if platform == "macos" and any(
-        permissions.get(permission)
-        for permission in ("coordinate_capture", "screen_recording")
-    ):
-        return {"error": {"code": "praefectus_error"}}
-    allowed_actions = (
-        {"invoke", "scroll", "set_value"}
-        if platform in ("windows", "browser")
-        else (
-            {
-                "invoke",
-                "set_value",
-                "click",
-                "type_text",
-                "press",
-                "paste",
-                "hotkey",
-                "move",
-                "scroll",
-            }
-            if platform == "macos"
-            else {"invoke", "set_value"}
-        )
-    )
-    macos_action_facts = {
-        "invoke": ("target_addressed", "guarded"),
-        "set_value": ("target_addressed", "guarded"),
-        "scroll": ("target_addressed", "guarded"),
-        "click": ("pointer", "unavailable"),
-        "type_text": ("pointer", "unavailable"),
-        "press": ("pointer", "unavailable"),
-        "paste": ("pointer", "unavailable"),
-        "hotkey": ("pointer", "unavailable"),
-        "move": ("pointer", "unavailable"),
-    }
-    background_support = "host_isolated_only" if platform == "browser" else "guarded"
+    semantic = {"invoke", "set_value"}
+    pointer = {"click", "type_text", "press", "paste", "hotkey", "move", "scroll"}
+    allowed_actions = semantic | ({"scroll"} if platform == "browser" else pointer)
+    if platform == "macos":
+        allowed_actions |= {"drag", "select_text", "perform_secondary_action"}
     facts = []
     for fact in action_capabilities:
-        expected_fact = None
-        if platform == "macos" and isinstance(fact, dict):
-            action = fact.get("action")
-            if isinstance(action, str):
-                expected_fact = macos_action_facts.get(action)
         if (
             not isinstance(fact, dict)
             or set(fact) != {"action", "delivery_route", "background_support"}
+            or not isinstance(fact.get("action"), str)
+            or not isinstance(fact.get("delivery_route"), str)
+            or not isinstance(fact.get("background_support"), str)
             or fact.get("action") not in allowed_actions
-            or (
-                expected_fact is not None
-                and (fact.get("delivery_route"), fact.get("background_support"))
-                != expected_fact
-            )
-            or (
-                expected_fact is None
-                and (
-                    fact.get("delivery_route") != "target_addressed"
-                    or fact.get("background_support") != background_support
-                )
-            )
         ):
+            return {"error": {"code": "praefectus_error"}}
+        action = fact["action"]
+        if platform == "browser":
+            expected = {("target_addressed", "host_isolated_only")}
+        elif action in semantic | {"select_text", "perform_secondary_action"}:
+            expected = {("target_addressed", "guarded")}
+        elif platform == "macos" and action in {
+            "scroll",
+            "type_text",
+            "press",
+            "paste",
+            "hotkey",
+        }:
+            expected = {
+                ("per_process_event", "guarded"),
+                ("target_addressed", "guarded")
+                if action == "scroll"
+                else ("pointer", "unavailable"),
+            }
+        else:
+            expected = {("pointer", "unavailable")}
+            if platform == "windows" and action == "scroll":
+                expected.add(("target_addressed", "guarded"))
+        if (fact.get("delivery_route"), fact.get("background_support")) not in expected:
             return {"error": {"code": "praefectus_error"}}
         facts.append(fact["action"])
     if (
@@ -747,24 +730,14 @@ def _redact(result: Any, expected_operation_id: str | None = None) -> dict[str, 
         "platform": platform,
         "backend": backend,
         "session_isolation": session_isolation,
-        "supported_actions": (
-            supported_actions
-            if platform == "macos"
-            else [
-                action
-                for action in supported_actions
-                if action in ("invoke", "set_value")
-            ]
-        ),
-        "action_capabilities": (
-            action_capabilities
-            if platform == "macos"
-            else [
-                fact
-                for fact in action_capabilities
-                if fact["action"] in ("invoke", "set_value")
-            ]
-        ),
+        "supported_actions": [
+            action for action in supported_actions if action in ("invoke", "set_value")
+        ],
+        "action_capabilities": [
+            fact
+            for fact in action_capabilities
+            if fact["action"] in ("invoke", "set_value")
+        ],
         "permissions": permissions,
         "display_geometry_hash": display_geometry_hash,
     }
@@ -987,15 +960,21 @@ def _execute(args: dict[str, Any], **_: Any) -> str:
 
 def _status(args: dict[str, Any], **_: Any) -> str:
     try:
-        _returncode, result = _run(["status", args["operation_id"]])
-        return json.dumps(_redact(result, args["operation_id"]))
+        operation_id = args["operation_id"]
+        if (
+            not isinstance(operation_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_:-]{1,256}", operation_id) is None
+        ):
+            raise ValueError("invalid operation ID")
+        result = _run_host_bridge({"operation": "status", "operation_id": operation_id})
+        return json.dumps(_redact(result, operation_id))
     except (KeyError, TypeError, ValueError, RuntimeError):
         return tool_error("Praefectus status is unavailable")
 
 
 def _capabilities(args: dict[str, Any], **_: Any) -> str:
     try:
-        _returncode, result = _run(["capabilities"])
+        result = _run_host_bridge({"operation": "capabilities"})
         return json.dumps(_redact(result))
     except (TypeError, ValueError, RuntimeError):
         return tool_error("Praefectus capabilities are unavailable")

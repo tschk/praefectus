@@ -1,8 +1,37 @@
 import { createHash } from "node:crypto";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Value } from "typebox/value";
-import { runHostExecutor } from "./cli.ts";
-import { praefectusPlugin, tools } from "./index.ts";
+import {
+  runHostExecutor,
+  type HostExecutor,
+  type PraefectusOptions,
+  type runPraefectus,
+} from "./cli.ts";
+import { praefectusPlugin, tools as pluginTools } from "./index.ts";
+
+function tools(
+  options: PraefectusOptions,
+  run?: typeof runPraefectus,
+  host?: HostExecutor,
+) {
+  if (!run && !host) return pluginTools(options);
+  return pluginTools(options, async (request) => {
+    if (
+      typeof request === "object" &&
+      request !== null &&
+      "operation" in request
+    ) {
+      if (request.operation === "capabilities")
+        return run?.("capabilities", undefined, options);
+      if (request.operation === "status" && "operation_id" in request)
+        return run?.("status", request.operation_id, options);
+    }
+    return host ? host(request) : runHostExecutor(request, options);
+  });
+}
 
 const actionHash = "a".repeat(64);
 
@@ -159,6 +188,191 @@ function cdpCapabilities() {
 }
 
 describe("Praefectus OpenClaw tools", () => {
+  test("accepts native Linux capabilities captured from the current CLI", async () => {
+    const captured = {
+      data: {
+        action_capabilities: [],
+        backend: "praefectus-linux",
+        display_geometry_hash:
+          "0000000000000000000000000000000000000000000000000000000000000000",
+        permissions: {
+          accessibility: false,
+          atspi2: false,
+          coordinate_capture: false,
+          display_geometry: false,
+          global_input: true,
+          private_state: false,
+          screen_recording: false,
+        },
+        platform: "linux",
+        session_isolation: "shared_desktop",
+        supported_actions: [],
+      },
+      ok: true,
+    };
+    const capabilities = pluginTools({}, async () => captured).find(
+      (tool) => tool.name === "praefectus_capabilities",
+    )!;
+    expect((await capabilities.execute("cap", {} as never)).details).toEqual(
+      captured,
+    );
+  });
+
+  test("filters native input capabilities and rejects malformed facts", async () => {
+    const base = {
+      ...windowsCapabilities(),
+      platform: "linux",
+      backend: "praefectus-linux",
+      permissions: {
+        ...windowsCapabilities().permissions,
+        atspi2: true,
+        display_geometry: true,
+        global_input: true,
+      },
+      supported_actions: [
+        "invoke",
+        "set_value",
+        "click",
+        "type_text",
+        "press",
+        "paste",
+        "hotkey",
+        "move",
+        "scroll",
+      ],
+      action_capabilities: [
+        ...windowsCapabilities().action_capabilities.slice(0, 2),
+        ...[
+          "click",
+          "type_text",
+          "press",
+          "paste",
+          "hotkey",
+          "move",
+          "scroll",
+        ].map((action) => ({
+          action,
+          delivery_route: "pointer",
+          background_support: "unavailable",
+        })),
+      ],
+    };
+    const capabilities = pluginTools({}, async () => base).find(
+      (tool) => tool.name === "praefectus_capabilities",
+    )!;
+    const output = await capabilities.execute("cap", {} as never);
+    expect(output.details).toHaveProperty("supported_actions", [
+      "invoke",
+      "set_value",
+    ]);
+    expect(output.details).toHaveProperty(
+      "action_capabilities",
+      base.action_capabilities.slice(0, 2),
+    );
+    for (const invalid of [
+      {
+        ...base,
+        action_capabilities: base.action_capabilities.map((item) =>
+          item.action === "click"
+            ? { ...item, delivery_route: "target_addressed" }
+            : item,
+        ),
+      },
+      { ...base, supported_actions: [...base.supported_actions, "unknown"] },
+      { ...base, permissions: { ...base.permissions, global_input: "yes" } },
+    ]) {
+      const tool = pluginTools({}, async () => invalid).find(
+        (item) => item.name === "praefectus_capabilities",
+      )!;
+      expect((await tool.execute("cap", {} as never)).details).toEqual({
+        error: { code: "praefectus_error" },
+      });
+    }
+  });
+
+  test("registered reads use the execution bridge rather than the CLI", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "praefectus-openclaw-"));
+    try {
+      const cli = join(dir, "cli");
+      await writeFile(
+        cli,
+        `#!/bin/sh\necho '${JSON.stringify({ ok: true, data: windowsCapabilities() })}'\n`,
+      );
+      await chmod(cli, 0o755);
+      const bridge = `
+        let input = "";
+        process.stdin.on("data", chunk => input += chunk);
+        process.stdin.on("end", () => {
+          const request = JSON.parse(input);
+          const data = request.operation === "capabilities" && Object.keys(request).length === 1 ? ${JSON.stringify(cdpCapabilities())}
+            : request.operation === "status" && Object.keys(request).length === 2 && typeof request.operation_id === "string" ? ${JSON.stringify(outcomeUnknown().acknowledgements[0])}
+            : null;
+          process.stdout.write(JSON.stringify({ ok: true, data }));
+        });
+      `;
+      const registered: ReturnType<typeof tools> = [];
+      praefectusPlugin.register({
+        pluginConfig: {
+          command: cli,
+          hostExecutorCommand: [process.execPath, "-e", bridge],
+        },
+        registerTool(tool: ReturnType<typeof tools>[number]) {
+          registered.push(tool);
+        },
+      } as never);
+      const capabilities = registered.find(
+        (tool) => tool.name === "praefectus_capabilities",
+      )!;
+      const status = registered.find(
+        (tool) => tool.name === "praefectus_status",
+      )!;
+      const cap = await capabilities.execute("cap", {} as never);
+      const state = await status.execute("status", {
+        operation_id: "operation-1",
+      });
+      expect(cap.details).toHaveProperty(
+        "data.backend",
+        "praefectus-chromium-cdp",
+      );
+      expect(cap.details).toHaveProperty("data.supported_actions", [
+        "invoke",
+        "set_value",
+      ]);
+      expect(state.details).toHaveProperty("data.operation_id", "operation-1");
+      expect(state.details).toHaveProperty(
+        "data.terminal.kind",
+        "outcome_unknown",
+      );
+      expect(
+        (await status.execute("status", { operation_id: "operation-2" }))
+          .details,
+      ).toEqual({ error: { code: "praefectus_error" } });
+      expect(
+        (await status.execute("status", { operation_id: "bad id" })).details,
+      ).toEqual({ error: { code: "invalid_request" } });
+      const withoutBridge: ReturnType<typeof tools> = [];
+      praefectusPlugin.register({
+        pluginConfig: { command: cli },
+        registerTool(tool: ReturnType<typeof tools>[number]) {
+          withoutBridge.push(tool);
+        },
+      } as never);
+      for (const tool of withoutBridge.filter(
+        (item) => item.name !== "praefectus_execute",
+      )) {
+        const params =
+          tool.name === "praefectus_status"
+            ? { operation_id: "operation-1" }
+            : {};
+        expect(
+          (await tool.execute("missing", params as never)).details,
+        ).toEqual({ error: { code: "host_executor_unavailable" } });
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("passes only the action request to the host executor", async () => {
     const calls: unknown[][] = [];
     const run = async (...args: unknown[]) => {
@@ -807,7 +1021,7 @@ describe("Praefectus OpenClaw tools", () => {
     });
   });
 
-  test("returns redacted stable errors for unavailable CLI operations", async () => {
+  test("returns redacted stable errors for unavailable host read operations", async () => {
     const registered = tools({}, async () => {
       throw new Error("backend secret");
     });
@@ -820,12 +1034,12 @@ describe("Praefectus OpenClaw tools", () => {
     await expect(
       capabilities.execute("call-1", {} as never),
     ).resolves.toMatchObject({
-      details: { error: { code: "praefectus_unavailable" } },
+      details: { error: { code: "host_executor_unavailable" } },
     });
     await expect(
       status.execute("call-2", { operation_id: "operation-1" }),
     ).resolves.toMatchObject({
-      details: { error: { code: "praefectus_unavailable" } },
+      details: { error: { code: "host_executor_unavailable" } },
     });
   });
 

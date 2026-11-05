@@ -4,7 +4,6 @@ import { Value } from "typebox/value";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   runHostExecutor,
-  runPraefectus,
   type HostExecutor,
   type PraefectusOptions,
 } from "./cli.ts";
@@ -436,6 +435,7 @@ function redact(
       ["macos", "praefectus-macos-ax"],
       ["windows", "praefectus-windows-uia"],
       ["linux", "praefectus-atspi2"],
+      ["linux", "praefectus-linux"],
       ["browser", "praefectus-chromium-cdp"],
     ].some(
       ([platform, backend]) =>
@@ -443,15 +443,28 @@ function redact(
     ) ||
     !isHash(value.display_geometry_hash) ||
     !Array.isArray(value.supported_actions) ||
-    value.supported_actions.length > 4 ||
+    value.supported_actions.length > 12 ||
     !value.supported_actions.every((action) =>
-      ["invoke", "scroll", "set_value"].includes(String(action)),
+      [
+        "invoke",
+        "scroll",
+        "set_value",
+        "select_text",
+        "perform_secondary_action",
+        "click",
+        "drag",
+        "type_text",
+        "press",
+        "paste",
+        "hotkey",
+        "move",
+      ].includes(String(action)),
     ) ||
     new Set(value.supported_actions).size !== value.supported_actions.length ||
     !Array.isArray(value.action_capabilities) ||
-    value.action_capabilities.length > 4 ||
+    value.action_capabilities.length > 12 ||
     !isObject(value.permissions) ||
-    Object.keys(value.permissions).length > 8
+    Object.keys(value.permissions).length > 9
   )
     return { error: { code: "praefectus_error" } };
   const supportedActions = value.supported_actions;
@@ -466,6 +479,7 @@ function redact(
             "atspi2",
             "coordinate_capture",
             "display_geometry",
+            "global_input",
             "private_state",
             "screen_recording",
             "wayland",
@@ -474,6 +488,7 @@ function redact(
         : [
             "accessibility",
             "coordinate_capture",
+            "global_input",
             "private_state",
             "screen_recording",
           ];
@@ -490,9 +505,20 @@ function redact(
   const allowedActions =
     value.platform === "browser"
       ? ["invoke", "scroll", "set_value"]
-      : value.platform === "windows"
-        ? ["invoke", "scroll", "set_value"]
-        : ["invoke", "set_value"];
+      : [
+          "invoke",
+          "set_value",
+          "click",
+          "type_text",
+          "press",
+          "paste",
+          "hotkey",
+          "move",
+          "scroll",
+          ...(value.platform === "macos"
+            ? ["drag", "select_text", "perform_secondary_action"]
+            : []),
+        ];
   if (
     !requiredPermissions.every((key) => key in permissions) ||
     !Object.entries(permissions).every(
@@ -510,10 +536,29 @@ function redact(
           "delivery_route",
           "background_support",
         ]) &&
-        ["invoke", "scroll", "set_value"].includes(String(capability.action)) &&
-        capability.delivery_route === "target_addressed" &&
-        capability.background_support ===
-          (value.platform === "browser" ? "host_isolated_only" : "guarded"),
+        allowedActions.includes(String(capability.action)) &&
+        (value.platform === "browser"
+          ? capability.delivery_route === "target_addressed" &&
+            capability.background_support === "host_isolated_only"
+          : [
+                "invoke",
+                "set_value",
+                "select_text",
+                "perform_secondary_action",
+              ].includes(String(capability.action))
+            ? capability.delivery_route === "target_addressed" &&
+              capability.background_support === "guarded"
+            : capability.action === "scroll" &&
+                capability.delivery_route === "target_addressed" &&
+                capability.background_support === "guarded" &&
+                value.platform === "windows"
+              ? true
+              : value.platform === "macos" &&
+                  !["click", "drag", "move"].includes(String(capability.action))
+                ? capability.delivery_route === "per_process_event" &&
+                  capability.background_support === "guarded"
+                : capability.delivery_route === "pointer" &&
+                  capability.background_support === "unavailable"),
     )
   )
     return { error: { code: "praefectus_error" } };
@@ -718,7 +763,6 @@ function requestForHost(value: unknown): unknown {
 
 export function tools(
   options: PraefectusOptions,
-  run: typeof runPraefectus = runPraefectus,
   hostExecutor: HostExecutor = (request) => runHostExecutor(request, options),
 ) {
   return [
@@ -730,9 +774,9 @@ export function tools(
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute() {
         try {
-          return result(await run("capabilities", undefined, options));
+          return result(await hostExecutor({ operation: "capabilities" }));
         } catch {
-          return result({ error: { code: "praefectus_unavailable" } });
+          return result({ error: { code: "host_executor_unavailable" } });
         }
       },
     },
@@ -745,13 +789,18 @@ export function tools(
         { additionalProperties: false },
       ),
       async execute(_id: string, params: { operation_id: string }) {
+        if (!Value.Check(Identifier, params?.operation_id))
+          return result({ error: { code: "invalid_request" } });
         try {
           return result(
-            await run("status", params.operation_id, options),
+            await hostExecutor({
+              operation: "status",
+              operation_id: params.operation_id,
+            }),
             params.operation_id,
           );
         } catch {
-          return result({ error: { code: "praefectus_unavailable" } });
+          return result({ error: { code: "host_executor_unavailable" } });
         }
       },
     },

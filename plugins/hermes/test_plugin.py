@@ -201,6 +201,62 @@ def runtime_capabilities(platform="windows"):
 
 
 class PluginTest(unittest.TestCase):
+    def test_public_reads_use_host_bridge_not_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = Path(directory) / "bridge"
+            cli = Path(directory) / "cli"
+            bridge.write_text(
+                "#!/usr/bin/env python3\nimport json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                f"capabilities = {runtime_capabilities('browser')!r}\n"
+                f"status = {outcome_unknown()!r}\n"
+                "print(json.dumps(capabilities if request == {'operation': 'capabilities'} "
+                "else status if request == {'operation': 'status', 'operation_id': 'op-1'} "
+                "else {'error': 'unexpected request'}))\n"
+            )
+            cli.write_text(
+                "#!/usr/bin/env python3\nimport json, sys\n"
+                f"capabilities = {runtime_capabilities()!r}\n"
+                f"status = {outcome_unknown('other-op')!r}\n"
+                "print(json.dumps(capabilities if sys.argv[1] == 'capabilities' else status))\n"
+            )
+            bridge.chmod(0o755)
+            cli.chmod(0o755)
+            registrations = []
+            plugin.register(
+                types.SimpleNamespace(
+                    register_tool=lambda **kw: registrations.append(kw)
+                )
+            )
+            handlers = {item["name"]: item["handler"] for item in registrations}
+            with patch.dict(
+                os.environ,
+                {"PRAEFECTUS_HOST_EXECUTOR": str(bridge), "PRAEFECTUS_BIN": str(cli)},
+            ):
+                capabilities = json.loads(handlers["praefectus_capabilities"]({}))
+                status = json.loads(
+                    handlers["praefectus_status"]({"operation_id": "op-1"})
+                )
+            self.assertEqual(capabilities["platform"], "browser")
+            self.assertEqual(status["acknowledgements"][0]["operation_id"], "op-1")
+
+    def test_read_failures_do_not_fall_back_and_status_checks_operation_id(self):
+        with patch.dict(os.environ, {"PRAEFECTUS_HOST_EXECUTOR": ""}):
+            self.assertIn("error", json.loads(plugin._capabilities({})))
+            self.assertIn("error", json.loads(plugin._status({"operation_id": "op-1"})))
+        with patch.object(
+            plugin, "_run_host_bridge", return_value=outcome_unknown("other-op")
+        ):
+            self.assertEqual(
+                json.loads(plugin._status({"operation_id": "op-1"})),
+                {"error": {"code": "praefectus_error"}},
+            )
+        with patch.object(plugin, "_run_host_bridge") as bridge:
+            self.assertIn(
+                "error", json.loads(plugin._status({"operation_id": "bad id"}))
+            )
+            bridge.assert_not_called()
+
     def test_registration_uses_native_hermes_contract(self):
         registrations = []
         context = types.SimpleNamespace(
@@ -523,7 +579,7 @@ class PluginTest(unittest.TestCase):
             terminal["receipt"]["effect"] = effect
             with patch.object(plugin, "_run_host_executor", return_value=result):
                 executed = json.loads(plugin._execute(request))
-            with patch.object(plugin, "_run", return_value=(0, result)):
+            with patch.object(plugin, "_run_host_bridge", return_value=result):
                 status = json.loads(plugin._status({"operation_id": "op-1"}))
             for safe_result in (executed, status):
                 self.assertNotIn("error", safe_result)
@@ -536,7 +592,7 @@ class PluginTest(unittest.TestCase):
         result["acknowledgements"][0]["state"]["terminal"]["receipt"]["effect"] = (
             "verified"
         )
-        with patch.object(plugin, "_run", return_value=(0, result)):
+        with patch.object(plugin, "_run_host_bridge", return_value=result):
             status = json.loads(plugin._status({"operation_id": "op-1"}))
         self.assertNotIn("error", status)
         terminal = status["acknowledgements"][0]["terminal"]
@@ -609,7 +665,7 @@ class PluginTest(unittest.TestCase):
         recovery = legacy_recovery()
         with patch.object(plugin, "_run_host_executor", return_value=recovery):
             executed = json.loads(plugin._execute(invoke_request()))
-        with patch.object(plugin, "_run", return_value=(0, recovery)):
+        with patch.object(plugin, "_run_host_bridge", return_value=recovery):
             status = json.loads(plugin._status({"operation_id": "op-1"}))
         for result in (executed, status):
             self.assertNotIn("error", result)
@@ -636,6 +692,72 @@ class PluginTest(unittest.TestCase):
             },
         )
 
+    def test_current_linux_cli_capabilities_through_bridge(self):
+        # Captured from `cargo run --quiet -- capabilities` in a headless Linux orb.
+        captured = json.loads(
+            '{"data":{"action_capabilities":[],"backend":"praefectus-linux",'
+            '"display_geometry_hash":"0000000000000000000000000000000000000000000000000000000000000000",'
+            '"permissions":{"accessibility":false,"atspi2":false,"coordinate_capture":false,'
+            '"display_geometry":false,"global_input":true,"private_state":false,'
+            '"screen_recording":false},"platform":"linux","session_isolation":"shared_desktop",'
+            '"supported_actions":[]},"ok":true}'
+        )
+        with patch.object(plugin, "_run_host_bridge", return_value=captured):
+            result = json.loads(plugin._capabilities({}))
+        self.assertEqual(result, captured)
+
+    def test_current_native_and_browser_capabilities_filter_non_executable_actions(
+        self,
+    ):
+        pointer = ["click", "type_text", "press", "paste", "hotkey", "move", "scroll"]
+        for platform in ("linux", "windows", "macos", "browser"):
+            with self.subTest(platform=platform):
+                runtime = runtime_capabilities(platform)
+                if platform != "browser":
+                    runtime["permissions"]["global_input"] = True
+                    if platform == "linux":
+                        runtime["backend"] = "praefectus-linux"
+                    actions = ["invoke", "set_value", *pointer]
+                    if platform == "macos":
+                        actions += ["drag", "select_text", "perform_secondary_action"]
+                        runtime["permissions"]["screen_recording"] = True
+                        runtime["permissions"]["coordinate_capture"] = True
+                    runtime["supported_actions"] = actions
+                    runtime["action_capabilities"] = []
+                    for action in actions:
+                        if action in (
+                            "invoke",
+                            "set_value",
+                            "select_text",
+                            "perform_secondary_action",
+                        ):
+                            route, support = "target_addressed", "guarded"
+                        elif platform == "macos" and action in (
+                            "scroll",
+                            "type_text",
+                            "press",
+                            "paste",
+                            "hotkey",
+                        ):
+                            route, support = "per_process_event", "guarded"
+                        else:
+                            route, support = "pointer", "unavailable"
+                        runtime["action_capabilities"].append(
+                            {
+                                "action": action,
+                                "delivery_route": route,
+                                "background_support": support,
+                            }
+                        )
+                with patch.object(plugin, "_run_host_bridge", return_value=runtime):
+                    result = json.loads(plugin._capabilities({}))
+                self.assertEqual(result["supported_actions"], ["invoke", "set_value"])
+                self.assertEqual(
+                    {fact["action"] for fact in result["action_capabilities"]},
+                    {"invoke", "set_value"},
+                )
+                self.assertEqual(result["permissions"], runtime["permissions"])
+
     def test_macos_capabilities_expose_public_accessibility_input_actions(self):
         runtime = runtime_capabilities("macos")
         runtime["supported_actions"] = [
@@ -661,7 +783,11 @@ class PluginTest(unittest.TestCase):
             }
             for action in runtime["supported_actions"]
         ]
-        self.assertEqual(plugin._redact(runtime), runtime)
+        redacted = plugin._redact(runtime)
+        self.assertEqual(redacted["supported_actions"], ["invoke", "set_value"])
+        self.assertEqual(
+            redacted["action_capabilities"], runtime["action_capabilities"][:2]
+        )
 
     def test_capabilities_reject_mismatched_background_facts(self):
         runtime = runtime_capabilities()
@@ -728,9 +854,7 @@ class PluginTest(unittest.TestCase):
             self.assertNotIn("secret", json.dumps(redacted))
             self.assertNotIn("credential", json.dumps(redacted))
 
-    def test_macos_capabilities_reject_capture_permissions_but_allow_private_state_fact(
-        self,
-    ):
+    def test_macos_capabilities_allow_capture_and_private_state_facts(self):
         runtime = runtime_capabilities("macos")
         runtime["permissions"].update(
             {
@@ -741,18 +865,8 @@ class PluginTest(unittest.TestCase):
         )
         self.assertNotIn("error", plugin._redact(runtime))
         for permission in ("coordinate_capture", "screen_recording"):
-            unsafe = runtime_capabilities("macos")
-            unsafe["permissions"].update(
-                {
-                    "private_state": True,
-                    "coordinate_capture": False,
-                    "screen_recording": False,
-                    permission: True,
-                }
-            )
-            self.assertEqual(
-                plugin._redact(unsafe), {"error": {"code": "praefectus_error"}}
-            )
+            runtime["permissions"][permission] = True
+            self.assertNotIn("error", plugin._redact(runtime))
 
     def test_capabilities_accept_exact_full_runtime_contracts(self):
         for platform in ("macos", "windows", "linux", "browser"):
@@ -770,7 +884,9 @@ class PluginTest(unittest.TestCase):
             )
 
     def test_cli_errors_do_not_escape_backend_details(self):
-        with patch.object(plugin, "_run", side_effect=RuntimeError("backend secret")):
+        with patch.object(
+            plugin, "_run_host_bridge", side_effect=RuntimeError("backend secret")
+        ):
             status = json.loads(plugin._status({"operation_id": "op-1"}))
             capabilities = json.loads(plugin._capabilities({}))
         self.assertEqual(status["error"], "Praefectus status is unavailable")

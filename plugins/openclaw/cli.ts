@@ -129,7 +129,16 @@ export async function runHostExecutor(
   if (!command?.length) throw new Error("host executor is not configured");
   const [file, ...args] = command;
   if (!file) throw new Error("host executor is not configured");
-  const input = Buffer.from(JSON.stringify({ operation: "execute", request }));
+  const input = Buffer.from(
+    JSON.stringify(
+      typeof request === "object" &&
+        request !== null &&
+        "operation" in request &&
+        (request.operation === "capabilities" || request.operation === "status")
+        ? request
+        : { operation: "execute", request },
+    ),
+  );
   if (input.length > MAX_OUTPUT_BYTES)
     throw new Error("host executor input exceeded limit");
   const result = await runCommand(
