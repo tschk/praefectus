@@ -4471,23 +4471,25 @@ impl<E: Executor> Engine<E> {
             ClaimResult::New => {}
         }
 
-        match self.outcomes.begin(&outcome_key)? {
-            LedgerDecision::Dispatch => {}
-            LedgerDecision::Recorded(terminal) => {
-                return self.finish_early(request, &action_hash, terminal);
-            }
+        let resolved = match self.outcomes.begin(&outcome_key)? {
+            LedgerDecision::Dispatch => None,
+            LedgerDecision::Recorded(terminal) => Some(terminal),
             LedgerDecision::Interrupted => {
                 let receipt =
                     empty_receipt(request, &action_hash, Effect::Unknown, session_isolation);
-                return self.finish_early(
-                    request,
-                    &action_hash,
-                    Terminal::OutcomeUnknown {
-                        receipt,
-                        message: interrupted_outcome_message(),
-                    },
-                );
+                Some(Terminal::OutcomeUnknown {
+                    receipt,
+                    message: interrupted_outcome_message(),
+                })
             }
+        };
+        if let Some(terminal) = resolved {
+            let accepted = ack(request, &action_hash, 0, AckState::Accepted, false);
+            let acknowledgement = terminal_ack(request, &action_hash, terminal, false);
+            self.ledger.finish(&acknowledgement)?;
+            return Ok(ExecuteReport {
+                acknowledgements: vec![accepted, acknowledgement],
+            });
         }
 
         let accepted = ack(request, &action_hash, 0, AckState::Accepted, false);

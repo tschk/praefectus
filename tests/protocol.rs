@@ -1487,6 +1487,40 @@ fn recorded_outcome_replays_after_a_lost_engine_ledger_without_dispatch() {
 }
 
 #[test]
+fn resolved_host_outcomes_do_not_require_a_new_record_grant() {
+    struct ResolvedLedger(bool);
+
+    impl OutcomeLedger for ResolvedLedger {
+        fn begin(&self, _: &OutcomeKey) -> Result<LedgerDecision, ProtocolError> {
+            Ok(if self.0 {
+                LedgerDecision::Recorded(Terminal::CancelledBeforeEffect)
+            } else {
+                LedgerDecision::Interrupted
+            })
+        }
+
+        fn record(&self, _: &OutcomeKey, _: &Terminal) -> Result<(), ProtocolError> {
+            Err(ProtocolError::Ledger("no dispatch grant".to_string()))
+        }
+    }
+
+    for recorded in [true, false] {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let executor = MockExecutor::new();
+        let report = Engine::new(executor.clone(), ledger_path(&directory), authority())
+            .with_outcome_ledger(ResolvedLedger(recorded))
+            .execute(&request("resolved-outcome"), &CancellationToken::default())
+            .expect("resolved host outcome");
+        assert_eq!(executor.dispatches.load(Ordering::SeqCst), 0);
+        if recorded {
+            assert!(matches!(terminal(&report), Terminal::CancelledBeforeEffect));
+        } else {
+            assert!(matches!(terminal(&report), Terminal::OutcomeUnknown { .. }));
+        }
+    }
+}
+
+#[test]
 fn an_unrecorded_outcome_surfaces_interrupted_semantics_without_dispatch() {
     let directory = tempfile::tempdir().expect("temp directory");
     let executor = MockExecutor::new();
