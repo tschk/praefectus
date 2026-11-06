@@ -39,6 +39,11 @@ path = "src/main.rs"
 name = "capabilities"
 path = "examples/capabilities.rs"
 
+[[example]]
+name = "facetime_host"
+path = "examples/facetime_host.rs"
+test = true
+
 [dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 fs4 = { version = "1.1", default-features = false, features = ["sync"] }
