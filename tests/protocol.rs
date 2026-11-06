@@ -1480,6 +1480,63 @@ fn torn_terminal_is_repaired_then_recovered_and_replayed() {
     assert!(engine.status("torn").expect("status").is_some());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_application_capabilities_allow_interactive_but_not_background_dispatch() {
+    struct BeforeEffect;
+    impl Executor for BeforeEffect {
+        fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
+            NativeExecutor::default().capabilities()
+        }
+        fn observe(&self, _target: &TargetRef) -> Result<Observation, ProtocolError> {
+            Err(ProtocolError::ObservationExpired)
+        }
+        fn resolve(&self, _target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
+            panic!("observation must stop before target resolution")
+        }
+        fn dispatch(
+            &self,
+            _action: &Action,
+            _target: &ResolvedTarget,
+            _verification: &VerificationPolicy,
+            _cancellation: &CancellationToken,
+            _deadline_at_ms: i64,
+        ) -> Result<DispatchReceipt, DispatchError> {
+            panic!("test must never dispatch native input")
+        }
+    }
+    let directory = tempfile::tempdir().expect("temp directory");
+    let engine = Engine::new(BeforeEffect, ledger_path(&directory), authority());
+    for mode in [
+        InteractionMode::Interactive,
+        InteractionMode::BackgroundOnly,
+    ] {
+        let mut request = request(&format!("application-{mode:?}"));
+        request.action = Action::Application {
+            operation: ApplicationOperation::Switch,
+            name: "FaceTime".into(),
+        };
+        request.target = TargetRef::None;
+        request.verification = VerificationPolicy::None;
+        request.interaction_mode = mode;
+        sign_request(&mut request);
+        let report = engine
+            .execute(&request, &CancellationToken::default())
+            .expect("report");
+        if mode == InteractionMode::Interactive {
+            assert!(matches!(terminal(&report), Terminal::ExpiredBeforeEffect));
+        } else {
+            assert!(matches!(
+                terminal(&report),
+                Terminal::Rejected {
+                    code: FailureCode::Unsupported,
+                    ..
+                }
+            ));
+        }
+    }
+}
+
 #[test]
 fn auxiliary_actions_are_bound_to_signed_targetless_operations() {
     let directory = tempfile::tempdir().expect("temp directory");

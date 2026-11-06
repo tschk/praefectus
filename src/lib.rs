@@ -4898,6 +4898,10 @@ fn strict_action_capability<'a>(
             "invoke" | "set_value" | "select_text" | "perform_secondary_action" => {
                 capability.delivery_route == DeliveryRoute::TargetAddressed
             }
+            "application" => {
+                capability.delivery_route == DeliveryRoute::Pointer
+                    && capability.background_support == BackgroundSupport::Unavailable
+            }
             "click" | "drag" | "type_text" | "press" | "paste" | "hotkey" | "move" => matches!(
                 capability.delivery_route,
                 DeliveryRoute::Pointer | DeliveryRoute::PerProcessEvent
@@ -5056,7 +5060,10 @@ impl NativeExecutor {
         let accessibility = permissions.get("accessibility").copied().unwrap_or(false);
         let mut supported_actions = Vec::new();
         #[cfg(target_os = "macos")]
-        supported_actions.extend(macos_semantic_actions(accessibility));
+        {
+            supported_actions.extend(macos_semantic_actions(accessibility));
+            supported_actions.push("application");
+        }
         #[cfg(not(target_os = "macos"))]
         {
             let private_state = permissions.get("private_state").copied().unwrap_or(false);
