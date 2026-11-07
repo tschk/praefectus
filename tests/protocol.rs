@@ -1480,6 +1480,121 @@ fn torn_terminal_is_repaired_then_recovered_and_replayed() {
     assert!(engine.status("torn").expect("status").is_some());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_application_capabilities_allow_interactive_but_not_background_dispatch() {
+    struct BeforeEffect(Capabilities);
+    impl Executor for BeforeEffect {
+        fn capabilities(&self) -> Result<Capabilities, ProtocolError> {
+            Ok(self.0.clone())
+        }
+        fn observe(&self, _target: &TargetRef) -> Result<Observation, ProtocolError> {
+            Err(ProtocolError::ObservationExpired)
+        }
+        fn resolve(&self, _target: &TargetRef) -> Result<ResolvedTarget, ProtocolError> {
+            panic!("observation must stop before target resolution")
+        }
+        fn dispatch(
+            &self,
+            _action: &Action,
+            _target: &ResolvedTarget,
+            _verification: &VerificationPolicy,
+            _cancellation: &CancellationToken,
+            _deadline_at_ms: i64,
+        ) -> Result<DispatchReceipt, DispatchError> {
+            panic!("test must never dispatch native input")
+        }
+    }
+    let directory = tempfile::tempdir().expect("temp directory");
+    let native = NativeExecutor::default()
+        .capabilities()
+        .expect("native capabilities");
+    let application = native
+        .action_capabilities
+        .iter()
+        .find(|fact| fact.action == "application")
+        .expect("application fact");
+    assert_eq!(application.delivery_route, DeliveryRoute::Pointer);
+    assert_eq!(
+        application.background_support,
+        BackgroundSupport::Unavailable
+    );
+    for (index, (route, support, mode, expected)) in [
+        (
+            DeliveryRoute::Pointer,
+            BackgroundSupport::Unavailable,
+            InteractionMode::Interactive,
+            None,
+        ),
+        (
+            DeliveryRoute::Pointer,
+            BackgroundSupport::Unavailable,
+            InteractionMode::BackgroundOnly,
+            Some("background action is unavailable"),
+        ),
+        (
+            DeliveryRoute::TargetAddressed,
+            BackgroundSupport::Unavailable,
+            InteractionMode::Interactive,
+            Some("runtime action capability facts are missing or inconsistent"),
+        ),
+        (
+            DeliveryRoute::PerProcessEvent,
+            BackgroundSupport::Unavailable,
+            InteractionMode::Interactive,
+            Some("runtime action capability facts are missing or inconsistent"),
+        ),
+        (
+            DeliveryRoute::Pointer,
+            BackgroundSupport::Guarded,
+            InteractionMode::Interactive,
+            Some("runtime action capability facts are missing or inconsistent"),
+        ),
+        (
+            DeliveryRoute::Pointer,
+            BackgroundSupport::HostIsolatedOnly,
+            InteractionMode::Interactive,
+            Some("runtime action capability facts are missing or inconsistent"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut facts = native.clone();
+        let application = facts
+            .action_capabilities
+            .iter_mut()
+            .find(|fact| fact.action == "application")
+            .unwrap();
+        application.delivery_route = route;
+        application.background_support = support;
+        let engine = Engine::new(BeforeEffect(facts), ledger_path(&directory), authority());
+        let mut request = request(&format!("application-{index}"));
+        request.action = Action::Application {
+            operation: ApplicationOperation::Switch,
+            name: "FaceTime".into(),
+        };
+        request.target = TargetRef::None;
+        request.verification = VerificationPolicy::None;
+        request.interaction_mode = mode;
+        sign_request(&mut request);
+        let report = engine
+            .execute(&request, &CancellationToken::default())
+            .expect("report");
+        if let Some(reason) = expected {
+            assert!(matches!(
+                terminal(&report),
+                Terminal::Rejected {
+                    code: FailureCode::Unsupported,
+                    message,
+                } if message.starts_with(reason)
+            ));
+        } else {
+            assert!(matches!(terminal(&report), Terminal::ExpiredBeforeEffect));
+        }
+    }
+}
+
 #[test]
 fn auxiliary_actions_are_bound_to_signed_targetless_operations() {
     let directory = tempfile::tempdir().expect("temp directory");
