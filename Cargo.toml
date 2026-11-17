@@ -29,6 +29,11 @@ screencapturekit = ["dep:screencapturekit"]
 skylight = []
 iphone = ["dep:idevice", "dep:tokio", "dep:uuid", "dep:png", "dep:base64", "dep:plist", "dep:plist-macro", "dep:rand", "dep:rand_core", "dep:x25519-dalek", "dep:hkdf", "dep:chacha20poly1305", "dep:idevice-srp", "dep:siphasher", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:tracing", "ed25519-dalek/rand_core"]
 
+[workspace]
+members = ["native/iphone"]
+default-members = ["."]
+resolver = "3"
+
 [lib]
 path = "src/lib.rs"
 

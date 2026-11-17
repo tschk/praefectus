@@ -1,0 +1,17 @@
+[package]
+name = "praefectus-iphone-host"
+version = "0.1.0"
+edition = "2024"
+license = "ISC"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+praefectus = { path = "../..", features = ["iphone"] }
+ed25519-dalek = "2.2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
