@@ -21,6 +21,8 @@ use thiserror::Error;
 
 pub mod cdp;
 #[cfg(feature = "iphone")]
+pub mod iphone;
+#[cfg(feature = "iphone")]
 #[doc(hidden)]
 pub mod iphone_transport;
 #[cfg(target_os = "linux")]
@@ -755,6 +757,8 @@ struct MacSurfaceRecord {
 #[derive(Clone, Debug)]
 pub enum ResolvedTarget {
     Point(NativePoint),
+    #[cfg(feature = "iphone")]
+    IphoneCoordinates(TargetRef),
     Element(Box<NativeElement>),
     Semantic(semantic::SemanticTargetRef),
     None,
@@ -6247,9 +6251,12 @@ impl Executor for NativeExecutor {
                     Ok(ResolvedTarget::Semantic(target.clone()))
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-                Err(ProtocolError::Executor(
-                    "semantic execution is unavailable".to_string(),
-                ))
+                {
+                    let _ = target;
+                    Err(ProtocolError::Executor(
+                        "semantic execution is unavailable".to_string(),
+                    ))
+                }
             }
             TargetRef::None => Ok(ResolvedTarget::None),
         }
@@ -6280,6 +6287,10 @@ impl Executor for NativeExecutor {
         }
         match target {
             ResolvedTarget::Point(_) => {}
+            #[cfg(feature = "iphone")]
+            ResolvedTarget::IphoneCoordinates(_) => {
+                return Err(no_effect("foreign executor target"));
+            }
             ResolvedTarget::None => return Err(no_effect("action requires a fenced target")),
             ResolvedTarget::Element(element) => validate_live_element(element)
                 .map_err(|_| no_effect("semantic target is unavailable"))?,
@@ -6334,6 +6345,8 @@ impl Executor for NativeExecutor {
         }
         let native_target = || match target {
             ResolvedTarget::Point(point) => Ok(Target::Point(point.clone())),
+            #[cfg(feature = "iphone")]
+            ResolvedTarget::IphoneCoordinates(_) => Err(no_effect("foreign executor target")),
             ResolvedTarget::Element(element) => Ok(Target::Element(element.clone())),
             ResolvedTarget::Semantic(_) => Err(no_effect("semantic target was not routed")),
             ResolvedTarget::None => Err(no_effect("action requires a target")),
@@ -7657,6 +7670,7 @@ fn observation_root(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Pat
         .unwrap_or_else(fallback_temp_dir)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 fn private_observation_path(observation_id: &str) -> Result<PathBuf, ProtocolError> {
     if !is_hash(observation_id) {
         return Err(ProtocolError::InvalidRequest(
@@ -7679,6 +7693,7 @@ fn private_storage_available() -> bool {
     .is_ok()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 pub(crate) fn persist_private_observation(
     observation_id: &str,
     observation: &impl Serialize,
@@ -7686,6 +7701,7 @@ pub(crate) fn persist_private_observation(
     persist_observation(&private_observation_path(observation_id)?, observation)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 pub(crate) fn load_private_observation<T: serde::de::DeserializeOwned>(
     observation_id: &str,
 ) -> Result<T, ProtocolError> {
