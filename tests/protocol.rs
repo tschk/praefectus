@@ -307,6 +307,52 @@ fn ledger_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 #[test]
+fn coordinate_input_requires_host_authority_before_any_device_access() {
+    let directory = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        NativeExecutor::default(),
+        ledger_path(&directory),
+        praefectus::DenyAuthority,
+    );
+    for action in [
+        Action::Scroll {
+            direction: Direction::Down,
+            amount: 1,
+        },
+        Action::Press {
+            key: "home".into(),
+            count: 1,
+            delay_ms: None,
+        },
+        Action::Paste {
+            text: "input".into(),
+        },
+        Action::TypeText {
+            text: "input".into(),
+            clear: false,
+            press_return: false,
+            delay_ms: None,
+        },
+    ] {
+        let mut proposal = request("coordinate-input");
+        proposal.action = action;
+        proposal.target = TargetRef::Coordinates {
+            x: 75,
+            y: 450,
+            display_id: "iphone-primary".into(),
+            display_geometry_hash: "a".repeat(64),
+            snapshot_id: "b".repeat(64),
+            snapshot_content_hash: "c".repeat(64),
+        };
+        proposal.verification = VerificationPolicy::None;
+        assert!(matches!(
+            engine.execute(&proposal, &CancellationToken::default()),
+            Err(ProtocolError::AuthorityDenied)
+        ));
+    }
+}
+
+#[test]
 fn contended_execution_lock_respects_deadline_without_dispatch() {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

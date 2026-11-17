@@ -7133,11 +7133,17 @@ fn validate_request(request: &ActionRequest) -> Result<(), ProtocolError> {
     if matches!(request.target, TargetRef::Coordinates { .. })
         && !matches!(
             request.action,
-            Action::Click { .. } | Action::Move | Action::Drag { .. }
+            Action::Click { .. }
+                | Action::Move
+                | Action::Drag { .. }
+                | Action::Scroll { .. }
+                | Action::Press { .. }
+                | Action::TypeText { .. }
+                | Action::Paste { .. }
         )
     {
         return Err(ProtocolError::InvalidRequest(
-            "coordinate targets support only click, move, and drag".to_string(),
+            "coordinate targets support only input actions".to_string(),
         ));
     }
     if matches!(request.action, Action::Drag { .. })
