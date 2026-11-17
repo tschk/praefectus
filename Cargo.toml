@@ -27,6 +27,7 @@ include = [
 default = []
 screencapturekit = ["dep:screencapturekit"]
 skylight = []
+iphone = ["dep:idevice", "dep:tokio", "dep:uuid", "dep:png", "dep:base64", "dep:plist", "dep:plist-macro", "dep:rand", "dep:rand_core", "dep:x25519-dalek", "dep:hkdf", "dep:chacha20poly1305", "dep:idevice-srp", "dep:siphasher", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:tracing", "ed25519-dalek/rand_core"]
 
 [lib]
 path = "src/lib.rs"
@@ -54,6 +55,25 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+idevice = { version = "=0.1.68", optional = true, default-features = false, features = ["aws-lc", "core_device_proxy", "rsd", "tunnel_tcp_stack", "display_stream"] }
+tokio = { version = "1.43", optional = true, features = ["rt-multi-thread", "net", "time", "sync", "io-util", "fs"] }
+uuid = { version = "1", optional = true, features = ["v3", "v4"] }
+png = { version = "0.18", optional = true }
+base64 = { version = "0.22", optional = true }
+plist = { version = "1.8", optional = true }
+plist-macro = { version = "0.1.6", optional = true }
+rand = { version = "0.10", optional = true }
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+x25519-dalek = { version = "2", optional = true }
+hkdf = { version = "0.12", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+idevice-srp = { version = "0.6", optional = true }
+siphasher = { version = "1", optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true, features = ["alloc"] }
+hmac = { version = "0.12", optional = true }
+sha1 = { version = "0.10", optional = true }
+tracing = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility-sys = "0.2"

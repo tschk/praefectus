@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub mod cdp;
+#[cfg(feature = "iphone")]
+#[doc(hidden)]
+pub mod iphone_transport;
 #[cfg(target_os = "linux")]
 mod linux_atspi;
 #[cfg(target_os = "linux")]
