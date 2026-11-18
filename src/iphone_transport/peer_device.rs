@@ -7,7 +7,7 @@ use idevice::IdeviceError;
 
 use super::{opack, tlv};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PeerDevice {
     /// peer identifier, same as the identifier returned in the `verifyManualPairing` response
     pub account_id: String,
@@ -19,6 +19,14 @@ pub struct PeerDevice {
     pub name: String,
     /// Device's Unique Device Identifier
     pub remotepairing_udid: String,
+}
+
+impl std::fmt::Debug for PeerDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerDevice")
+            .field("alt_irk", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PeerDevice {

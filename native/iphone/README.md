@@ -1,6 +1,8 @@
 # iPhone reference host
 
-This experimental app embeds Praefectus's Rust engine and CoreDevice executor on the iPhone. After setup, its operations do not use a computer relay. It is not yet a physically verified standalone controller or a release-ready product.
+This experimental app embeds Praefectus's Rust engine and CoreDevice executor on the iPhone. **The existing-record device connection is disabled pending authenticated RemotePairing support.** The code below describes implemented operations and intended setup, not working phone control in this revision. Neither the on-phone nor computer-assisted constructor can establish an operational device session. It is not a release-ready standalone controller.
+
+The imported [idevice pair-verify flow](https://github.com/jkcoxson/idevice/blob/d32c8189c51c2789496b0768039419c3705498c3/idevice/src/remote_pairing/mod.rs) derives a key from the peer's ephemeral key and authenticates the host, but does not verify the device's identity. Its stored `public_key` is the host key, not a trusted device key. Praefectus now refuses this flow before sending pairing messages or exposing session keys. An independently verified device-authentication contract and trusted identity material are required before restoring it. No speculative HomeKit proof format or invented credential field substitutes for that work.
 
 The library remains ISC. Device services use MIT-licensed `idevice` 0.1.68. The adapted MIT RemotePairing client in `src/iphone_transport` uses cryptographic traits directly and does not resolve RSA. Its full notice and repeatable import script are retained. No Poki source or patches are included.
 
@@ -73,6 +75,7 @@ Use an installed simulator's name or ID. Before releasing, test pairing, self-ro
 
 ## Release blockers
 
+- Existing-record peer authentication is unsupported. Connection fails closed, so no device observation or input is currently operational. Resolve this protocol blocker before treating the setup instructions as usable.
 - No authorized physical iPhone was available. Simulator and unsigned device builds do not validate device transport, HID negotiation, coordinates, or standalone execution.
 - Developer image, valid self-connection pairing, signing, and a compatible external VPN must be supplied. Without these, this app cannot control the phone.
 

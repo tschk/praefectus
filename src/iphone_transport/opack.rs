@@ -7,7 +7,7 @@ use plist::Value;
 pub fn opack_to_plist(bytes: &[u8]) -> Result<Value, String> {
     let mut offset = 0;
     let mut objects = Vec::new();
-    let value = opack_to_plist_inner(bytes, &mut offset, &mut objects)?;
+    let value = opack_to_plist_inner(bytes, &mut offset, &mut objects, 0)?;
     if offset != bytes.len() {
         return Err(format!(
             "unexpected trailing bytes after OPACK payload: {}",
@@ -150,7 +150,11 @@ fn opack_to_plist_inner(
     bytes: &[u8],
     offset: &mut usize,
     objects: &mut Vec<Value>,
+    depth: usize,
 ) -> Result<Value, String> {
+    if depth > 64 {
+        return Err("OPACK nesting limit exceeded".into());
+    }
     let tag = read_u8(bytes, offset)?;
     match tag {
         0x01 => Ok(Value::Boolean(true)),
@@ -204,10 +208,10 @@ fn opack_to_plist_inner(
             })?;
             lookup(objects, index)
         }
-        0xD0..=0xDE => parse_array(bytes, offset, objects, Some((tag - 0xD0) as usize)),
-        0xDF => parse_array(bytes, offset, objects, None),
-        0xE0..=0xEE => parse_dictionary(bytes, offset, objects, Some((tag - 0xE0) as usize)),
-        0xEF => parse_dictionary(bytes, offset, objects, None),
+        0xD0..=0xDE => parse_array(bytes, offset, objects, Some((tag - 0xD0) as usize), depth),
+        0xDF => parse_array(bytes, offset, objects, None, depth),
+        0xE0..=0xEE => parse_dictionary(bytes, offset, objects, Some((tag - 0xE0) as usize), depth),
+        0xEF => parse_dictionary(bytes, offset, objects, None, depth),
         0x03 => Err("unexpected OPACK terminator".into()),
         _ => Err(format!("unsupported OPACK tag: 0x{tag:02x}")),
     }
@@ -305,18 +309,19 @@ fn parse_array(
     offset: &mut usize,
     objects: &mut Vec<Value>,
     count: Option<usize>,
+    depth: usize,
 ) -> Result<Value, String> {
     let mut items = Vec::with_capacity(count.unwrap_or(0));
 
     match count {
         Some(count) => {
             for _ in 0..count {
-                items.push(opack_to_plist_inner(bytes, offset, objects)?);
+                items.push(opack_to_plist_inner(bytes, offset, objects, depth + 1)?);
             }
         }
         None => {
             while !peek_is_terminator(bytes, *offset) {
-                items.push(opack_to_plist_inner(bytes, offset, objects)?);
+                items.push(opack_to_plist_inner(bytes, offset, objects, depth + 1)?);
             }
             *offset += 1;
         }
@@ -330,21 +335,22 @@ fn parse_dictionary(
     offset: &mut usize,
     objects: &mut Vec<Value>,
     count: Option<usize>,
+    depth: usize,
 ) -> Result<Value, String> {
     let mut dict = plist::Dictionary::new();
 
     match count {
         Some(count) => {
             for _ in 0..count {
-                let key = read_dictionary_key(bytes, offset, objects)?;
-                let value = opack_to_plist_inner(bytes, offset, objects)?;
+                let key = read_dictionary_key(bytes, offset, objects, depth + 1)?;
+                let value = opack_to_plist_inner(bytes, offset, objects, depth + 1)?;
                 dict.insert(key, value);
             }
         }
         None => {
             while !peek_is_terminator(bytes, *offset) {
-                let key = read_dictionary_key(bytes, offset, objects)?;
-                let value = opack_to_plist_inner(bytes, offset, objects)?;
+                let key = read_dictionary_key(bytes, offset, objects, depth + 1)?;
+                let value = opack_to_plist_inner(bytes, offset, objects, depth + 1)?;
                 dict.insert(key, value);
             }
             *offset += 1;
@@ -358,8 +364,9 @@ fn read_dictionary_key(
     bytes: &[u8],
     offset: &mut usize,
     objects: &mut Vec<Value>,
+    depth: usize,
 ) -> Result<String, String> {
-    opack_to_plist_inner(bytes, offset, objects)?
+    opack_to_plist_inner(bytes, offset, objects, depth)?
         .into_string()
         .ok_or_else(|| "dictionary key is not a string".to_string())
 }
@@ -404,6 +411,20 @@ fn read_string(bytes: &[u8], offset: &mut usize, len: usize) -> Result<String, S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_deep_arrays_and_dictionary_keys_without_stack_overflow() {
+        for prefix in [vec![0xd1; 10_000], vec![0xe1; 10_000]] {
+            assert!(
+                super::opack_to_plist(&prefix)
+                    .unwrap_err()
+                    .contains("nesting limit")
+            );
+        }
+        let mut shallow = vec![0xd1; 32];
+        shallow.push(1);
+        assert!(super::opack_to_plist(&shallow).is_ok());
+    }
+
     #[test]
     fn t1() {
         let v = plist_macro::plist!({

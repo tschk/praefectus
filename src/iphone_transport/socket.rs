@@ -2,12 +2,12 @@ use super::RPPAIRING_MAGIC;
 // Jackson Coxson
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use plist_macro::{plist, pretty_print_plist};
+use plist_macro::plist;
 use serde::Serialize;
 use serde_json::json;
 use std::{fmt::Debug, pin::Pin};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use idevice::{IdeviceError, ReadWrite, RemoteXpcClient, xpc::XPCObject};
 
@@ -68,10 +68,12 @@ impl<R: ReadWrite> RpPairingSocket<R> {
     async fn send_rppairing(&mut self, value: impl Serialize) -> Result<(), IdeviceError> {
         let value = serde_json::to_string(&value)?;
         let x = value.as_bytes();
+        let len = u16::try_from(x.len())
+            .map_err(|_| IdeviceError::UnexpectedResponse("RPPairing frame too large".into()))?;
 
         let mut frame = Vec::with_capacity(RPPAIRING_MAGIC.len() + 2 + x.len());
         frame.extend_from_slice(RPPAIRING_MAGIC);
-        frame.extend_from_slice(&(x.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&len.to_be_bytes());
         frame.extend_from_slice(x);
         self.inner.write_all(&frame).await?;
         self.inner.flush().await?;
@@ -120,6 +122,11 @@ impl<R: ReadWrite> RpPairingSocketProvider for RpPairingSocket<R> {
         Box::pin(async move {
             let mut magic = vec![0u8; RPPAIRING_MAGIC.len()];
             self.inner.read_exact(&mut magic).await?;
+            if magic != RPPAIRING_MAGIC {
+                return Err(IdeviceError::UnexpectedResponse(
+                    "invalid RPPairing frame".into(),
+                ));
+            }
 
             let mut packet_len_bytes = [0u8; 2];
             self.inner.read_exact(&mut packet_len_bytes).await?;
@@ -129,10 +136,6 @@ impl<R: ReadWrite> RpPairingSocketProvider for RpPairingSocket<R> {
             self.inner.read_exact(&mut value).await?;
 
             debug!("recv_rppairing: {packet_len} json bytes");
-            trace!(
-                "recv_rppairing payload: {}",
-                String::from_utf8_lossy(&value)
-            );
 
             let value: serde_json::Value = serde_json::from_slice(&value)?;
 
@@ -180,7 +183,7 @@ impl<R: ReadWrite> RpPairingSocketProvider for RemoteXpcClient<R> {
                 "sequenceNumber": seq as u64
             }
         });
-        debug!("Sending XPC: {v:#?}");
+        debug!("Sending RemoteXPC pairing message");
 
         Box::pin(async move {
             self.send_object(v, true).await?;
@@ -213,7 +216,7 @@ impl<R: ReadWrite> RpPairingSocketProvider for RemoteXpcClient<R> {
     ) -> Pin<Box<dyn Future<Output = Result<plist::Value, IdeviceError>> + Send + 'a>> {
         Box::pin(async move {
             let msg = self.recv_root().await?;
-            debug!("Received RemoteXPC {}", pretty_print_plist(&msg));
+            debug!("Received RemoteXPC pairing message");
             let msg = msg.into_dictionary().and_then(|mut x| x.remove("value"));
 
             let msg = match msg {

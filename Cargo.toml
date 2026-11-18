@@ -27,7 +27,7 @@ include = [
 default = []
 screencapturekit = ["dep:screencapturekit"]
 skylight = []
-iphone = ["dep:idevice", "dep:tokio", "dep:uuid", "dep:png", "dep:base64", "dep:plist", "dep:plist-macro", "dep:rand", "dep:rand_core", "dep:x25519-dalek", "dep:hkdf", "dep:chacha20poly1305", "dep:idevice-srp", "dep:siphasher", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:tracing", "ed25519-dalek/rand_core"]
+iphone = ["dep:idevice", "dep:tokio", "dep:uuid", "dep:png", "dep:base64", "dep:plist", "dep:plist-macro", "dep:rand", "dep:rand_core", "dep:hkdf", "dep:chacha20poly1305", "dep:idevice-srp", "dep:siphasher", "dep:aes", "dep:cbc", "dep:hmac", "dep:sha1", "dep:tracing", "ed25519-dalek/rand_core"]
 
 [workspace]
 members = ["native/iphone"]
@@ -69,7 +69,6 @@ plist = { version = "1.8", optional = true }
 plist-macro = { version = "0.1.6", optional = true }
 rand = { version = "0.10", optional = true }
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
-x25519-dalek = { version = "2", optional = true }
 hkdf = { version = "0.12", optional = true }
 chacha20poly1305 = { version = "0.10", optional = true }
 idevice-srp = { version = "0.6", optional = true }

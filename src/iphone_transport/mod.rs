@@ -8,18 +8,15 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
-use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use hkdf::Hkdf;
 use idevice_srp::{client::SrpClient, groups::G_3072};
 use plist_macro::plist;
 use plist_macro::{PlistConvertible, PlistExt};
 use rand::Rng as _;
-use rand_core::OsRng;
 use serde::Serialize;
 use sha2::Sha512;
 use tracing::{debug, warn};
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 pub mod errors;
 mod opack;
@@ -37,7 +34,15 @@ pub use socket::{RpPairingSocket, RpPairingSocketProvider};
 pub use tunnel::{CdTunnel, TunnelInfo, connect_tls_psk_tunnel_native};
 
 const RPPAIRING_MAGIC: &[u8] = b"RPPairing";
-const WIRE_PROTOCOL_VERSION: u8 = 19;
+const UNSUPPORTED_PEER_AUTHENTICATION: &str =
+    "existing-record RemotePairing peer authentication is unsupported";
+
+fn validate_pin(pin: &str) -> Result<&[u8], IdeviceError> {
+    if pin.len() != 6 || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(RemotePairingError::SrpAuthFailed.into());
+    }
+    Ok(pin.as_bytes())
+}
 
 pub struct RemotePairingClient<R: RpPairingSocketProvider> {
     inner: R,
@@ -45,7 +50,7 @@ pub struct RemotePairingClient<R: RpPairingSocketProvider> {
     encrypted_sequence_number: u64,
     sending_host: String,
 
-    /// The shared secret from X25519 (pair-verify) or SRP (initial pairing).
+    /// The shared secret from explicit SRP setup. Existing-record verification is disabled.
     /// Used as PSK for the TLS tunnel and to derive per-message encryption keys.
     encryption_key: Vec<u8>,
 
@@ -53,12 +58,12 @@ pub struct RemotePairingClient<R: RpPairingSocketProvider> {
     server_cipher: ChaCha20Poly1305,
 
     paired_peer_device: Option<PeerDevice>,
+    authenticated: bool,
 }
 
 impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
     pub fn new(inner: R, sending_host: &str) -> Self {
-        // Initial ciphers are placeholders; they will be re-derived from
-        // the actual encryption_key once pair-verify or pairing completes.
+        // Placeholder ciphers cannot be used until explicit setup authenticates the peer.
         let initial_key = vec![0u8; 32];
         let (client_cipher, server_cipher) = Self::derive_main_ciphers(&initial_key);
 
@@ -67,10 +72,11 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
             sequence_number: 0,
             encrypted_sequence_number: 0,
             sending_host: sending_host.to_string(),
-            encryption_key: initial_key,
+            encryption_key: Vec::new(),
             client_cipher,
             server_cipher,
             paired_peer_device: None,
+            authenticated: false,
         }
     }
 
@@ -94,27 +100,17 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         &self.encryption_key
     }
 
-    /// Performs the RPPairing handshake, then pair-verify, falling back to a full
-    /// pair-setup if verification fails.
-    ///
-    /// Both halves work against either of the services tvOS advertises. A
-    /// successful return does not mean the connection can carry a tunnel, though:
-    /// only `_remotepairing._tcp` serves [`Self::create_tcp_listener`], so on tvOS
-    /// pairing and tunnel creation are worth keeping as separate connections.
+    /// Existing-record authentication is unsupported; fails without network I/O.
+    /// Never initiates a new pairing.
     pub async fn connect<Fut>(
         &mut self,
         pairing_file: &mut RpPairingFile,
-        pin_callback: impl Fn() -> Fut,
+        _pin_callback: impl Fn() -> Fut,
     ) -> Result<(), IdeviceError>
     where
         Fut: std::future::Future<Output = String>,
     {
-        self.attempt_pair_verify().await?;
-
-        if self.validate_pairing(pairing_file).await.is_err() {
-            self.pair(pairing_file, pin_callback).await?;
-        }
-        Ok(())
+        self.validate_pairing(pairing_file).await
     }
 
     /// Returns peer device info captured during this client's successful `pair()` flow.
@@ -128,170 +124,13 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
 
     pub async fn validate_pairing(
         &mut self,
-        pairing_file: &mut RpPairingFile,
+        _pairing_file: &mut RpPairingFile,
     ) -> Result<(), IdeviceError> {
-        let x_private_key = EphemeralSecret::random_from_rng(OsRng);
-        let x_public_key = X25519PublicKey::from(&x_private_key);
-
-        let pairing_data = tlv::serialize_tlv8(&[
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::State,
-                data: vec![0x01],
-            },
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::PublicKey,
-                data: x_public_key.to_bytes().to_vec(),
-            },
-        ]);
-        let pairing_data = R::serialize_bytes(&pairing_data);
-        self.send_pairing_data(plist!({
-            "data": pairing_data,
-            "kind": "verifyManualPairing",
-            "startNewSession": true
-        }))
-        .await?;
-        debug!("Waiting for response from verifyManualPairing");
-
-        let pairing_data = self.receive_pairing_data().await?;
-
-        let data = match R::deserialize_bytes(pairing_data) {
-            Some(d) => d,
-            None => {
-                return Err(IdeviceError::UnexpectedResponse(
-                    "failed to deserialize pair-verify response bytes".into(),
-                ));
-            }
-        };
-
-        let data = tlv::deserialize_tlv8(&data)?;
-
-        if data
-            .iter()
-            .any(|x| x.tlv_type == tlv::PairingDataComponentType::ErrorResponse)
-        {
-            self.send_pair_verified_failed().await?;
-            return Err(RemotePairingError::PairVerifyFailed.into());
-        }
-
-        let device_public_key = match data
-            .iter()
-            .find(|x| x.tlv_type == tlv::PairingDataComponentType::PublicKey)
-        {
-            Some(d) => d,
-            None => {
-                warn!("No public key in TLV data");
-                return Err(IdeviceError::UnexpectedResponse(
-                    "missing public key in pair-verify TLV data".into(),
-                ));
-            }
-        };
-        let peer_pub_bytes: [u8; 32] = match device_public_key.data.as_slice().try_into() {
-            Ok(d) => d,
-            Err(_) => {
-                warn!("Device public key isn't the expected size");
-                return Err(IdeviceError::NotEnoughBytes(
-                    32,
-                    device_public_key.data.len(),
-                ));
-            }
-        };
-        let device_public_key = x25519_dalek::PublicKey::from(peer_pub_bytes);
-        let shared_secret = x_private_key.diffie_hellman(&device_public_key);
-
-        // Save the raw shared secret as the encryption key for tunnel PSK
-        self.encryption_key = shared_secret.as_bytes().to_vec();
-
-        // Derive encryption key with HKDF-SHA512
-        let hk =
-            Hkdf::<sha2::Sha512>::new(Some(b"Pair-Verify-Encrypt-Salt"), shared_secret.as_bytes());
-
-        let mut okm = [0u8; 32];
-        hk.expand(b"Pair-Verify-Encrypt-Info", &mut okm).unwrap();
-
-        // ChaCha20Poly1305 AEAD cipher
-        let cipher = ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&okm));
-
-        let ed25519_signing_key = &mut pairing_file.e_private_key;
-
-        let mut signbuf = Vec::with_capacity(32 + pairing_file.identifier.len() + 32);
-        signbuf.extend_from_slice(x_public_key.as_bytes()); // 32 bytes
-        signbuf.extend_from_slice(pairing_file.identifier.as_bytes()); // variable
-        signbuf.extend_from_slice(device_public_key.as_bytes()); // 32 bytes
-
-        let signature: Signature = ed25519_signing_key.sign(&signbuf);
-
-        let plaintext = vec![
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::Identifier,
-                data: pairing_file.identifier.as_bytes().to_vec(),
-            },
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::Signature,
-                data: signature.to_vec(),
-            },
-        ];
-        let plaintext = tlv::serialize_tlv8(&plaintext);
-        let nonce = Nonce::from_slice(b"\x00\x00\x00\x00PV-Msg03"); // 12-byte nonce
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: &plaintext,
-                    aad: &[],
-                },
-            )
-            .expect("encryption should not fail");
-
-        let msg = vec![
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::State,
-                data: [0x03].to_vec(),
-            },
-            tlv::TLV8Entry {
-                tlv_type: tlv::PairingDataComponentType::EncryptedData,
-                data: ciphertext,
-            },
-        ];
-
-        debug!("Waiting for signbuf response");
-        self.send_pairing_data(plist! ({
-            "data": R::serialize_bytes(&tlv::serialize_tlv8(&msg)),
-            "kind": "verifyManualPairing",
-            "startNewSession": false
-        }))
-        .await?;
-        let res = self.receive_pairing_data().await?;
-
-        let data = match R::deserialize_bytes(res) {
-            Some(d) => d,
-            None => {
-                return Err(IdeviceError::UnexpectedResponse(
-                    "failed to deserialize pair-verify signature response bytes".into(),
-                ));
-            }
-        };
-        let data = tlv::deserialize_tlv8(&data)?;
-        debug!("Verify TLV: {data:#?}");
-
-        // Check if the device responded with an error (which is expected for a new pairing)
-        if data
-            .iter()
-            .any(|x| x.tlv_type == tlv::PairingDataComponentType::ErrorResponse)
-        {
-            debug!(
-                "Verification failed, device reported an error. This is expected for a new pairing."
-            );
-            self.send_pair_verified_failed().await?;
-            // Return a specific error to the caller.
-            return Err(RemotePairingError::PairVerifyFailed.into());
-        }
-
-        // Re-derive main encryption ciphers from the X25519 shared secret
-        let (cc, sc) = Self::derive_main_ciphers(&self.encryption_key);
-        self.client_cipher = cc;
-        self.server_cipher = sc;
-
-        Ok(())
+        self.authenticated = false;
+        self.encryption_key.clear();
+        Err(IdeviceError::UnexpectedResponse(
+            UNSUPPORTED_PEER_AUTHENTICATION.into(),
+        ))
     }
 
     pub async fn send_pair_verified_failed(&mut self) -> Result<(), IdeviceError> {
@@ -312,47 +151,11 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
     }
 
     pub async fn attempt_pair_verify(&mut self) -> Result<plist::Value, IdeviceError> {
-        debug!("Sending attemptPairVerify");
-        self.inner
-            .send_plain(
-                plist!({
-                    "request": {
-                        "_0": {
-                            "handshake": {
-                                "_0": {
-                                    "hostOptions": {
-                                        "attemptPairVerify": true
-                                    },
-                                    "wireProtocolVersion": plist::Value::Integer(WIRE_PROTOCOL_VERSION.into()),
-                                }
-                            }
-                        }
-                    }
-                }),
-                self.sequence_number,
-            )
-            .await?;
-        self.sequence_number += 1;
-
-        debug!("Waiting for attemptPairVerify response");
-        let response = self.inner.recv_plain().await?;
-
-        let response = response
-            .as_dictionary()
-            .and_then(|x| x.get("response"))
-            .and_then(|x| x.as_dictionary())
-            .and_then(|x| x.get("_1"))
-            .and_then(|x| x.as_dictionary())
-            .and_then(|x| x.get("handshake"))
-            .and_then(|x| x.as_dictionary())
-            .and_then(|x| x.get("_0"));
-
-        match response {
-            Some(v) => Ok(v.to_owned()),
-            None => Err(IdeviceError::UnexpectedResponse(
-                "missing handshake response in attemptPairVerify".into(),
-            )),
-        }
+        self.authenticated = false;
+        self.encryption_key.clear();
+        Err(IdeviceError::UnexpectedResponse(
+            UNSUPPORTED_PEER_AUTHENTICATION.into(),
+        ))
     }
 
     pub async fn pair<Fut>(
@@ -363,13 +166,22 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
     where
         Fut: std::future::Future<Output = String>,
     {
+        self.authenticated = false;
+        self.encryption_key.clear();
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
-        let tlv = self.save_pair_record_on_peer(pairing_file, &key).await?;
+        let mut staged_record = pairing_file.clone();
+        let tlv = self
+            .save_pair_record_on_peer(&mut staged_record, &key)
+            .await?;
         let peer_device = peer_device::parse_peer_device_from_tlv(&tlv)?;
-
-        pairing_file.alt_irk = Some(peer_device.alt_irk.clone());
+        staged_record.alt_irk = Some(peer_device.alt_irk.clone());
+        *pairing_file = staged_record;
         self.paired_peer_device = Some(peer_device);
+        self.encryption_key = key;
+        (self.client_cipher, self.server_cipher) = Self::derive_main_ciphers(&self.encryption_key);
+        self.encrypted_sequence_number = 0;
+        self.authenticated = true;
 
         Ok(())
     }
@@ -417,14 +229,8 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
 
         let mut pin = None;
 
-        let pairing_data = match if let Some(err) = response.get("pairingRejectedWithError") {
-            let context = err
-                .get_by("wrappedError")
-                .and_then(|x| x.get_by("userInfo"))
-                .and_then(|x| x.get_by("NSLocalizedDescription"))
-                .and_then(|x| x.as_string())
-                .map(|x| x.to_string());
-            return Err(RemotePairingError::PairingRejected(context.unwrap_or_default()).into());
+        let pairing_data = match if response.contains_key("pairingRejectedWithError") {
+            return Err(RemotePairingError::PairingRejected(String::new()).into());
         } else if response.get("awaitingUserConsent").is_some() {
             pin = Some("000000".to_string());
             Some(self.receive_pairing_data().await?)
@@ -452,7 +258,6 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
                 ));
             }
         })?;
-        debug!("Received pairingData response: {tlv:#?}");
 
         let mut salt = Vec::new();
         let mut public_key = Vec::new();
@@ -498,6 +303,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         public_key: &[u8],
         pin: &str,
     ) -> Result<Vec<u8>, IdeviceError> {
+        let pin = validate_pin(pin)?;
         let client = SrpClient::<Sha512>::new(
             &G_3072, // PRIME_3072 + generator
         );
@@ -510,14 +316,14 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         let verifier = match client.process_reply(
             &a_private,
             "Pair-Setup".as_bytes(),
-            &pin.as_bytes()[..6],
+            pin,
             salt,
             public_key,
             false,
         ) {
             Ok(v) => v,
-            Err(e) => {
-                warn!("SRP verifier creation failed: {e:?}");
+            Err(_) => {
+                warn!("SRP verifier creation failed");
                 return Err(RemotePairingError::SrpAuthFailed.into());
             }
         };
@@ -563,8 +369,6 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
             }
         })?;
 
-        debug!("Proof response: {response:#?}");
-
         let proof = match response
             .iter()
             .find(|x| x.tlv_type == tlv::PairingDataComponentType::Proof)
@@ -580,8 +384,8 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
 
         match verifier.verify_server(proof) {
             Ok(_) => Ok(verifier.key().to_vec()),
-            Err(e) => {
-                warn!("Server auth failed: {e:?}");
+            Err(_) => {
+                warn!("Server authentication failed");
                 Err(RemotePairingError::SrpAuthFailed.into())
             }
         }
@@ -600,16 +404,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         hk.expand(info, &mut setup_encryption_key)
             .expect("HKDF expand failed");
 
-        // Save the SRP session key as the encryption key
-        self.encryption_key = encryption_key.to_vec();
-
         pairing_file.recreate_signing_keys();
-        {
-            // Re-derive main ciphers from the SRP session key
-            let (cc, sc) = Self::derive_main_ciphers(encryption_key);
-            self.client_cipher = cc;
-            self.server_cipher = sc;
-        }
 
         let hk = Hkdf::<Sha512>::new(Some(b"Pair-Setup-Controller-Sign-Salt"), encryption_key);
 
@@ -672,7 +467,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         ) {
             Ok(c) => c,
             Err(e) => {
-                warn!("Chacha encryption failed: {e:?}");
+                warn!("Chacha encryption failed");
                 return Err(RemotePairingError::ChachaEncryption(e).into());
             }
         };
@@ -740,11 +535,10 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
                     aad: b"",
                 },
             )
-            .expect("decryption failure!");
+            .map_err(|_| RemotePairingError::PairVerifyFailed)?;
 
         let tlv = tlv::deserialize_tlv8(&plaintext)?;
 
-        debug!("Decrypted plaintext TLV: {tlv:?}");
         Ok(tlv)
     }
 
@@ -754,6 +548,9 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         &mut self,
         request: plist::Value,
     ) -> Result<plist::Value, IdeviceError> {
+        if !self.authenticated {
+            return Err(RemotePairingError::PairVerifyFailed.into());
+        }
         let plaintext = serde_json::to_vec(
             &plist::to_value(&request).map_err(|e| IdeviceError::InternalError(e.to_string()))?,
         )
@@ -843,16 +640,13 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         });
 
         let response = self.send_receive_encrypted_request(request).await?;
-        debug!("createListener response: {response:#?}");
 
         let port = response
             .get_by("createListener")
             .and_then(|c| c.get_by("port"))
             .and_then(|p| p.as_unsigned_integer())
             .ok_or_else(|| {
-                IdeviceError::UnexpectedResponse(format!(
-                    "missing createListener.port in response: {response:?}"
-                ))
+                IdeviceError::UnexpectedResponse("missing createListener.port".into())
             })?;
 
         Ok(port as u16)
@@ -899,14 +693,8 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
             .and_then(|x| x.get_by("data"))
         {
             Ok(data.to_owned())
-        } else if let Some(err) = response.get_by("pairingRejectedWithError") {
-            let context = err
-                .get_by("wrappedError")
-                .and_then(|x| x.get_by("userInfo"))
-                .and_then(|x| x.get_by("NSLocalizedDescription"))
-                .and_then(|x| x.as_string())
-                .map(|x| x.to_string());
-            Err(RemotePairingError::PairingRejected(context.unwrap_or_default()).into())
+        } else if response.get_by("pairingRejectedWithError").is_some() {
+            Err(RemotePairingError::PairingRejected(String::new()).into())
         } else {
             Err(IdeviceError::UnexpectedResponse(
                 "pairing data response contained neither data nor rejection".into(),
@@ -922,5 +710,84 @@ impl<R: RpPairingSocketProvider> std::fmt::Debug for RemotePairingClient<R> {
             .field("sequence_number", &self.sequence_number)
             .field("sending_host", &self.sending_host)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod authentication_tests {
+    use super::*;
+    use tlv::{PairingDataComponentType as T, TLV8Entry};
+
+    fn entry(tlv_type: T, data: Vec<u8>) -> TLV8Entry {
+        TLV8Entry { tlv_type, data }
+    }
+
+    fn envelope(entries: &[TLV8Entry]) -> plist::Value {
+        plist!({"event": {"_0": {"pairingData": {"_0": {
+            "data": RpPairingSocket::<tokio::io::DuplexStream>::serialize_bytes(&tlv::serialize_tlv8(entries))
+        }}}}})
+    }
+
+    #[test]
+    fn pin_validation_rejects_short_long_and_unicode_without_panicking() {
+        for pin in ["", "12345", "1234567", "ééé", "abcdef", "123 56"] {
+            assert!(validate_pin(pin).is_err());
+        }
+        assert_eq!(validate_pin("012345").unwrap(), b"012345");
+    }
+
+    #[test]
+    fn existing_record_authentication_never_contacts_peer_or_exposes_key() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::AsyncReadExt;
+            let (host, mut device) = tokio::io::duplex(16_384);
+            let mut record = RpPairingFile::generate("test-host");
+            let mut client = RemotePairingClient::new(RpPairingSocket::new(host), "test-host");
+            for operation in 0..3 {
+                client.encryption_key = vec![7; 32];
+                client.authenticated = true;
+                let error = match operation {
+                    0 => client.validate_pairing(&mut record).await.unwrap_err(),
+                    1 => client.connect(&mut record, || async { panic!("must not request a PIN") }).await.unwrap_err(),
+                    _ => client.attempt_pair_verify().await.unwrap_err(),
+                };
+                assert!(matches!(error, IdeviceError::UnexpectedResponse(message) if message == UNSUPPORTED_PEER_AUTHENTICATION));
+                assert!(client.encryption_key().is_empty());
+                assert!(!client.authenticated);
+                assert!(client.send_receive_encrypted_request(plist!({})).await.is_err());
+                assert!(client.create_tcp_listener().await.is_err());
+                assert_eq!(client.sequence_number, 0);
+            }
+            drop(client);
+            let mut byte = [0; 1];
+            assert_eq!(device.read(&mut byte).await.unwrap(), 0, "no network bytes may be emitted");
+        });
+    }
+
+    #[test]
+    fn invalid_setup_ciphertext_fails_without_panicking() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (host, device) = tokio::io::duplex(16_384);
+            let mut record = RpPairingFile::generate("test-host");
+            let mut client = RemotePairingClient::new(RpPairingSocket::new(host), "test-host");
+            assert!(client.validate_pairing(&mut record).await.is_err());
+            assert!(client.encryption_key().is_empty());
+            let task = tokio::spawn(async move {
+                let mut peer = RpPairingSocket::new_device(device);
+                peer.recv_plain().await.unwrap();
+                peer.send_plain(envelope(&[entry(T::EncryptedData, vec![0; 16])]), 0)
+                    .await
+                    .unwrap();
+            });
+            assert!(
+                client
+                    .save_pair_record_on_peer(&mut record, &[7; 32])
+                    .await
+                    .is_err()
+            );
+            assert!(client.encryption_key().is_empty());
+            assert!(!client.authenticated);
+            task.await.unwrap();
+        });
     }
 }

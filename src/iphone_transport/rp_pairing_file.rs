@@ -8,7 +8,7 @@ use plist::Dictionary;
 use plist_macro::plist_to_xml_bytes;
 use rand_core::OsRng;
 use serde::de::Error;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use idevice::IdeviceError;
 
@@ -89,7 +89,6 @@ impl RpPairingFile {
     /// Parse from plist bytes (XML or binary).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, IdeviceError> {
         let mut p: Dictionary = plist::from_bytes(bytes)?;
-        debug!("Read dictionary for rppairingfile: {p:#?}");
 
         let public_key = match p
             .remove("public_key")
@@ -138,6 +137,9 @@ impl RpPairingFile {
             }
         };
 
+        if private_key.verifying_key() != public_key {
+            return Err(IdeviceError::UnexpectedResponse("host key mismatch".into()));
+        }
         Ok(Self {
             e_private_key: private_key,
             e_public_key: public_key,
@@ -164,7 +166,32 @@ impl std::fmt::Debug for RpPairingFile {
         f.debug_struct("RpPairingFile")
             .field("e_public_key", &self.e_public_key)
             .field("identifier", &self.identifier)
-            .field("alt_irk", &self.alt_irk)
+            .field("alt_irk", &self.alt_irk.as_ref().map(|_| "[REDACTED]"))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_host_record_round_trips_and_rejects_mismatched_keys() {
+        let mut record = RpPairingFile::generate("host");
+        let decoded = RpPairingFile::from_bytes(&record.to_bytes()).unwrap();
+        assert_eq!(decoded.e_public_key, record.e_public_key);
+        assert_eq!(decoded.identifier, record.identifier);
+        record.e_public_key = SigningKey::from_bytes(&[42; 32]).verifying_key();
+        assert!(RpPairingFile::from_bytes(&record.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn debug_redacts_identity_resolution_key_and_private_key() {
+        let mut record = RpPairingFile::generate("host");
+        record.alt_irk = Some(vec![171; 16]);
+        let debug = format!("{record:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&format!("{:?}", record.alt_irk)));
+        assert!(!debug.contains("e_private_key"));
     }
 }
