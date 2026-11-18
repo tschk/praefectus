@@ -594,7 +594,7 @@ mod tests {
         let observation = observation();
         let expected = observation.target("e1").unwrap();
         let (success, exit) = execute_input(
-            input(observation.clone(), VerificationPolicy::None),
+            input(observation, VerificationPolicy::None),
             directory.path().join("state").join("success"),
             TestExecutor {
                 expected: expected.clone(),
@@ -606,8 +606,10 @@ mod tests {
             success["acknowledgements"][2]["state"]["terminal"]["kind"],
             "succeeded"
         );
+        let observation = self::observation();
+        let expected = observation.target("e1").unwrap();
         let error = execute_input(
-            input(observation.clone(), VerificationPolicy::SnapshotChanged),
+            input(observation, VerificationPolicy::SnapshotChanged),
             directory.path().join("state").join("first"),
             TestExecutor {
                 expected: expected.clone(),
@@ -623,7 +625,8 @@ mod tests {
         assert_eq!(terminal["receipt"]["effect"], "executed_unverified");
         assert_eq!(terminal["receipt"]["delivery_route"], "target_addressed");
 
-        let mut changed = observation.clone();
+        let mut changed = self::observation();
+        let expected = changed.target("e1").unwrap();
         changed.elements[0].fingerprint_hash = "e".repeat(64);
         let error = execute_input(
             input(changed, VerificationPolicy::None),
@@ -643,7 +646,7 @@ mod tests {
         assert_eq!(terminal["kind"], "rejected");
         assert_eq!(terminal["code"], "stale_target");
 
-        let mut stale = observation;
+        let mut stale = self::observation();
         stale.expires_at_ms = now_ms() - 1;
         stale.observed_at_ms = stale.expires_at_ms - 1_000;
         let error = execute_input(
