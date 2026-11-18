@@ -696,7 +696,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
         this.write_seq += 1;
 
         match Pin::new(&mut this.inner).poll_write(cx, &record) {
-            Poll::Ready(Ok(0)) => Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
+            Poll::Ready(Ok(0)) => {
+                this.write_seq -= 1;
+                Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()))
+            }
             Poll::Ready(Ok(written)) => {
                 if written < record.len() {
                     // Buffer the unsent remainder
@@ -767,6 +770,7 @@ mod tests {
         output: Vec<u8>,
         pending: bool,
         shutdown: bool,
+        next_write_result: Option<std::io::Result<usize>>,
     }
     impl AsyncRead for Wire {
         fn poll_read(
@@ -783,6 +787,9 @@ mod tests {
             cx: &mut Context<'_>,
             bytes: &[u8],
         ) -> Poll<std::io::Result<usize>> {
+            if let Some(result) = self.next_write_result.take() {
+                return Poll::Ready(result);
+            }
             if std::mem::take(&mut self.pending) {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -846,6 +853,44 @@ mod tests {
                     wire.is_empty(),
                     "plaintext must not be sent twice after Pending"
                 );
+            }
+        });
+    }
+
+    #[test]
+    fn initial_write_failures_allow_retry_without_skipping_record_sequence() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
+                for kind in [
+                    std::io::ErrorKind::BrokenPipe,
+                    std::io::ErrorKind::WriteZero,
+                ] {
+                    let mut stream = encrypted_stream(Vec::new(), suite);
+                    stream.inner.next_write_result = Some(match kind {
+                        std::io::ErrorKind::WriteZero => Ok(0),
+                        _ => Err(kind.into()),
+                    });
+                    assert_eq!(stream.write(b"retry").await.unwrap_err().kind(), kind);
+                    assert!(stream.inner.output.is_empty());
+                    stream.write_all(b"retry").await.unwrap();
+                    stream.write_all(b"next").await.unwrap();
+                    stream.flush().await.unwrap();
+
+                    let mut wire = stream.inner.output.as_slice();
+                    for (seq, expected) in [b"retry".as_slice(), b"next"].into_iter().enumerate() {
+                        let (ct, body) = read_record(&mut wire).await.unwrap();
+                        assert_eq!(ct, CT_APPLICATION_DATA);
+                        assert_eq!(
+                            decrypt_record(&stream.keys, false, seq as u64, ct, &body)
+                                .unwrap_or_else(|error| panic!("{suite:?}, {kind:?}: {error}")),
+                            expected
+                        );
+                    }
+                    assert!(
+                        wire.is_empty(),
+                        "failed writes must not duplicate plaintext"
+                    );
+                }
             }
         });
     }

@@ -890,7 +890,7 @@ index 30fdd85..9f3956f 100644
 
              let msg = match msg {
 diff --git a/src/iphone_transport/tls_psk.rs b/src/iphone_transport/tls_psk.rs
-index cf78423..06e3812 100644
+index cf78423..5cdbac8 100644
 --- a/src/iphone_transport/tls_psk.rs
 +++ b/src/iphone_transport/tls_psk.rs
 @@ -22,8 +22,11 @@ const TLS_12: [u8; 2] = [0x03, 0x03];
@@ -1068,14 +1068,14 @@ index cf78423..06e3812 100644
 -                    _ => "unknown",
 -                }
 -            )));
--        }
++        if ct != CT_HANDSHAKE || transcript.len() + payload.len() > MAX_HANDSHAKE {
++            return Err(record_authentication_error());
+         }
 -        if ct != CT_HANDSHAKE {
 -            return Err(IdeviceError::InternalError(format!(
 -                "Expected handshake, got ct={ct}"
 -            )));
-+        if ct != CT_HANDSHAKE || transcript.len() + payload.len() > MAX_HANDSHAKE {
-+            return Err(record_authentication_error());
-         }
+-        }
 -        transcript.extend_from_slice(&payload);
 -
 -        for (msg_type, _msg_bytes) in parse_handshake_messages(&payload) {
@@ -1365,15 +1365,18 @@ index cf78423..06e3812 100644
          // Clamp to TLS max record size to avoid oversized records
          let chunk = &data[..data.len().min(TLS_MAX_PLAINTEXT)];
 
-@@ -678,6 +696,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
+@@ -678,6 +696,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
          this.write_seq += 1;
 
          match Pin::new(&mut this.inner).poll_write(cx, &record) {
-+            Poll::Ready(Ok(0)) => Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
++            Poll::Ready(Ok(0)) => {
++                this.write_seq -= 1;
++                Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()))
++            }
              Poll::Ready(Ok(written)) => {
                  if written < record.len() {
                      // Buffer the unsent remainder
-@@ -692,7 +711,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
+@@ -692,7 +714,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
              Poll::Pending => {
                  // Buffer the entire record for later flush
                  this.write_buf = record;
@@ -1382,7 +1385,7 @@ index cf78423..06e3812 100644
              }
          }
      }
-@@ -703,6 +722,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
+@@ -703,6 +725,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
          // Flush buffered write data first
          while !this.write_buf.is_empty() {
              match Pin::new(&mut this.inner).poll_write(cx, &this.write_buf) {
@@ -1392,7 +1395,7 @@ index cf78423..06e3812 100644
                  Poll::Ready(Ok(n)) => {
                      this.write_buf.drain(..n);
                  }
-@@ -714,7 +736,267 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
+@@ -714,7 +739,309 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
          Pin::new(&mut this.inner).poll_flush(cx)
      }
 
@@ -1428,6 +1431,7 @@ index cf78423..06e3812 100644
 +        output: Vec<u8>,
 +        pending: bool,
 +        shutdown: bool,
++        next_write_result: Option<std::io::Result<usize>>,
 +    }
 +    impl AsyncRead for Wire {
 +        fn poll_read(
@@ -1444,6 +1448,9 @@ index cf78423..06e3812 100644
 +            cx: &mut Context<'_>,
 +            bytes: &[u8],
 +        ) -> Poll<std::io::Result<usize>> {
++            if let Some(result) = self.next_write_result.take() {
++                return Poll::Ready(result);
++            }
 +            if std::mem::take(&mut self.pending) {
 +                cx.waker().wake_by_ref();
 +                return Poll::Pending;
@@ -1507,6 +1514,44 @@ index cf78423..06e3812 100644
 +                    wire.is_empty(),
 +                    "plaintext must not be sent twice after Pending"
 +                );
++            }
++        });
++    }
++
++    #[test]
++    fn initial_write_failures_allow_retry_without_skipping_record_sequence() {
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
++                for kind in [
++                    std::io::ErrorKind::BrokenPipe,
++                    std::io::ErrorKind::WriteZero,
++                ] {
++                    let mut stream = encrypted_stream(Vec::new(), suite);
++                    stream.inner.next_write_result = Some(match kind {
++                        std::io::ErrorKind::WriteZero => Ok(0),
++                        _ => Err(kind.into()),
++                    });
++                    assert_eq!(stream.write(b"retry").await.unwrap_err().kind(), kind);
++                    assert!(stream.inner.output.is_empty());
++                    stream.write_all(b"retry").await.unwrap();
++                    stream.write_all(b"next").await.unwrap();
++                    stream.flush().await.unwrap();
++
++                    let mut wire = stream.inner.output.as_slice();
++                    for (seq, expected) in [b"retry".as_slice(), b"next"].into_iter().enumerate() {
++                        let (ct, body) = read_record(&mut wire).await.unwrap();
++                        assert_eq!(ct, CT_APPLICATION_DATA);
++                        assert_eq!(
++                            decrypt_record(&stream.keys, false, seq as u64, ct, &body)
++                                .unwrap_or_else(|error| panic!("{suite:?}, {kind:?}: {error}")),
++                            expected
++                        );
++                    }
++                    assert!(
++                        wire.is_empty(),
++                        "failed writes must not duplicate plaintext"
++                    );
++                }
 +            }
 +        });
 +    }

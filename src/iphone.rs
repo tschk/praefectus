@@ -745,12 +745,14 @@ impl Media {
                 async move { while socket.recv().await.is_ok() {} },
             ));
         }
-        // Allow the device to publish the authenticated touchscreen surface.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        Ok(Self {
+        // Own the tasks before yielding so cancellation aborts them too.
+        let media = Self {
             tasks,
             _client: client,
-        })
+        };
+        // Allow the device to publish the authenticated touchscreen surface.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(media)
     }
     fn stop_draining(&mut self) {
         for task in &self.tasks {
