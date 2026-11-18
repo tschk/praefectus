@@ -22,7 +22,17 @@
                                                                                   object:springboard];
     XCTAssertEqual([XCTWaiter waitForExpectations:@[result] timeout:5], XCTWaiterResultCompleted);
     XCTAssertNotEqual(settings.state, XCUIApplicationStateRunningForeground);
-    XCTAssertTrue([springboard.icons.firstMatch waitForExistenceWithTimeout:5]);
+    NSPredicate *visibleIcon = [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+        for (XCUIElement *icon in springboard.icons.allElementsBoundByIndex) {
+            if (icon.hittable) {
+                return YES;
+            }
+        }
+        return NO;
+    }];
+    XCTNSPredicateExpectation *iconResult = [[XCTNSPredicateExpectation alloc] initWithPredicate:visibleIcon
+                                                                                      object:springboard];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[iconResult] timeout:5], XCTWaiterResultCompleted);
 }
 
 @end
