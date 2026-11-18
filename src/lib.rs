@@ -4962,6 +4962,12 @@ pub struct NativeExecutor {
     linux_atspi: std::sync::Mutex<Option<linux_atspi::LinuxAtspiBackend>>,
 }
 
+enum NativeInputTarget<'a> {
+    Resolved(&'a ResolvedTarget),
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
+    FocusValidatedSemantic,
+}
+
 impl Default for NativeExecutor {
     fn default() -> Self {
         Self {
@@ -5370,9 +5376,9 @@ impl NativeExecutor {
                     return Err(no_effect("semantic target is not focused"));
                 }
                 drop(backend);
-                return self.dispatch(
+                return self.dispatch_native_input(
                     action,
-                    &ResolvedTarget::Point(NativePoint { x: 0, y: 0 }),
+                    NativeInputTarget::FocusValidatedSemantic,
                     &VerificationPolicy::None,
                     cancellation,
                     deadline_at_ms,
@@ -5401,9 +5407,9 @@ impl NativeExecutor {
                 if focused != *target {
                     return Err(no_effect("semantic target is not focused"));
                 }
-                return self.dispatch(
+                return self.dispatch_native_input(
                     action,
-                    &ResolvedTarget::Point(NativePoint { x: 0, y: 0 }),
+                    NativeInputTarget::FocusValidatedSemantic,
                     &VerificationPolicy::None,
                     cancellation,
                     deadline_at_ms,
@@ -6285,7 +6291,45 @@ impl Executor for NativeExecutor {
         if let ResolvedTarget::Semantic(target) = target {
             return self.dispatch_semantic(action, target, cancellation, deadline_at_ms);
         }
-        if matches!(target, ResolvedTarget::Point(_))
+        self.dispatch_native_input(
+            action,
+            NativeInputTarget::Resolved(target),
+            verification,
+            cancellation,
+            deadline_at_ms,
+        )
+    }
+}
+
+impl NativeExecutor {
+    fn dispatch_native_input(
+        &self,
+        action: &Action,
+        target: NativeInputTarget<'_>,
+        verification: &VerificationPolicy,
+        cancellation: &CancellationToken,
+        deadline_at_ms: i64,
+    ) -> Result<DispatchReceipt, DispatchError> {
+        Self::check_before_effect(cancellation, deadline_at_ms)?;
+        validate_action(action).map_err(|_| no_effect("action parameters are invalid"))?;
+        let target = match target {
+            NativeInputTarget::Resolved(target) => Some(target),
+            #[cfg(any(target_os = "linux", target_os = "windows", test))]
+            NativeInputTarget::FocusValidatedSemantic => {
+                if !matches!(
+                    action,
+                    Action::TypeText { .. }
+                        | Action::Press { .. }
+                        | Action::Paste { .. }
+                        | Action::Hotkey { .. }
+                        | Action::Scroll { .. }
+                ) {
+                    return Err(no_effect("action requires a fenced target"));
+                }
+                None
+            }
+        };
+        if matches!(target, Some(ResolvedTarget::Point(_)))
             && matches!(
                 action,
                 Action::TypeText { .. }
@@ -6299,21 +6343,21 @@ impl Executor for NativeExecutor {
             ));
         }
         match target {
-            ResolvedTarget::Point(_) => {}
+            Some(ResolvedTarget::Point(_)) | None => {}
             #[cfg(feature = "iphone")]
-            ResolvedTarget::IphoneCoordinates(_) => {
+            Some(ResolvedTarget::IphoneCoordinates(_)) => {
                 return Err(no_effect("foreign executor target"));
             }
-            ResolvedTarget::None => return Err(no_effect("action requires a fenced target")),
-            ResolvedTarget::Element(element) => validate_live_element(element)
+            Some(ResolvedTarget::None) => return Err(no_effect("action requires a fenced target")),
+            Some(ResolvedTarget::Element(element)) => validate_live_element(element)
                 .map_err(|_| no_effect("semantic target is unavailable"))?,
-            ResolvedTarget::Semantic(_) => unreachable!("semantic target handled above"),
+            Some(ResolvedTarget::Semantic(_)) => unreachable!("semantic target handled above"),
         }
         if matches!(
             (action, target),
             (
                 Action::Click { count, .. },
-                ResolvedTarget::Element(_)
+                Some(ResolvedTarget::Element(_))
             ) if *count > 1
         ) {
             return Err(unsupported("repeated semantic clicks are unavailable"));
@@ -6357,12 +6401,12 @@ impl Executor for NativeExecutor {
             return Err(no_effect("global input delivery is disabled for this host"));
         }
         let native_target = || match target {
-            ResolvedTarget::Point(point) => Ok(Target::Point(point.clone())),
+            Some(ResolvedTarget::Point(point)) => Ok(Target::Point(point.clone())),
             #[cfg(feature = "iphone")]
-            ResolvedTarget::IphoneCoordinates(_) => Err(no_effect("foreign executor target")),
-            ResolvedTarget::Element(element) => Ok(Target::Element(element.clone())),
-            ResolvedTarget::Semantic(_) => Err(no_effect("semantic target was not routed")),
-            ResolvedTarget::None => Err(no_effect("action requires a target")),
+            Some(ResolvedTarget::IphoneCoordinates(_)) => Err(no_effect("foreign executor target")),
+            Some(ResolvedTarget::Element(element)) => Ok(Target::Element(element.clone())),
+            Some(ResolvedTarget::Semantic(_)) => Err(no_effect("semantic target was not routed")),
+            Some(ResolvedTarget::None) | None => Err(no_effect("action requires a target")),
         };
         if let Action::TypeText {
             text,
@@ -6391,7 +6435,7 @@ impl Executor for NativeExecutor {
                 if matches!(button, MouseButton::Middle) && !cfg!(target_os = "windows") {
                     return Err(unsupported("middle click is not reliable on this backend"));
                 }
-                if matches!(target, ResolvedTarget::Element(_))
+                if matches!(target, Some(ResolvedTarget::Element(_)))
                     && !matches!(button, MouseButton::Left)
                 {
                     return Err(unsupported(
@@ -6489,7 +6533,7 @@ impl Executor for NativeExecutor {
                 if !matches!(button, MouseButton::Left) {
                     return Err(unsupported("drag supports only the left button"));
                 }
-                let ResolvedTarget::Point(origin) = target else {
+                let Some(ResolvedTarget::Point(origin)) = target else {
                     return Err(no_effect("drag requires a fenced coordinate target"));
                 };
                 let destination =
@@ -6520,7 +6564,8 @@ impl Executor for NativeExecutor {
                 if !cfg!(target_os = "macos") {
                     return Err(unsupported("set_value is unavailable on this backend"));
                 }
-                if !matches!(target, ResolvedTarget::Element(element) if element.bounds.is_some()) {
+                if !matches!(target, Some(ResolvedTarget::Element(element)) if element.bounds.is_some())
+                {
                     return Err(no_effect("set_value requires an element with bounds"));
                 }
                 Self::check_before_effect(cancellation, deadline_at_ms)?;
@@ -9456,6 +9501,164 @@ mod tests {
         current.enabled = Some(true);
         current.state = serde_json::json!({"visible": false, "hidden": true});
         assert!(validate_matching_live_element(&current, &expected).is_err());
+    }
+
+    #[test]
+    fn native_coordinate_input_still_requires_target_delivery() {
+        let executor = NativeExecutor::default();
+        for action in [
+            Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None,
+            },
+            Action::Press {
+                key: "Return".to_string(),
+                count: 1,
+                delay_ms: None,
+            },
+            Action::Paste {
+                text: "test".to_string(),
+            },
+            Action::Scroll {
+                direction: super::Direction::Down,
+                amount: 1,
+            },
+        ] {
+            for (target, message) in [
+                (
+                    ResolvedTarget::Point(NativePoint { x: 0, y: 0 }),
+                    "native coordinate input requires target delivery",
+                ),
+                (ResolvedTarget::None, "action requires a fenced target"),
+            ] {
+                let error = executor
+                    .dispatch(
+                        &action,
+                        &target,
+                        &VerificationPolicy::None,
+                        &CancellationToken::default(),
+                        i64::MAX,
+                    )
+                    .unwrap_err();
+                assert_eq!(error.effect, EffectKnowledge::NoEffect);
+                assert_eq!(error.message, message);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn focus_validated_semantic_input_reaches_shared_capability_gate() {
+        let executor = NativeExecutor::default();
+        // Poison only this executor's lock so capabilities fail deterministically,
+        // without connecting to AT-SPI or injecting native input.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = executor.linux_atspi.lock().unwrap();
+                panic!("make capabilities unavailable");
+            }))
+            .is_err()
+        );
+        for action in [
+            Action::TypeText {
+                text: "test".to_string(),
+                clear: false,
+                press_return: false,
+                delay_ms: None,
+            },
+            Action::Press {
+                key: "Return".to_string(),
+                count: 1,
+                delay_ms: None,
+            },
+            Action::Paste {
+                text: "test".to_string(),
+            },
+            Action::Scroll {
+                direction: super::Direction::Down,
+                amount: 1,
+            },
+            Action::Hotkey {
+                keys: vec!["CTRL".to_string(), "A".to_string()],
+            },
+        ] {
+            let error = executor
+                .dispatch_native_input(
+                    &action,
+                    super::NativeInputTarget::FocusValidatedSemantic,
+                    &VerificationPolicy::None,
+                    &CancellationToken::default(),
+                    i64::MAX,
+                )
+                .unwrap_err();
+            assert_eq!(error.effect, EffectKnowledge::NoEffect);
+            assert!(matches!(error.code, FailureCode::Unsupported));
+            assert_eq!(error.message, "runtime capabilities are unavailable");
+        }
+    }
+
+    #[test]
+    fn focus_validated_semantic_input_keeps_boundary_and_action_checks() {
+        let executor = NativeExecutor::default();
+        let press = Action::Press {
+            key: "Return".to_string(),
+            count: 1,
+            delay_ms: None,
+        };
+        let cancelled = CancellationToken::default();
+        cancelled.cancel();
+        for (cancellation, deadline, effect) in [
+            (cancelled, i64::MAX, EffectKnowledge::CancelledBeforeEffect),
+            (
+                CancellationToken::default(),
+                0,
+                EffectKnowledge::ExpiredBeforeEffect,
+            ),
+        ] {
+            let error = executor
+                .dispatch_native_input(
+                    &press,
+                    super::NativeInputTarget::FocusValidatedSemantic,
+                    &VerificationPolicy::None,
+                    &cancellation,
+                    deadline,
+                )
+                .unwrap_err();
+            assert_eq!(error.effect, effect);
+        }
+        for (action, message) in [
+            (Action::Move, "action requires a fenced target"),
+            (
+                Action::Click {
+                    button: MouseButton::Left,
+                    count: 1,
+                    allow_coordinate_fallback: false,
+                },
+                "action requires a fenced target",
+            ),
+            (
+                Action::Press {
+                    key: "Return".to_string(),
+                    count: 0,
+                    delay_ms: None,
+                },
+                "action parameters are invalid",
+            ),
+        ] {
+            let error = executor
+                .dispatch_native_input(
+                    &action,
+                    super::NativeInputTarget::FocusValidatedSemantic,
+                    &VerificationPolicy::None,
+                    &CancellationToken::default(),
+                    i64::MAX,
+                )
+                .unwrap_err();
+            assert_eq!(error.effect, EffectKnowledge::NoEffect);
+            assert_eq!(error.message, message);
+        }
     }
 
     #[test]
