@@ -12,12 +12,20 @@ use tracing::warn;
 
 use idevice::IdeviceError;
 
+/// Host-pinned identity acquired over a trusted setup transport, never from pair-verify.
+#[derive(Clone)]
+pub struct PeerIdentity {
+    pub identifier: Vec<u8>,
+    pub public_key: VerifyingKey,
+}
+
 #[derive(Clone)]
 pub struct RpPairingFile {
     pub e_private_key: SigningKey,
     pub e_public_key: VerifyingKey,
     pub identifier: String,
     pub alt_irk: Option<Vec<u8>>,
+    pub peer_identity: Option<PeerIdentity>,
 }
 
 impl RpPairingFile {
@@ -54,6 +62,7 @@ impl RpPairingFile {
             e_public_key: ed25519_public_key,
             identifier,
             alt_irk: None,
+            peer_identity: None,
         }
     }
 
@@ -63,6 +72,7 @@ impl RpPairingFile {
         self.e_public_key = ed25519_public_key;
         self.e_private_key = ed25519_private_key;
         self.alt_irk = None;
+        self.peer_identity = None;
     }
 
     /// Serialize to XML plist bytes.
@@ -82,6 +92,16 @@ impl RpPairingFile {
         );
         if let Some(irk) = &self.alt_irk {
             dict.insert("alt_irk".into(), plist::Value::Data(irk.clone()));
+        }
+        if let Some(peer) = &self.peer_identity {
+            dict.insert(
+                "peer_identifier".into(),
+                plist::Value::Data(peer.identifier.clone()),
+            );
+            dict.insert(
+                "peer_public_key".into(),
+                plist::Value::Data(peer.public_key.to_bytes().to_vec()),
+            );
         }
         plist_to_xml_bytes(&dict)
     }
@@ -140,11 +160,39 @@ impl RpPairingFile {
         if private_key.verifying_key() != public_key {
             return Err(IdeviceError::UnexpectedResponse("host key mismatch".into()));
         }
+        let peer_identity = match (p.remove("peer_identifier"), p.remove("peer_public_key")) {
+            (None, None) => None,
+            (Some(plist::Value::Data(identifier)), Some(plist::Value::Data(key)))
+                if !identifier.is_empty() && identifier.len() <= 256 =>
+            {
+                let key: [u8; 32] = key.try_into().map_err(|_| {
+                    IdeviceError::UnexpectedResponse("invalid peer identity".into())
+                })?;
+                let public_key = VerifyingKey::from_bytes(&key).map_err(|_| {
+                    IdeviceError::UnexpectedResponse("invalid peer identity".into())
+                })?;
+                if public_key.is_weak() || public_key == private_key.verifying_key() {
+                    return Err(IdeviceError::UnexpectedResponse(
+                        "invalid peer identity".into(),
+                    ));
+                }
+                Some(PeerIdentity {
+                    identifier,
+                    public_key,
+                })
+            }
+            _ => {
+                return Err(IdeviceError::UnexpectedResponse(
+                    "invalid peer identity".into(),
+                ));
+            }
+        };
         Ok(Self {
             e_private_key: private_key,
             e_public_key: public_key,
             identifier,
             alt_irk,
+            peer_identity,
         })
     }
 
@@ -181,6 +229,22 @@ mod tests {
         let decoded = RpPairingFile::from_bytes(&record.to_bytes()).unwrap();
         assert_eq!(decoded.e_public_key, record.e_public_key);
         assert_eq!(decoded.identifier, record.identifier);
+        record.peer_identity = Some(PeerIdentity {
+            identifier: b"trusted-device".to_vec(),
+            public_key: SigningKey::from_bytes(&[31; 32]).verifying_key(),
+        });
+        let decoded = RpPairingFile::from_bytes(&record.to_bytes()).unwrap();
+        let peer = decoded.peer_identity.unwrap();
+        assert_eq!(peer.identifier, b"trusted-device");
+        assert_eq!(
+            peer.public_key,
+            record.peer_identity.as_ref().unwrap().public_key
+        );
+        let mut partial: Dictionary = plist::from_bytes(&record.to_bytes()).unwrap();
+        partial.remove("peer_public_key");
+        assert!(RpPairingFile::from_bytes(&plist_to_xml_bytes(&partial)).is_err());
+        record.peer_identity.as_mut().unwrap().public_key = record.e_public_key;
+        assert!(RpPairingFile::from_bytes(&record.to_bytes()).is_err());
         record.e_public_key = SigningKey::from_bytes(&[42; 32]).verifying_key();
         assert!(RpPairingFile::from_bytes(&record.to_bytes()).is_err());
     }

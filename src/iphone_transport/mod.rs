@@ -26,16 +26,15 @@ mod socket;
 pub mod tls_psk;
 mod tlv;
 pub mod tunnel;
+mod verify;
 
 // export
 pub use peer_device::{PeerDevice, compute_auth_tag};
-pub use rp_pairing_file::RpPairingFile;
+pub use rp_pairing_file::{PeerIdentity, RpPairingFile};
 pub use socket::{RpPairingSocket, RpPairingSocketProvider};
 pub use tunnel::{CdTunnel, TunnelInfo, connect_tls_psk_tunnel_native};
 
 const RPPAIRING_MAGIC: &[u8] = b"RPPairing";
-const UNSUPPORTED_PEER_AUTHENTICATION: &str =
-    "existing-record RemotePairing peer authentication is unsupported";
 
 fn validate_pin(pin: &str) -> Result<&[u8], IdeviceError> {
     if pin.len() != 6 || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -50,7 +49,7 @@ pub struct RemotePairingClient<R: RpPairingSocketProvider> {
     encrypted_sequence_number: u64,
     sending_host: String,
 
-    /// The shared secret from explicit SRP setup. Existing-record verification is disabled.
+    /// The shared secret from device-authenticated Pair-Verify or trusted USB setup.
     /// Used as PSK for the TLS tunnel and to derive per-message encryption keys.
     encryption_key: Vec<u8>,
 
@@ -100,8 +99,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         &self.encryption_key
     }
 
-    /// Existing-record authentication is unsupported; fails without network I/O.
-    /// Never initiates a new pairing.
+    /// Verify the pinned device identity. Never initiates a new pairing.
     pub async fn connect<Fut>(
         &mut self,
         pairing_file: &mut RpPairingFile,
@@ -124,13 +122,9 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
 
     pub async fn validate_pairing(
         &mut self,
-        _pairing_file: &mut RpPairingFile,
+        pairing_file: &mut RpPairingFile,
     ) -> Result<(), IdeviceError> {
-        self.authenticated = false;
-        self.encryption_key.clear();
-        Err(IdeviceError::UnexpectedResponse(
-            UNSUPPORTED_PEER_AUTHENTICATION.into(),
-        ))
+        self.verify_peer(pairing_file).await
     }
 
     pub async fn send_pair_verified_failed(&mut self) -> Result<(), IdeviceError> {
@@ -150,14 +144,28 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         Ok(())
     }
 
-    pub async fn attempt_pair_verify(&mut self) -> Result<plist::Value, IdeviceError> {
+    pub async fn handshake(
+        &mut self,
+        attempt_pair_verify: bool,
+    ) -> Result<plist::Value, IdeviceError> {
         self.authenticated = false;
         self.encryption_key.clear();
-        Err(IdeviceError::UnexpectedResponse(
-            UNSUPPORTED_PEER_AUTHENTICATION.into(),
-        ))
+        self.inner.send_plain(plist!({"request": {"_0": {"handshake": {"_0": {
+            "hostOptions": {"attemptPairVerify": attempt_pair_verify}, "wireProtocolVersion": 19
+        }}}}}), self.sequence_number).await?;
+        self.sequence_number += 1;
+        let response = self.inner.recv_plain().await?;
+        response
+            .get_by("response")
+            .and_then(|value| value.get_by("_1"))
+            .and_then(|value| value.get_by("handshake"))
+            .and_then(|value| value.get_by("_0"))
+            .cloned()
+            .ok_or_else(|| RemotePairingError::PairVerifyFailed.into())
     }
 
+    /// Bootstrap only on the physically selected USB channel owned by `pair_iphone_over_usb`.
+    /// The public iPhone PIN cannot authenticate an untrusted network endpoint.
     pub async fn pair<Fut>(
         &mut self,
         pairing_file: &mut RpPairingFile,
@@ -168,12 +176,14 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
     {
         self.authenticated = false;
         self.encryption_key.clear();
+        self.paired_peer_device = None;
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
         let mut staged_record = pairing_file.clone();
         let tlv = self
             .save_pair_record_on_peer(&mut staged_record, &key)
             .await?;
+        staged_record.peer_identity = Some(verify::setup_identity(&tlv, &key)?);
         let peer_device = peer_device::parse_peer_device_from_tlv(&tlv)?;
         staged_record.alt_irk = Some(peer_device.alt_irk.clone());
         *pairing_file = staged_record;
@@ -258,6 +268,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
                 ));
             }
         })?;
+        verify::require_state(&tlv, 2)?;
 
         let mut salt = Vec::new();
         let mut public_key = Vec::new();
@@ -368,6 +379,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
                 ));
             }
         })?;
+        verify::require_state(&response, 4)?;
 
         let proof = match response
             .iter()
@@ -510,6 +522,7 @@ impl<R: RpPairingSocketProvider> RemotePairingClient<R> {
         };
 
         let tlv = tlv::deserialize_tlv8(&response)?;
+        verify::require_state(&tlv, 6)?;
 
         let mut encrypted_data = Vec::new();
         for t in tlv {
@@ -743,24 +756,34 @@ mod authentication_tests {
             let (host, mut device) = tokio::io::duplex(16_384);
             let mut record = RpPairingFile::generate("test-host");
             let mut client = RemotePairingClient::new(RpPairingSocket::new(host), "test-host");
-            for operation in 0..3 {
+            for operation in 0..2 {
                 client.encryption_key = vec![7; 32];
                 client.authenticated = true;
-                let error = match operation {
+                match operation {
                     0 => client.validate_pairing(&mut record).await.unwrap_err(),
-                    1 => client.connect(&mut record, || async { panic!("must not request a PIN") }).await.unwrap_err(),
-                    _ => client.attempt_pair_verify().await.unwrap_err(),
+                    _ => client
+                        .connect(&mut record, || async { panic!("must not request a PIN") })
+                        .await
+                        .unwrap_err(),
                 };
-                assert!(matches!(error, IdeviceError::UnexpectedResponse(message) if message == UNSUPPORTED_PEER_AUTHENTICATION));
                 assert!(client.encryption_key().is_empty());
                 assert!(!client.authenticated);
-                assert!(client.send_receive_encrypted_request(plist!({})).await.is_err());
+                assert!(
+                    client
+                        .send_receive_encrypted_request(plist!({}))
+                        .await
+                        .is_err()
+                );
                 assert!(client.create_tcp_listener().await.is_err());
                 assert_eq!(client.sequence_number, 0);
             }
             drop(client);
             let mut byte = [0; 1];
-            assert_eq!(device.read(&mut byte).await.unwrap(), 0, "no network bytes may be emitted");
+            assert_eq!(
+                device.read(&mut byte).await.unwrap(),
+                0,
+                "no network bytes may be emitted"
+            );
         });
     }
 
@@ -775,9 +798,15 @@ mod authentication_tests {
             let task = tokio::spawn(async move {
                 let mut peer = RpPairingSocket::new_device(device);
                 peer.recv_plain().await.unwrap();
-                peer.send_plain(envelope(&[entry(T::EncryptedData, vec![0; 16])]), 0)
-                    .await
-                    .unwrap();
+                peer.send_plain(
+                    envelope(&[
+                        entry(T::State, vec![6]),
+                        entry(T::EncryptedData, vec![0; 16]),
+                    ]),
+                    0,
+                )
+                .await
+                .unwrap();
             });
             assert!(
                 client

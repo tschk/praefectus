@@ -229,6 +229,7 @@ Generated from `cargo metadata --locked --all-features --format-version 1` on 20
 - `wit-bindgen` 0.57.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `x11rb` 0.14.0 — MIT OR Apache-2.0
 - `x11rb-protocol` 0.14.0 — MIT OR Apache-2.0
+- `x25519-dalek` 2.0.1 — BSD-3-Clause
 - `zbus` 6.1.0 — MIT
 - `zbus_macros` 6.1.0 — MIT
 - `zbus_utils` 6.0.0 — MIT
@@ -236,6 +237,7 @@ Generated from `cargo metadata --locked --all-features --format-version 1` on 20
 - `zerocopy` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zerocopy-derive` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zeroize` 1.9.0 — Apache-2.0 OR MIT
+- `zeroize_derive` 1.5.0 — Apache-2.0 OR MIT
 - `zlib-rs` 0.6.8 — Zlib
 - `zmij` 1.0.23 — MIT
 - `zruntime` 0.2.1 — MIT

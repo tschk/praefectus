@@ -71,8 +71,85 @@ impl IphoneConfig {
             ));
         }
         let pairing = RpPairingFile::from_bytes(pairing_plist).map_err(|_| service_error())?;
+        if pairing.peer_identity.is_none() {
+            return Err(ProtocolError::InvalidRequest(
+                "pairing record lacks a trusted device identity; export over USB first".into(),
+            ));
+        }
         Ok(Self { endpoint, pairing })
     }
+}
+
+/// One-time, explicit trust bootstrap over the local USB mux daemon on macOS/Linux.
+/// The caller must own the host and select the physically connected phone's UDID.
+/// Requires an existing lockdown trust relationship; never accepts a network mux endpoint.
+/// Returns secret plist bytes for protected import into the phone host, not logging.
+/// The public iOS setup PIN is not an identity credential: physical USB is the trust anchor.
+#[cfg(all(unix, not(target_os = "ios")))]
+pub fn pair_iphone_over_usb(udid: &str) -> Result<Vec<u8>, ProtocolError> {
+    use idevice::IdeviceService;
+    use idevice::lockdown::LockdownClient;
+    use idevice::provider::IdeviceProvider;
+    use idevice::usbmuxd::{Connection, UsbmuxdAddr};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| service_error())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let address = UsbmuxdAddr::UnixSocket("/var/run/usbmuxd".into());
+            let mut mux = address.connect(0).await.map_err(|_| service_error())?;
+            let device = mux
+                .get_devices()
+                .await
+                .map_err(|_| service_error())?
+                .into_iter()
+                .find(|device| device.udid == udid && device.connection_type == Connection::Usb)
+                .ok_or_else(service_error)?;
+            let provider = device.to_provider(address, "praefectus-usb-setup");
+            let credentials = provider
+                .get_pairing_file()
+                .await
+                .map_err(|_| service_error())?;
+            let mut lockdown = LockdownClient::connect(&provider)
+                .await
+                .map_err(|_| service_error())?;
+            let legacy = lockdown
+                .start_session(&credentials)
+                .await
+                .map_err(|_| service_error())?;
+            let (port, ssl) = lockdown
+                .start_service("com.apple.dt.remotepairingdeviced.lockdown")
+                .await
+                .map_err(|_| service_error())?;
+            let mut service = provider.connect(port).await.map_err(|_| service_error())?;
+            if ssl {
+                service
+                    .start_session(&credentials, legacy)
+                    .await
+                    .map_err(|_| service_error())?;
+            }
+            let stream = service.get_socket().ok_or_else(service_error)?;
+            let mut client = RemotePairingClient::new(RpPairingSocket::new(stream), "praefectus");
+            client.handshake(false).await.map_err(|_| service_error())?;
+            let mut record = RpPairingFile::generate("praefectus");
+            client
+                .pair(&mut record, || async { "000000".into() })
+                .await
+                .map_err(|_| service_error())?;
+            if client
+                .paired_peer_device()
+                .map_err(|_| service_error())?
+                .remotepairing_udid
+                != udid
+            {
+                return Err(service_error());
+            }
+            Ok(record.to_bytes())
+        })
+        .await
+        .map_err(|_| service_error())?
+    })
 }
 
 /// Bounded device discovery through the authenticated Remote Service Discovery handshake.
@@ -163,10 +240,7 @@ impl IphoneExecutor {
                 let mut pairing =
                     RemotePairingClient::new(RpPairingSocket::new(stream), "praefectus");
                 let mut record = config.pairing;
-                pairing
-                    .attempt_pair_verify()
-                    .await
-                    .map_err(|_| service_error())?;
+                pairing.handshake(true).await.map_err(|_| service_error())?;
                 pairing
                     .validate_pairing(&mut record)
                     .await
@@ -1028,5 +1102,12 @@ mod tests {
     fn connection_configuration_rejects_zero_ports_and_invalid_pairing_without_network_io() {
         assert!(IphoneConfig::on_phone(0, b"not credentials").is_err());
         assert!(IphoneConfig::on_phone(49152, b"not credentials").is_err());
+        let mut record = RpPairingFile::generate("config-test");
+        assert!(IphoneConfig::on_phone(49152, &record.to_bytes()).is_err());
+        record.peer_identity = Some(crate::iphone_transport::PeerIdentity {
+            identifier: b"usb-pinned-device".to_vec(),
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[31; 32]).verifying_key(),
+        });
+        assert!(IphoneConfig::on_phone(49152, &record.to_bytes()).is_ok());
     }
 }

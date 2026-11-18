@@ -17,13 +17,26 @@ control records from application data, and preserves buffered writes. CDTunnel
 framing uses the byte stream, not TLS record boundaries. Pairing logs omit
 credentials and payloads; OPACK nesting and TLV lengths are bounded.
 
-Existing-record connection is disabled: the imported pair-verify flow did not
-authenticate the device identity. It now returns an unsupported-authentication
-error without sending pairing messages or retaining a session key. There is no
-automatic new-pair fallback. A source-backed device-authentication contract is
-a release blocker. No HAP wire-format assumption or invented peer-key field is
-used to claim iPhone compatibility. Explicit SRP setup code remains private to
-this module and is not reachable from the executor's connection path.
+The independently written `verify.rs` replaces upstream's host-only verification
+with device-authenticated Pair-Verify. It checks the encrypted state-2 identifier
+and Ed25519 signature over device ephemeral key, pinned identifier and host
+ephemeral key before releasing a host identity proof. Both setup and verify
+interoperate with the installed Apple macOS `CUPairingSession`, including derived
+session-key agreement. That is Apple pairing-primitive evidence, not physical
+iPhone RemotePairing compatibility evidence.
+
+Trusted USB setup pins the device identifier and long-term public key after
+verifying the state-6 signature. These are local credential metadata, not new
+wire fields. Host-only records fail closed; no network setup fallback exists.
+The public iPhone setup PIN is not an authentication credential. The one-time
+USB caller must trust the local host/mux daemon and physically selected device.
+Subsequent sessions use fresh contributory X25519 exchanges and the pinned key.
+
+CBC record authentication checks all possible padding lengths and their MACs
+using `subtle` constant-time comparisons. Its work depends on public record
+length, not decrypted padding. This deliberately costs extra HMAC work; it is
+not a claim of an independently audited TLS stack. Shutdown flushes encrypted
+`close_notify` exactly once before closing the transport.
 
 `native/iphone/import-transport.py` verifies the original crate checksum, imports
 the baseline, formats it, and applies `transport-hardening.patch`. The patch is

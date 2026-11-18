@@ -12,6 +12,7 @@ use sha1::Sha1;
 use sha2::Sha256;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use subtle::{Choice, ConstantTimeEq};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::debug;
 
@@ -260,46 +261,31 @@ fn decrypt_record(
         return Err(record_authentication_error());
     }
 
-    let pad_value = *decrypted.last().unwrap() as usize;
-    let content_len = decrypted
-        .len()
-        .checked_sub(pad_value + 1)
-        .ok_or_else(record_authentication_error)?;
-    if decrypted[content_len..]
-        .iter()
-        .any(|&byte| byte as usize != pad_value)
-    {
-        return Err(record_authentication_error());
-    }
     let mac_len = keys.suite.mac_key_len();
-    if content_len < mac_len {
+    // Authenticate every possible TLS padding length. Loop bounds, slices and
+    // HMAC work depend only on public ciphertext length, never the decrypted
+    // padding byte. This deliberately trades throughput for fixed work rather
+    // than attempting a custom constant-time variable-length HMAC primitive.
+    let mut accepted = Choice::from(0);
+    for padding in 1..=256.min(decrypted.len().saturating_sub(mac_len)) {
+        let content_len = decrypted.len() - padding;
+        let plaintext = &decrypted[..content_len - mac_len];
+        let received_mac = &decrypted[content_len - mac_len..content_len];
+        let padding_valid = decrypted[content_len..]
+            .iter()
+            .fold(Choice::from(1), |valid, byte| {
+                valid & byte.ct_eq(&((padding - 1) as u8))
+            });
+        let expected = compute_mac(mac_key, seq, ct, plaintext, keys.suite);
+        accepted |= padding_valid
+            & expected.ct_eq(received_mac)
+            & Choice::from((plaintext.len() <= TLS_MAX_PLAINTEXT) as u8);
+    }
+    if !bool::from(accepted) {
         return Err(record_authentication_error());
     }
-
-    let plaintext = &decrypted[..content_len - mac_len];
-    let received_mac = &decrypted[content_len - mac_len..content_len];
-
-    let mut authenticated = seq.to_be_bytes().to_vec();
-    authenticated.extend_from_slice(&[ct, 0x03, 0x03]);
-    authenticated.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
-    authenticated.extend_from_slice(plaintext);
-    let valid = match keys.suite {
-        CipherSuite::Aes128CbcSha => {
-            let mut mac = HmacSha1::new_from_slice(mac_key).unwrap();
-            mac.update(&authenticated);
-            mac.verify_slice(received_mac).is_ok()
-        }
-        CipherSuite::Aes256CbcSha384 => {
-            let mut mac = HmacSha384::new_from_slice(mac_key).unwrap();
-            mac.update(&authenticated);
-            mac.verify_slice(received_mac).is_ok()
-        }
-    };
-    if !valid || plaintext.len() > TLS_MAX_PLAINTEXT {
-        return Err(record_authentication_error());
-    }
-
-    Ok(plaintext.to_vec())
+    let plaintext_len = decrypted.len() - (*decrypted.last().unwrap() as usize + 1) - mac_len;
+    Ok(decrypted[..plaintext_len].to_vec())
 }
 
 fn record_authentication_error() -> IdeviceError {
@@ -534,6 +520,7 @@ pub async fn tls_psk_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
         pending_record: Vec::new(),
         pending_record_total: 0,
         write_buf: Vec::new(),
+        write_closing: false,
         closed: false,
     })
 }
@@ -552,6 +539,7 @@ pub struct TlsPskStream<S> {
     pending_record_total: usize,
     /// Partial outbound TLS record waiting to be flushed
     write_buf: Vec<u8>,
+    write_closing: bool,
     closed: bool,
 }
 
@@ -670,6 +658,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
+        if this.write_closing {
+            return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
         // Flush any pending partial write first
         while !this.write_buf.is_empty() {
             match Pin::new(&mut this.inner).poll_write(cx, &this.write_buf) {
@@ -740,6 +731,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        std::task::ready!(self.as_mut().poll_flush(cx))?;
+        let this = self.as_mut().get_mut();
+        if !this.write_closing {
+            let encrypted = encrypt_record(&this.keys, this.write_seq, CT_ALERT, &[1, 0]);
+            this.write_buf = make_record(CT_ALERT, &encrypted);
+            this.write_seq += 1;
+            this.write_closing = true;
+        }
         std::task::ready!(self.as_mut().poll_flush(cx))?;
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
@@ -824,6 +823,7 @@ mod tests {
             pending_record: Vec::new(),
             pending_record_total: 0,
             write_buf: Vec::new(),
+            write_closing: false,
             closed: false,
         }
     }
@@ -835,6 +835,9 @@ mod tests {
                 let mut stream = encrypted_stream(Vec::new(), suite);
                 stream.write_all(b"first").await.unwrap();
                 stream.write_all(b"second message").await.unwrap();
+                stream.flush().await.unwrap();
+                stream.inner.pending = true;
+                stream.shutdown().await.unwrap();
                 stream.shutdown().await.unwrap();
                 assert!(stream.inner.shutdown);
                 let mut wire = stream.inner.output.as_slice();
@@ -849,10 +852,22 @@ mod tests {
                         expected
                     );
                 }
+                let (ct, body) = read_record(&mut wire).await.unwrap();
+                assert_eq!(ct, CT_ALERT);
+                assert_eq!(
+                    decrypt_record(&stream.keys, false, 2, ct, &body).unwrap(),
+                    [1, 0]
+                );
                 assert!(
                     wire.is_empty(),
                     "plaintext must not be sent twice after Pending"
                 );
+                let mut receiver = encrypted_stream(stream.inner.output.clone(), suite);
+                receiver.keys = server_keys(&stream.keys);
+                let mut plaintext = Vec::new();
+                receiver.read_to_end(&mut plaintext).await.unwrap();
+                assert_eq!(plaintext, b"firstsecond message");
+                assert!(stream.write(b"after shutdown").await.is_err());
             }
         });
     }
@@ -921,6 +936,13 @@ mod tests {
                     &encrypt_record(&keys, 0, CT_APPLICATION_DATA, b"cut"),
                 );
                 assert!(
+                    encrypted_stream(wire.clone(), suite)
+                        .read_to_end(&mut Vec::new())
+                        .await
+                        .is_err(),
+                    "complete application record without close_notify is still truncation"
+                );
+                assert!(
                     encrypted_stream(wire[..wire.len() - 1].to_vec(), suite)
                         .read_u8()
                         .await
@@ -932,6 +954,56 @@ mod tests {
 
     #[test]
     fn malformed_padding_and_macs_return_uniform_errors_without_panicking() {
+        for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
+            let keys = keys(suite);
+            for padding in [1, 16, 17, 255, 256] {
+                let plaintext = vec![71; (16 - (keys.suite.mac_key_len() + padding) % 16) % 16];
+                let mut payload = plaintext.clone();
+                payload.extend(compute_mac(
+                    &keys.client_mac_key,
+                    12,
+                    CT_APPLICATION_DATA,
+                    &plaintext,
+                    suite,
+                ));
+                payload.extend(std::iter::repeat_n((padding - 1) as u8, padding));
+                for fault in ["none", "padding", "mac"] {
+                    let mut content = payload.clone();
+                    if fault == "padding" {
+                        *content.last_mut().unwrap() ^= 1;
+                    }
+                    if fault == "mac" {
+                        content[plaintext.len()] ^= 1;
+                    }
+                    let iv = [0; 16];
+                    let encrypted = match suite {
+                        CipherSuite::Aes128CbcSha => {
+                            Aes128CbcEnc::new(keys.client_write_key[..16].into(), &iv.into())
+                                .encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(
+                                &content,
+                            )
+                        }
+                        CipherSuite::Aes256CbcSha384 => {
+                            Aes256CbcEnc::new(keys.client_write_key[..32].into(), &iv.into())
+                                .encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(
+                                &content,
+                            )
+                        }
+                    };
+                    let mut record = iv.to_vec();
+                    record.extend(encrypted);
+                    let result = decrypt_record(&keys, false, 12, CT_APPLICATION_DATA, &record);
+                    if fault == "none" {
+                        assert_eq!(result.unwrap(), plaintext);
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().to_string(),
+                            record_authentication_error().to_string()
+                        );
+                    }
+                }
+            }
+        }
         let keys = keys(CipherSuite::Aes128CbcSha);
         for last in [0, 1, 15, 16, 255] {
             let mut block = [0; 16];
