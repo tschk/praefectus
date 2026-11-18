@@ -321,13 +321,11 @@ mod tests {
 
     #[test]
     fn command_schema_refuses_model_supplied_authority_configuration() {
-        assert!(
-            serde_json::from_value::<Command>(
-                json!({"command":"prepare", "action":{"kind":"invoke"},
-            "target":{"kind":"none"}, "public_key":"attacker"})
-            )
-            .is_err()
-        );
+        let mut command = json!({"command":"prepare", "action":{"kind":"invoke"},
+            "target":{"kind":"none"}, "not_after_ms": now() + 60_000});
+        assert!(serde_json::from_value::<Command>(command.clone()).is_ok());
+        command["public_key"] = json!("attacker");
+        assert!(serde_json::from_value::<Command>(command).is_err());
         let output = unsafe { praefectus_iphone_call(std::ptr::null()) };
         let value: Value =
             serde_json::from_slice(unsafe { CStr::from_ptr(output) }.to_bytes()).unwrap();

@@ -85,7 +85,9 @@ private final class PhoneHost: ObservableObject {
         do {
             let granted = url.startAccessingSecurityScopedResource()
             defer { if granted { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url)
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            let data = try file.read(upToCount: 65537) ?? Data()
             guard data.count <= 65536 else { throw HostError.unavailable }
             // Normalize binary plists to XML; the Rust bridge never logs credentials.
             let plist = try PropertyListSerialization.propertyList(from: data, format: nil)
@@ -96,6 +98,11 @@ private final class PhoneHost: ObservableObject {
     }
 
     func connect(port: String) {
+        guard !busy else { return }
+        connected = false
+        authorizedUntil = nil
+        coordinates = nil
+        screen = nil
         do {
             guard let port = UInt16(port), port > 0,
                   let data = Credentials.load("pairing"), let pairing = String(data: data, encoding: .utf8)
@@ -195,6 +202,12 @@ private final class PhoneHost: ObservableObject {
         status = "Session revoked. Inspect any interrupted effect before reconnecting."
     }
 
+    private func endBackgroundTask() {
+        let task = background
+        background = .invalid
+        if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+    }
+
     private func run(delay: TimeInterval, _ work: @escaping () throws -> (String, [String: Any]?, Bool?)) {
         guard !busy else { return }
         busy = true
@@ -204,6 +217,7 @@ private final class PhoneHost: ObservableObject {
         let id = generation
         background = UIApplication.shared.beginBackgroundTask(withName: "One authorized phone operation") { [weak self] in
             self?.revoke()
+            self?.endBackgroundTask()
         }
         status = delay > 0 ? "Switch to the target app now. Running in 3 seconds…" : "Connecting to phone services…"
         // A cancelled delay still runs to completion with a cancelled token.
@@ -228,7 +242,7 @@ private final class PhoneHost: ObservableObject {
                 case .failure:
                     self.status = "Operation unavailable. Verify VPN, pairing, developer image and services; reconnect after a transport failure."
                 }
-                if self.background != .invalid { UIApplication.shared.endBackgroundTask(self.background); self.background = .invalid }
+                self.endBackgroundTask()
             }
         }
         pending = item

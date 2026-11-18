@@ -13,7 +13,7 @@ case "$target" in
     *) printf '%s\n' 'Expected aarch64-apple-ios-sim or aarch64-apple-ios' >&2; exit 2 ;;
 esac
 rustup target add "$target"
-cargo build --locked --package praefectus-iphone-host --target "$target"
+cargo build --locked --package praefectus-iphone-host --target "$target" --target-dir "$root/target"
 xcodebuild -project "$root/native/iphone/PraefectusPhone.xcodeproj" -scheme PraefectusPhone \
     -configuration Debug -sdk "$sdk" -destination "$destination" \
     -derivedDataPath "$root/target/iphone-xcode" \
