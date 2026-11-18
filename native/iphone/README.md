@@ -147,4 +147,14 @@ These tests do not validate the physical USB bootstrap service, on-phone self-co
 - The selected iPhone 13 has verified legacy USB screenshotr observation through Praefectus, but not CoreDevice, physical input, or standalone execution. Its observed USB pairing endpoint does not advertise tunnels. USB RemotePairing bootstrap and network authentication remain untested on that phone.
 - Developer image, valid self-connection pairing, signing, and a compatible external VPN must be supplied. Without these, this app cannot control the phone.
 
+### Current validation and parking status
+
+Physical provisioning and testing stopped at the user's direction, including the company signing and provisioning effort. No physical XCTest runner was installed or launched, and no physical input was dispatched. PR [#236](https://github.com/tschk/praefectus/pull/236) is to remain draft and unmerged with the useful scoped source and simulator checks retained. Product source is unchanged by this validation update.
+
+- The actual library USB screenshotr observation passed once on the selected iPhone 13 running iOS 16.3.1. The PNG decoded to 1170×2532, with decoded pixels and coordinate bounds verified.
+- The separate [bounded XCTest diagnostic](validation/README.md) activates Settings, checks that it is foreground, presses Home once, and checks that Settings leaves the foreground and a Home icon is visible. The test passed on a simulator. A no-Home negative control failed as expected. An unsigned iOS 16 physical-target artifact built with Xcode 26.6; Xcode 27's XCTest requires iOS 17.
+- CoreDevice phone authentication and self-routing, native input, lifecycle behavior, background execution, rotation, and operation with the computer disconnected remain unverified.
+
+The XCTest diagnostic is neither a Rust input backend nor proof of standalone operation. Scratch USB helpers and installers are not part of the published tooling. These results do not remove the release blockers above.
+
 `IphoneConfig::on_phone` fixes the connection address to `10.7.0.1`. `computer_assisted` accepts a host-selected device socket address and credentials for a host running on a computer. That second mode is explicitly computer-assisted, not standalone phone control. Neither mode bypasses `Engine` authority.
