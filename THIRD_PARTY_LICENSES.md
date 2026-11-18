@@ -1,11 +1,13 @@
 # Third-party license inventory
 
-Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This inventory includes every non-workspace package in the locked resolved graph, including target-specific and development packages. Each package retains its original notices and license text.
+Generated from `cargo metadata --locked --all-features --format-version 1` on 2026-11-18. This inventory includes every non-workspace package in the locked resolved graph, including target-specific and development packages. Each package retains its original notices and license text.
 
 - `accessibility-sys` 0.2.0 — MIT / Apache-2.0
 - `adler2` 2.0.1 — 0BSD OR MIT OR Apache-2.0
 - `aead` 0.5.2 — MIT OR Apache-2.0
 - `aes` 0.8.4 — MIT OR Apache-2.0
+- `apple-cf` 0.9.3 — MIT OR Apache-2.0
+- `apple-metal` 0.8.8 — MIT OR Apache-2.0
 - `async-stream` 0.3.6 — MIT
 - `async-stream-impl` 0.3.6 — MIT
 - `async-trait` 0.1.91 — MIT OR Apache-2.0
@@ -39,6 +41,8 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This 
 - `cpufeatures` 0.2.17 — MIT OR Apache-2.0
 - `cpufeatures` 0.3.0 — MIT OR Apache-2.0
 - `crc32fast` 1.5.5 — MIT OR Apache-2.0
+- `crossbeam-queue` 0.3.13 — MIT OR Apache-2.0
+- `crossbeam-utils` 0.8.22 — MIT OR Apache-2.0
 - `crypto-common` 0.1.7 — MIT OR Apache-2.0
 - `crypto-common` 0.2.2 — MIT OR Apache-2.0
 - `curve25519-dalek` 4.1.3 — BSD-3-Clause
@@ -48,6 +52,7 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This 
 - `deranged` 0.5.9 — MIT OR Apache-2.0
 - `digest` 0.10.7 — MIT OR Apache-2.0
 - `digest` 0.11.3 — MIT OR Apache-2.0
+- `doom-fish-utils` 0.3.3 — MIT OR Apache-2.0
 - `dunce` 1.0.5 — CC0-1.0 OR MIT-0 OR Apache-2.0
 - `ed25519` 2.2.3 — Apache-2.0 OR MIT
 - `ed25519-dalek` 2.2.0 — BSD-3-Clause
@@ -148,6 +153,7 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This 
 - `rustls-webpki` 0.103.17 — ISC
 - `rustversion` 1.0.23 — MIT OR Apache-2.0
 - `scopeguard` 1.2.0 — MIT OR Apache-2.0
+- `screencapturekit` 8.0.1 — MIT OR Apache-2.0
 - `semver` 1.0.28 — MIT OR Apache-2.0
 - `serde` 1.0.229 — MIT OR Apache-2.0
 - `serde_core` 1.0.229 — MIT OR Apache-2.0
@@ -223,7 +229,6 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This 
 - `wit-bindgen` 0.57.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `x11rb` 0.14.0 — MIT OR Apache-2.0
 - `x11rb-protocol` 0.14.0 — MIT OR Apache-2.0
-- `x25519-dalek` 2.0.1 — BSD-3-Clause
 - `zbus` 6.1.0 — MIT
 - `zbus_macros` 6.1.0 — MIT
 - `zbus_utils` 6.0.0 — MIT
@@ -231,7 +236,6 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-11-17. This 
 - `zerocopy` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zerocopy-derive` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zeroize` 1.9.0 — Apache-2.0 OR MIT
-- `zeroize_derive` 1.5.0 — Apache-2.0 OR MIT
 - `zlib-rs` 0.6.8 — Zlib
 - `zmij` 1.0.23 — MIT
 - `zruntime` 0.2.1 — MIT

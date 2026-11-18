@@ -1,12 +1,13 @@
 """Import the RSA-free initiating client from the checksummed idevice 0.1.68 crate.
 
-Run with the crates.io idevice-0.1.68.crate archive as the argument, then
-cargo fmt --all. This is a source import, not a new protocol implementation.
+Run with the crates.io idevice-0.1.68.crate archive as the argument. The retained
+hardening patch is applied after the baseline import; never omit that step.
 """
 import hashlib
 from pathlib import Path
 import sys
 import tarfile
+import subprocess
 
 source = Path(sys.argv[1])
 assert hashlib.sha256(source.read_bytes()).hexdigest() == "f5d7799c8497cef60ddfd38f7d92e267b9fa5d0b18e7691d31041453007400ca"
@@ -37,3 +38,9 @@ for name in files:
         text = text.split('/// Wraps a `tokio::net::TcpStream` with TLS-PSK using OpenSSL')[0]
         text = text.replace("pub use idevice::tunnel::{CdTunnel, TunnelInfo};", "pub use idevice::tunnel::TunnelInfo;\n\npub struct CdTunnel<S> {\n    inner: S,\n    pub info: TunnelInfo,\n}\nimpl<S> CdTunnel<S> {\n    pub fn into_inner(self) -> S { self.inner }\n}")
     (destination / name).write_text(text)
+
+subprocess.run(["rustfmt", "--edition", "2024", *[str(destination / name) for name in files]], check=True)
+subprocess.run(
+    ["git", "apply", str(Path(__file__).with_name("transport-hardening.patch").resolve())],
+    cwd=destination.parents[1], check=True,
+)
