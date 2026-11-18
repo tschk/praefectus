@@ -1,0 +1,22 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+        C00000000000000000000001 = { isa = PBXProject; buildConfigurationList = C00000000000000000000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en, Base); mainGroup = C00000000000000000000003; productRefGroup = C00000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (C00000000000000000000005); };
+        C00000000000000000000002 = { isa = XCConfigurationList; buildConfigurations = (C00000000000000000000010); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        C00000000000000000000003 = { isa = PBXGroup; children = (C00000000000000000000006, C00000000000000000000004); sourceTree = "<group>"; };
+        C00000000000000000000004 = { isa = PBXGroup; children = (C00000000000000000000007); name = Products; sourceTree = "<group>"; };
+        C00000000000000000000005 = { isa = PBXNativeTarget; buildConfigurationList = C00000000000000000000012; buildPhases = (C00000000000000000000008, C00000000000000000000009); buildRules = (); dependencies = (); name = PraefectusControlTests; productName = PraefectusControlTests; productReference = C00000000000000000000007; productType = "com.apple.product-type.bundle.ui-testing"; };
+        C00000000000000000000006 = { isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = HomeValidation.m; sourceTree = "<group>"; };
+        C00000000000000000000007 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PraefectusControlTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+        C00000000000000000000008 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C00000000000000000000013); runOnlyForDeploymentPostprocessing = 0; };
+        C00000000000000000000009 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+        C00000000000000000000010 = { isa = XCBuildConfiguration; buildSettings = { SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; }; name = Debug; };
+        C00000000000000000000012 = { isa = XCConfigurationList; buildConfigurations = (C00000000000000000000014); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        C00000000000000000000013 = { isa = PBXBuildFile; fileRef = C00000000000000000000006; };
+        C00000000000000000000014 = { isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CLANG_ENABLE_MODULES = YES; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.praefectus.validation; PRODUCT_NAME = "$(TARGET_NAME)"; CODE_SIGN_STYLE = Automatic; TARGETED_DEVICE_FAMILY = "1,2"; GCC_WARN_UNUSED_VARIABLE = YES; }; name = Debug; };
+    };
+    rootObject = C00000000000000000000001;
+}

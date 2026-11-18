@@ -1,110 +1,209 @@
 # Third-party license inventory
 
-Generated from `cargo metadata --locked --format-version 1` on 2026-10-28. This inventory includes every non-workspace package in the locked resolved graph, including target-specific and development packages. Each package retains its original notices and license text.
+Generated from `cargo metadata --locked --all-features --format-version 1` on 2026-11-18. This inventory includes every non-workspace package in the locked resolved graph, including target-specific and development packages. Each package retains its original notices and license text.
 
 - `accessibility-sys` 0.2.0 — MIT / Apache-2.0
+- `adler2` 2.0.1 — 0BSD OR MIT OR Apache-2.0
+- `aead` 0.5.2 — MIT OR Apache-2.0
+- `aes` 0.8.4 — MIT OR Apache-2.0
+- `apple-cf` 0.9.3 — MIT OR Apache-2.0
+- `apple-metal` 0.8.8 — MIT OR Apache-2.0
+- `async-stream` 0.3.6 — MIT
+- `async-stream-impl` 0.3.6 — MIT
 - `async-trait` 0.1.91 — MIT OR Apache-2.0
 - `autocfg` 1.5.1 — Apache-2.0 OR MIT
+- `aws-lc-rs` 1.19.0 — ISC AND (Apache-2.0 OR ISC)
+- `aws-lc-sys` 0.47.0 — ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
+- `base64` 0.21.7 — MIT OR Apache-2.0
+- `base64` 0.22.1 — MIT OR Apache-2.0
+- `base64` 0.23.1 — MIT OR Apache-2.0
 - `base64ct` 1.8.3 — Apache-2.0 OR MIT
 - `bitflags` 2.13.2 — MIT OR Apache-2.0
 - `block-buffer` 0.10.4 — MIT OR Apache-2.0
 - `block-buffer` 0.12.1 — MIT OR Apache-2.0
+- `block-padding` 0.3.3 — MIT OR Apache-2.0
 - `bumpalo` 3.20.3 — MIT OR Apache-2.0
 - `bytes` 1.12.1 — MIT
+- `cbc` 0.1.2 — MIT OR Apache-2.0
+- `cc` 1.11.2 — MIT OR Apache-2.0
 - `cfg-if` 1.0.4 — MIT OR Apache-2.0
 - `chacha20` 0.10.2 — MIT OR Apache-2.0
+- `chacha20` 0.9.1 — Apache-2.0 OR MIT
+- `chacha20poly1305` 0.10.1 — Apache-2.0 OR MIT
+- `cipher` 0.4.4 — MIT OR Apache-2.0
+- `cmake` 0.1.58 — MIT OR Apache-2.0
 - `const-oid` 0.10.2 — Apache-2.0 OR MIT
 - `const-oid` 0.9.6 — Apache-2.0 OR MIT
-- `core-foundation-sys` 0.8.7 — MIT OR Apache-2.0
 - `core-foundation` 0.10.1 — MIT OR Apache-2.0
-- `core-graphics-types` 0.2.0 — MIT OR Apache-2.0
+- `core-foundation-sys` 0.8.7 — MIT OR Apache-2.0
 - `core-graphics` 0.25.0 — MIT OR Apache-2.0
+- `core-graphics-types` 0.2.0 — MIT OR Apache-2.0
 - `cpufeatures` 0.2.17 — MIT OR Apache-2.0
 - `cpufeatures` 0.3.0 — MIT OR Apache-2.0
+- `crc32fast` 1.5.5 — MIT OR Apache-2.0
+- `crossbeam-queue` 0.3.13 — MIT OR Apache-2.0
+- `crossbeam-utils` 0.8.22 — MIT OR Apache-2.0
 - `crypto-common` 0.1.7 — MIT OR Apache-2.0
 - `crypto-common` 0.2.2 — MIT OR Apache-2.0
-- `curve25519-dalek-derive` 0.1.1 — MIT/Apache-2.0
 - `curve25519-dalek` 4.1.3 — BSD-3-Clause
+- `curve25519-dalek-derive` 0.1.1 — MIT/Apache-2.0
 - `data-encoding` 2.11.0 — MIT
 - `der` 0.7.10 — Apache-2.0 OR MIT
+- `deranged` 0.5.9 — MIT OR Apache-2.0
 - `digest` 0.10.7 — MIT OR Apache-2.0
 - `digest` 0.11.3 — MIT OR Apache-2.0
-- `ed25519-dalek` 2.2.0 — BSD-3-Clause
+- `doom-fish-utils` 0.3.3 — MIT OR Apache-2.0
+- `dunce` 1.0.5 — CC0-1.0 OR MIT-0 OR Apache-2.0
 - `ed25519` 2.2.3 — Apache-2.0 OR MIT
+- `ed25519-dalek` 2.2.0 — BSD-3-Clause
 - `endi` 1.1.1 — MIT
+- `equivalent` 1.0.3 — Apache-2.0 OR MIT
 - `errno` 0.3.14 — MIT OR Apache-2.0
 - `fastrand` 2.5.0 — Apache-2.0 OR MIT
+- `fdeflate` 0.3.7 — MIT OR Apache-2.0
 - `fiat-crypto` 0.2.9 — MIT OR Apache-2.0 OR BSD-1-Clause
+- `find-msvc-tools` 0.1.15 — MIT OR Apache-2.0
+- `flate2` 1.1.11 — MIT OR Apache-2.0
+- `foreign-types` 0.5.0 — MIT/Apache-2.0
 - `foreign-types-macros` 0.2.3 — MIT/Apache-2.0
 - `foreign-types-shared` 0.3.1 — MIT/Apache-2.0
-- `foreign-types` 0.5.0 — MIT/Apache-2.0
 - `fs4` 1.1.0 — MIT OR Apache-2.0
+- `fs_extra` 1.3.0 — MIT
+- `futures` 0.3.33 — MIT OR Apache-2.0
+- `futures-channel` 0.3.34 — MIT OR Apache-2.0
 - `futures-core` 0.3.34 — MIT OR Apache-2.0
+- `futures-executor` 0.3.33 — MIT OR Apache-2.0
 - `futures-io` 0.3.34 — MIT OR Apache-2.0
+- `futures-macro` 0.3.33 — MIT OR Apache-2.0
+- `futures-sink` 0.3.34 — MIT OR Apache-2.0
 - `futures-task` 0.3.33 — MIT OR Apache-2.0
 - `futures-util` 0.3.33 — MIT OR Apache-2.0
 - `generic-array` 0.14.7 — MIT
 - `gethostname` 1.1.0 — Apache-2.0
 - `getrandom` 0.2.17 — MIT OR Apache-2.0
+- `getrandom` 0.3.4 — MIT OR Apache-2.0
 - `getrandom` 0.4.3 — MIT OR Apache-2.0
+- `hashbrown` 0.17.1 — MIT OR Apache-2.0
 - `hex` 0.4.3 — MIT OR Apache-2.0
+- `hkdf` 0.12.4 — MIT OR Apache-2.0
+- `hmac` 0.12.1 — MIT OR Apache-2.0
 - `http` 1.4.2 — MIT OR Apache-2.0
 - `httparse` 1.10.1 — MIT OR Apache-2.0
 - `hybrid-array` 0.4.13 — MIT OR Apache-2.0
+- `idevice` 0.1.68 — MIT
+- `idevice-srp` 0.6.0 — MIT OR Apache-2.0
+- `indexmap` 2.14.2 — Apache-2.0 OR MIT
+- `inout` 0.1.4 — MIT OR Apache-2.0
 - `itoa` 1.0.18 — MIT OR Apache-2.0
+- `jktcp` 0.1.8 — MIT
+- `jobserver` 0.1.35 — MIT OR Apache-2.0
 - `js-sys` 0.3.103 — MIT OR Apache-2.0
+- `lazy_static` 1.5.1 — MIT OR Apache-2.0
 - `libc` 0.2.188 — MIT OR Apache-2.0
 - `linux-raw-sys` 0.12.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+- `lock_api` 0.4.14 — MIT OR Apache-2.0
 - `log` 0.4.33 — MIT OR Apache-2.0
+- `md-5` 0.10.6 — MIT OR Apache-2.0
 - `memchr` 2.8.3 — Unlicense OR MIT
 - `memoffset` 0.9.1 — MIT
+- `miniz_oxide` 0.8.9 — MIT OR Zlib OR Apache-2.0
+- `miniz_oxide` 0.9.1 — MIT OR Zlib OR Apache-2.0
+- `mio` 1.2.4 — MIT
+- `ns-keyed-archive` 0.1.5 — MIT OR Apache-2.0
+- `nskeyedarchiver_converter` 0.1.3 — MIT OR Apache-2.0
+- `num-bigint` 0.4.8 — MIT OR Apache-2.0
+- `num-conv` 0.2.2 — MIT OR Apache-2.0
+- `num-integer` 0.1.47 — MIT OR Apache-2.0
+- `num-traits` 0.2.19 — MIT OR Apache-2.0
 - `once_cell` 1.21.4 — MIT OR Apache-2.0
+- `opaque-debug` 0.3.1 — MIT OR Apache-2.0
 - `ordered-stream` 0.2.0 — MIT OR Apache-2.0
+- `parking_lot` 0.12.5 — MIT OR Apache-2.0
+- `parking_lot_core` 0.9.12 — MIT OR Apache-2.0
+- `phf` 0.14.0 — MIT
 - `phf_generator` 0.14.0 — MIT
 - `phf_macros` 0.14.0 — MIT
 - `phf_shared` 0.14.0 — MIT
-- `phf` 0.14.0 — MIT
 - `pin-project-lite` 0.2.17 — Apache-2.0 OR MIT
 - `pkcs8` 0.10.2 — Apache-2.0 OR MIT
+- `pkg-config` 0.3.34 — MIT OR Apache-2.0
+- `plist` 1.10.3 — MIT
+- `plist-macro` 0.1.6 — MIT
+- `png` 0.18.1 — MIT OR Apache-2.0
+- `poly1305` 0.8.0 — Apache-2.0 OR MIT
+- `powerfmt` 0.2.1 — MIT OR Apache-2.0
+- `ppv-lite86` 0.2.21 — MIT OR Apache-2.0
 - `proc-macro2` 1.0.107 — MIT OR Apache-2.0
+- `quick-xml` 0.42.0 — MIT
 - `quote` 1.0.47 — MIT OR Apache-2.0
+- `r-efi` 5.3.0 — MIT OR Apache-2.0 OR LGPL-2.1-or-later
 - `r-efi` 6.0.0 — MIT OR Apache-2.0 OR LGPL-2.1-or-later
+- `rand` 0.10.3 — MIT OR Apache-2.0
+- `rand` 0.9.5 — MIT OR Apache-2.0
+- `rand_chacha` 0.9.0 — MIT OR Apache-2.0
 - `rand_core` 0.10.1 — MIT OR Apache-2.0
 - `rand_core` 0.6.4 — MIT OR Apache-2.0
-- `rand` 0.10.2 — MIT OR Apache-2.0
+- `rand_core` 0.9.5 — MIT OR Apache-2.0
+- `redox_syscall` 0.5.18 — MIT
+- `ring` 0.17.14 — Apache-2.0 AND ISC
 - `rustc_version` 0.4.1 — MIT OR Apache-2.0
 - `rustix` 1.1.6 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+- `rustls` 0.23.46 — Apache-2.0 OR ISC OR MIT
+- `rustls-pki-types` 1.16.0 — MIT OR Apache-2.0
+- `rustls-webpki` 0.103.17 — ISC
 - `rustversion` 1.0.23 — MIT OR Apache-2.0
+- `scopeguard` 1.2.0 — MIT OR Apache-2.0
+- `screencapturekit` 8.0.1 — MIT OR Apache-2.0
 - `semver` 1.0.28 — MIT OR Apache-2.0
+- `serde` 1.0.229 — MIT OR Apache-2.0
 - `serde_core` 1.0.229 — MIT OR Apache-2.0
 - `serde_derive` 1.0.229 — MIT OR Apache-2.0
 - `serde_json` 1.0.151 — MIT OR Apache-2.0
 - `serde_repr` 0.1.21 — MIT OR Apache-2.0
-- `serde` 1.0.229 — MIT OR Apache-2.0
+- `sha1` 0.10.7 — MIT OR Apache-2.0
 - `sha1` 0.11.0 — MIT OR Apache-2.0
 - `sha2` 0.10.9 — MIT OR Apache-2.0
+- `shlex` 2.0.1 — MIT OR Apache-2.0
 - `signature` 2.2.0 — Apache-2.0 OR MIT
+- `simd-adler32` 0.3.10 — MIT
 - `siphasher` 1.0.3 — MIT/Apache-2.0
 - `slab` 0.4.12 — MIT
+- `smallvec` 1.16.5 — MIT OR Apache-2.0
 - `socket2` 0.6.5 — MIT OR Apache-2.0
 - `spki` 0.7.3 — Apache-2.0 OR MIT
 - `subtle` 2.6.1 — BSD-3-Clause
 - `syn` 2.0.119 — MIT OR Apache-2.0
 - `syn` 3.0.2 — MIT OR Apache-2.0
 - `tempfile` 3.27.0 — MIT OR Apache-2.0
-- `thiserror-impl` 2.0.19 — MIT OR Apache-2.0
 - `thiserror` 2.0.19 — MIT OR Apache-2.0
+- `thiserror-impl` 2.0.19 — MIT OR Apache-2.0
+- `time` 0.3.55 — MIT OR Apache-2.0
+- `time-core` 0.1.9 — MIT OR Apache-2.0
+- `time-macros` 0.2.32 — MIT OR Apache-2.0
+- `tokio` 1.54.1 — MIT
+- `tokio-macros` 2.7.2 — MIT
+- `tokio-rustls` 0.26.6 — MIT OR Apache-2.0
+- `tracing` 0.1.44 — MIT
+- `tracing-attributes` 0.1.31 — MIT
+- `tracing-core` 0.1.36 — MIT
 - `tungstenite` 0.30.0 — MIT OR Apache-2.0
 - `typenum` 1.20.1 — MIT OR Apache-2.0
 - `uds_windows` 1.2.1 — MIT
 - `unicode-ident` 1.0.24 — (MIT OR Apache-2.0) AND Unicode-3.0
+- `universal-hash` 0.5.1 — MIT OR Apache-2.0
+- `untrusted` 0.9.0 — ISC
 - `uuid` 1.24.0 — Apache-2.0 OR MIT
 - `version_check` 0.9.5 — MIT/Apache-2.0
 - `wasi` 0.11.1+wasi-snapshot-preview1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
-- `wasm-bindgen-macro-support` 0.2.126 — MIT OR Apache-2.0
-- `wasm-bindgen-macro` 0.2.126 — MIT OR Apache-2.0
-- `wasm-bindgen-shared` 0.2.126 — MIT OR Apache-2.0
+- `wasip2` 1.0.4+wasi-0.2.12 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `wasm-bindgen` 0.2.126 — MIT OR Apache-2.0
+- `wasm-bindgen-futures` 0.4.76 — MIT OR Apache-2.0
+- `wasm-bindgen-macro` 0.2.126 — MIT OR Apache-2.0
+- `wasm-bindgen-macro-support` 0.2.126 — MIT OR Apache-2.0
+- `wasm-bindgen-shared` 0.2.126 — MIT OR Apache-2.0
+- `wasmtimer` 0.4.5 — MIT
+- `web-time` 1.1.0 — MIT OR Apache-2.0
+- `windows` 0.62.2 — MIT OR Apache-2.0
 - `windows-collections` 0.3.2 — MIT OR Apache-2.0
 - `windows-core` 0.62.2 — MIT OR Apache-2.0
 - `windows-future` 0.3.2 — MIT OR Apache-2.0
@@ -114,16 +213,31 @@ Generated from `cargo metadata --locked --format-version 1` on 2026-10-28. This 
 - `windows-numerics` 0.3.1 — MIT OR Apache-2.0
 - `windows-result` 0.4.1 — MIT OR Apache-2.0
 - `windows-strings` 0.5.1 — MIT OR Apache-2.0
+- `windows-sys` 0.52.0 — MIT OR Apache-2.0
 - `windows-sys` 0.61.2 — MIT OR Apache-2.0
+- `windows-targets` 0.52.6 — MIT OR Apache-2.0
 - `windows-threading` 0.2.1 — MIT OR Apache-2.0
-- `windows` 0.62.2 — MIT OR Apache-2.0
+- `windows_aarch64_gnullvm` 0.52.6 — MIT OR Apache-2.0
+- `windows_aarch64_msvc` 0.52.6 — MIT OR Apache-2.0
+- `windows_i686_gnu` 0.52.6 — MIT OR Apache-2.0
+- `windows_i686_gnullvm` 0.52.6 — MIT OR Apache-2.0
+- `windows_i686_msvc` 0.52.6 — MIT OR Apache-2.0
+- `windows_x86_64_gnu` 0.52.6 — MIT OR Apache-2.0
+- `windows_x86_64_gnullvm` 0.52.6 — MIT OR Apache-2.0
+- `windows_x86_64_msvc` 0.52.6 — MIT OR Apache-2.0
 - `winnow` 1.0.4 — MIT
-- `x11rb-protocol` 0.14.0 — MIT OR Apache-2.0
+- `wit-bindgen` 0.57.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `x11rb` 0.14.0 — MIT OR Apache-2.0
+- `x11rb-protocol` 0.14.0 — MIT OR Apache-2.0
+- `x25519-dalek` 2.0.1 — BSD-3-Clause
+- `zbus` 6.1.0 — MIT
 - `zbus_macros` 6.1.0 — MIT
 - `zbus_utils` 6.0.0 — MIT
-- `zbus` 6.1.0 — MIT
 - `zcheapstr` 1.1.0 — MIT
+- `zerocopy` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
+- `zerocopy-derive` 0.8.63 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zeroize` 1.9.0 — Apache-2.0 OR MIT
+- `zeroize_derive` 1.5.0 — Apache-2.0 OR MIT
+- `zlib-rs` 0.6.8 — Zlib
 - `zmij` 1.0.23 — MIT
 - `zruntime` 0.2.1 — MIT
