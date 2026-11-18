@@ -8,6 +8,22 @@ The exported plist adds `peer_identifier` and `peer_public_key` as local credent
 
 The library remains ISC. Device services use MIT-licensed `idevice` 0.1.68. The adapted MIT RemotePairing client in `src/iphone_transport` uses cryptographic traits directly and does not resolve RSA. Its full notice and repeatable import script are retained. No AGPL code, Poki source, or Poki patches are included.
 
+## Correspondence with Poki
+
+This comparison uses Poki revision [`7725461`](https://github.com/JosssphZhou/poki/tree/77254611596335464927258f62c7641b95ef2d02). It describes source-level architecture, not demonstrated compatibility or physical-device results. Poki is AGPL-3.0-only; reproducing a protocol mechanism does not authorize importing its implementation into this ISC library.
+
+| Stage | Poki source | Praefectus implementation and boundary |
+| --- | --- | --- |
+| Same-phone connection | The built-in packet tunnel reflects IPv4 TCP between interface `10.7.0.2` and destination `10.7.0.1/32`, swapping addresses and retaining ports. Default internet routing is excluded. An external loopback VPN is also supported. | `IphoneConfig::on_phone` uses `10.7.0.1`, but requires an external compatible VPN. No packet-tunnel extension or packet reflector is bundled. This corresponds to the external-connection shape, not Poki's built-in VPN packaging. |
+| Authenticated developer transport | RemotePairing negotiates a dynamic listener, TLS-PSK CDTunnel and a userspace network adapter, followed by RSD. | The same transport stages are implemented with independently hardened MIT client code. Trusted USB bootstrap pins the device identity; reconnect verifies that identity before releasing host proof. There is no unauthenticated setup fallback on network reconnect. |
+| Developer image | The launcher checks and prepares the image. | Owner tooling must supply a compatible mounted developer image. Praefectus does not prepare, download or mount it. |
+| Observation and input | Current product code defaults to in-process XCTest, without an OS-version split. It opens its own automation session and uses XCTest/testmanagerd paths. The previous native controller is on a preserved branch. | The implemented executor uses CoreDevice capture, DisplayService/HID and app services. There is no product XCTest session, accessibility tree or fallback. The separate one-Home XCTest diagnostic does not supply this missing backend. |
+| Missing loopback | With an already mounted image, the current launcher can hand over to the app's in-process XCTest session without working loopback. That hand-over does not validate pairing or make signing ready. | Connection failure remains a failure. Praefectus cannot copy that readiness fallback without implementing and authorizing the separate XCTest session first. It never reports native input ready merely because an image is mounted. |
+
+Sources: [local-connection design and fallback](https://github.com/JosssphZhou/poki/blob/77254611596335464927258f62c7641b95ef2d02/docs/ios-loopback.md), [packet reflection](https://github.com/JosssphZhou/poki/blob/77254611596335464927258f62c7641b95ef2d02/native/ios/PokiLoopback/Sources/PokiLoopback/LoopbackPacket.swift#L3-L20), [developer connection sequence](https://github.com/JosssphZhou/poki/blob/77254611596335464927258f62c7641b95ef2d02/native/launcher/src/remote.rs#L181-L250), and [default automation path](https://github.com/JosssphZhou/poki/blob/77254611596335464927258f62c7641b95ef2d02/native/ios-app/Poki/Runtime/InProcessWDA.swift#L6-L14).
+
+Poki's README claim of native services on iOS 27 and XCTest on iOS 18–26 does not describe that pinned product's current default. Praefectus shares the developer-transport shape but does not reproduce the complete current Poki controller. Host authority and observation fences would remain mandatory for any future XCTest backend. Simulator and host tests establish only the software contracts they exercise; physical behavior remains unverified.
+
 ## Implemented operations
 
 The optional `iphone` library feature provides `IphoneConfig`, `IphoneExecutor`, `IphoneSession`, and `IphoneScreen`.
@@ -147,9 +163,9 @@ These tests do not validate the physical USB bootstrap service, on-phone self-co
 - The selected iPhone 13 has verified legacy USB screenshotr observation through Praefectus, but not CoreDevice, physical input, or standalone execution. Its observed USB pairing endpoint does not advertise tunnels. USB RemotePairing bootstrap and network authentication remain untested on that phone.
 - Developer image, valid self-connection pairing, signing, and a compatible external VPN must be supplied. Without these, this app cannot control the phone.
 
-### Current validation and parking status
+### Current validation status
 
-Physical provisioning and testing stopped at the user's direction, including the company signing and provisioning effort. No physical XCTest runner was installed or launched, and no physical input was dispatched. PR [#236](https://github.com/tschk/praefectus/pull/236) is to remain draft and unmerged with the useful scoped source and simulator checks retained. Product source is unchanged by this validation update.
+Physical provisioning and testing stopped at the user's direction, including the company signing and provisioning effort. No physical XCTest runner was installed or launched, and no physical input was dispatched. The prototype is evaluated through source, host and simulator checks; merging it does not remove the physical-validation or release blockers above.
 
 - The actual library USB screenshotr observation passed once on the selected iPhone 13 running iOS 16.3.1. The PNG decoded to 1170×2532, with decoded pixels and coordinate bounds verified.
 - The separate [bounded XCTest diagnostic](validation/README.md) activates Settings, checks that it is foreground, presses Home once, and checks that Settings leaves the foreground and a Home icon is visible. The test passed on a simulator. A no-Home negative control failed as expected. An unsigned iOS 16 physical-target artifact built with Xcode 26.6; Xcode 27's XCTest requires iOS 17.

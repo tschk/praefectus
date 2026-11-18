@@ -70,10 +70,11 @@ The physical-target unsigned build also passed. These checks do not establish
 that an iOS 16 phone accepts the runner, its XCTest bootstrap, or the Home event.
 
 Physical provisioning and testing are deferred at the owner's request. The
-runner has not been installed or executed on the selected phone. PR #236 is
-parked for source and simulator review, not merge or release. Experimental USB
-launcher and installer helpers remain outside the published tree: they were
-never run against the phone and are not supported execution tools.
+runner has not been installed or executed on the selected phone. Source and
+simulator validation can support a prototype merge, but not a release-ready
+phone-control claim. Experimental USB launcher and installer helpers remain
+outside the published tree: they were never run against the phone and are not
+supported execution tools.
 
 Before a physical run, verify the signed artifact, exact application identifier,
 team, embedded profile, signing-certificate match, profile expiry and selected
