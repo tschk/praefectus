@@ -6,8 +6,8 @@ rust-version = "1.89"
 license = "ISC"
 description = "Policy-neutral, durable desktop action execution protocol"
 readme = "README.md"
-repository = "https://github.com/tschk/praefectus"
-homepage = "https://github.com/tschk/praefectus"
+repository = "https://github.com/softwarecorporation/praefectus"
+homepage = "https://github.com/softwarecorporation/praefectus"
 documentation = "https://docs.rs/praefectus"
 include = [
     "/src/**",
