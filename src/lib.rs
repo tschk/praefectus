@@ -6285,6 +6285,19 @@ impl Executor for NativeExecutor {
         if let ResolvedTarget::Semantic(target) = target {
             return self.dispatch_semantic(action, target, cancellation, deadline_at_ms);
         }
+        if matches!(target, ResolvedTarget::Point(_))
+            && matches!(
+                action,
+                Action::TypeText { .. }
+                    | Action::Press { .. }
+                    | Action::Paste { .. }
+                    | Action::Scroll { .. }
+            )
+        {
+            return Err(no_effect(
+                "native coordinate input requires target delivery",
+            ));
+        }
         match target {
             ResolvedTarget::Point(_) => {}
             #[cfg(feature = "iphone")]

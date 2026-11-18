@@ -332,7 +332,13 @@ async fn bounded<T>(
     };
     tokio::pin!(stop);
     tokio::select! {
-        result = tokio::time::timeout(duration, future) => result.map_err(|_| service_error())?,
+        result = tokio::time::timeout(duration, future) => match result {
+            Ok(result) => result,
+            Err(_) => {
+                check_protocol_boundary(cancellation, deadline)?;
+                Err(service_error())
+            }
+        },
         result = &mut stop => { result?; Err(service_error()) }
     }
 }
@@ -891,6 +897,20 @@ async fn keyboard(device: &mut Device, usages: &[u16]) -> Result<(), ProtocolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_observation_preserves_deadline_and_cancellation_outcomes() {
+        Runtime::new().unwrap().block_on(async {
+            let cancellation = CancellationToken::default();
+            let result: Result<(), _> =
+                bounded(&cancellation, now_ms() + 2, std::future::pending()).await;
+            assert!(matches!(result, Err(ProtocolError::ObservationExpired)));
+            cancellation.cancel();
+            let result: Result<(), _> =
+                bounded(&cancellation, now_ms() - 1, std::future::pending()).await;
+            assert!(matches!(result, Err(ProtocolError::ObservationCancelled)));
+        });
+    }
 
     fn screen() -> IphoneScreen {
         IphoneScreen {

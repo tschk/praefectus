@@ -1215,6 +1215,47 @@ fn native_executor_routes_coordinate_effects() {
 }
 
 #[test]
+fn native_executor_refuses_coordinate_input_that_ignores_the_point() {
+    let executor = NativeExecutor::default();
+    for action in [
+        Action::TypeText {
+            text: "test".into(),
+            clear: true,
+            press_return: true,
+            delay_ms: None,
+        },
+        Action::Press {
+            key: "return".into(),
+            count: 1,
+            delay_ms: None,
+        },
+        Action::Paste {
+            text: "test".into(),
+        },
+        Action::Scroll {
+            direction: Direction::Down,
+            amount: 1,
+        },
+    ] {
+        let error = executor
+            .dispatch(
+                &action,
+                &ResolvedTarget::Point(NativePoint { x: 1, y: 1 }),
+                &VerificationPolicy::None,
+                &CancellationToken::default(),
+                i64::MAX,
+            )
+            .expect_err("native input must not ignore the fenced point");
+        assert_eq!(error.effect, EffectKnowledge::NoEffect);
+        assert!(matches!(error.code, FailureCode::InvalidRequest));
+        assert_eq!(
+            error.message,
+            "native coordinate input requires target delivery"
+        );
+    }
+}
+
+#[test]
 fn native_executor_rejects_disabled_element_before_effect() {
     let executor = NativeExecutor::default();
     let target = ResolvedTarget::Element(Box::new(NativeElement {
