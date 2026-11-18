@@ -26,7 +26,47 @@ The optional `iphone` library feature provides `IphoneConfig`, `IphoneExecutor`,
 
 The reference UI exposes Tap, Swipe, Scroll down, Paste text, Home, and Launch app. Other implemented variants are library APIs. Discovery reports counts in the reference UI; the library returns the identifiers.
 
-Capabilities reflect advertised services, not proof that those services accept input. The native HID path needs a DisplayService media session and compatible CoreDevice services. There is no XCTest fallback. Older iOS versions that lack these services are unsupported for this input path. No iOS version has been physically validated for this implementation.
+Capabilities reflect advertised services, not proof that those services accept input. The native HID path needs a DisplayService media session and compatible CoreDevice services. There is no XCTest fallback. Older iOS versions that lack these services are unsupported for this input path. No iOS version has been physically validated for CoreDevice observation or input through this implementation.
+
+## Selected iPhone 13 compatibility
+
+Bounded probes on the owner-selected iPhone14,5 running iOS 16.3.1 build 20D67 used its existing USB lockdown trust. The lockdown session and service connections used SSL where required. The probes did not pair, mount an image, install software, dispatch input, or change the OS or accounts.
+
+| Check | Observed result |
+| --- | --- |
+| `com.apple.dt.remotepairingdeviced.lockdown` | Service start, USB connection, service SSL, and one wire-19 handshake succeeded. The request set `attemptPairVerify=false`; no setup or verify TLVs were sent. The response reported `allowsIncomingTunnelConnections=false`. |
+| `com.apple.internal.devicecompute.CoreDeviceProxy` | `Invalid service` (-27). |
+| `com.apple.mobile.screenshotr` | Service start and DeviceLink handshake succeeded. One screenshot request through libimobiledevice returned a PNG, 1170×2532. Image bytes stayed in process memory. |
+| `com.apple.instruments.remoteserver.DVTSecureSocketProxy` | Service start succeeded. No DVT session or process launch was attempted. |
+| `com.apple.instruments.remoteserver` | `Invalid service` (-27). |
+| `com.apple.testmanagerd.lockdown.secure` | Service start succeeded. No XCTest session or runner launch was attempted. |
+| Passive `_remotepairing._tcp` discovery | Two add events in six seconds. Neither was attributed to the selected phone; no advertised endpoint was contacted. |
+
+The handshake response describes that USB endpoint before authentication. It does not prove device identity or rule out a different tunnel-capable endpoint. Peer versions and supported tunnel types remain unknown. Mounted developer-image state is also unknown.
+
+The current executor needs a tunnel-capable RemotePairing endpoint, CDTunnel, RSD, and compatible CoreDevice services. The observed USB pairing service alone cannot provide that route. Legacy screenshotr, DVT, and XCTest use a different lockdown transport. Service availability does not establish input support. The reference app's iOS 18 deployment target prevents installation on this iOS 16 phone, but that build setting is not evidence about either transport.
+
+### USB-assisted legacy observation
+
+The library provides `iphone::observe_iphone_over_usb(udid, cancellation, deadline)` on macOS and Linux. It selects only the exact physical USB device through local `/var/run/usbmuxd`, reads its existing pairing record, checks `UniqueDeviceID`, and requests one screenshot. It closes the screenshot socket and stops the lockdown session on success. Failure or cancellation drops connections without retrying or attempting new pairing. Secret-bearing upstream tracing is suppressed for this operation only.
+
+The private DeviceLink reader bounds each frame before allocation. PNG decoding uses the same size limits, decoded-pixel content hash, fresh snapshot identity, and device-bound geometry as CoreDevice capture. USB observations do not update a CoreDevice executor's current input fence. This entry point provides no legacy input backend or phone-side connection.
+
+The verification example independently decodes the PNG in memory and checks its dimensions and coordinate bounds. Its output contains metadata only:
+
+```sh
+cargo run --locked --features iphone --example iphone_observe_usb -- OWNED_USB_DEVICE_UDID
+```
+
+The satellite-built arm64 executable was SHA-256 verified and run exactly once on the selected phone's macOS host. It exited 0 with this output:
+
+```json
+{"ok":true,"transport":"usb_screenshotr","format":"PNG","width":1170,"height":2532,"decoded_pixels_verified":true,"bounds_verified":true}
+```
+
+This result exercises the actual Praefectus library, not only the earlier libimobiledevice probe. No screenshot contents or pairing secrets left process memory. The temporary executable and archive were removed after the coordinated window closed.
+
+This is computer-assisted observation. A legacy standalone controller would additionally need an authenticated same-phone lockdown connection and an implemented on-phone input path. The library does not expose upstream's permissive legacy TLS verifier as a network connection option. There is no automatic fallback from CoreDevice, and lowering the app's deployment target would not add the missing backend.
 
 ## Authority and execution
 
@@ -104,7 +144,7 @@ These tests do not validate the physical USB bootstrap service, on-phone self-co
 ## Release blockers
 
 - Actual iPhone RemotePairing service compatibility remains unverified. The authentication contract passes macOS framework interoperability, but that does not prove acceptance by the phone's service.
-- No authorized eligible physical iPhone was available. USB bootstrap, device transport, HID negotiation, coordinates, and standalone execution remain unverified. Simulator and unsigned device builds do not establish these behaviors.
+- The selected iPhone 13 has verified legacy USB screenshotr observation through Praefectus, but not CoreDevice, physical input, or standalone execution. Its observed USB pairing endpoint does not advertise tunnels. USB RemotePairing bootstrap and network authentication remain untested on that phone.
 - Developer image, valid self-connection pairing, signing, and a compatible external VPN must be supplied. Without these, this app cannot control the phone.
 
 `IphoneConfig::on_phone` fixes the connection address to `10.7.0.1`. `computer_assisted` accepts a host-selected device socket address and credentials for a host running on a computer. That second mode is explicitly computer-assisted, not standalone phone control. Neither mode bypasses `Engine` authority.

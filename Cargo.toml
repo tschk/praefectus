@@ -55,6 +55,11 @@ name = "iphone_pair"
 path = "examples/iphone_pair.rs"
 required-features = ["iphone"]
 
+[[example]]
+name = "iphone_observe_usb"
+path = "examples/iphone_observe_usb.rs"
+required-features = ["iphone"]
+
 [dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 fs4 = { version = "1.1", default-features = false, features = ["sync"] }

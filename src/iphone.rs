@@ -26,6 +26,11 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+#[cfg(all(unix, not(target_os = "ios")))]
+mod usb;
+#[cfg(all(unix, not(target_os = "ios")))]
+pub use usb::observe_iphone_over_usb;
+
 use crate::{
     Action, ActionCapability, ApplicationOperation, BackgroundSupport, CancellationToken,
     Capabilities, CoordinateObservation, DeliveryRoute, Direction, DispatchError, DispatchReceipt,
@@ -423,6 +428,11 @@ async fn capture(device: &mut Device) -> Result<(Vec<u8>, CoordinateObservation)
         .take_screenshot(None, ImageFormat::Png)
         .await
         .map_err(|_| service_error())?;
+    let screen = screen_from_png(png, &device.rsd.uuid)?;
+    Ok((screen.png, screen.coordinates))
+}
+
+fn screen_from_png(png: Vec<u8>, device_identity: &str) -> Result<IphoneScreen, ProtocolError> {
     let (width, height, content) = image_fence(&png)?;
     let displays = vec![DisplayGeometry {
         display_id: DISPLAY.into(),
@@ -431,10 +441,10 @@ async fn capture(device: &mut Device) -> Result<(Vec<u8>, CoordinateObservation)
         width,
         height,
     }];
-    let geometry = hash_serializable(&(device.rsd.uuid.as_str(), &displays))?;
-    Ok((
+    let geometry = hash_serializable(&(device_identity, &displays))?;
+    Ok(IphoneScreen {
         png,
-        CoordinateObservation {
+        coordinates: CoordinateObservation {
             protocol_version: PROTOCOL_VERSION,
             snapshot_id: format!("iphone-{}", Uuid::new_v4()),
             display_geometry_hash: geometry,
@@ -442,7 +452,7 @@ async fn capture(device: &mut Device) -> Result<(Vec<u8>, CoordinateObservation)
             observed_at_ms: now_ms(),
             displays,
         },
-    ))
+    })
 }
 
 fn image_fence(bytes: &[u8]) -> Result<(i64, i64, String), ProtocolError> {
@@ -1064,6 +1074,29 @@ mod tests {
         assert_eq!(hash, image_fence(&same).unwrap().2);
         assert_ne!(hash, image_fence(&changed).unwrap().2);
         assert!(image_fence(b"not a PNG").is_err());
+        let core = screen_from_png(first, "test-device").unwrap();
+        let repeated = screen_from_png(same.clone(), "test-device").unwrap();
+        let usb = screen_from_png(same, "usb-screenshotr:test-device").unwrap();
+        assert_eq!(
+            core.coordinates.snapshot_content_hash,
+            usb.coordinates.snapshot_content_hash
+        );
+        assert_eq!(
+            core.coordinates.display_geometry_hash,
+            repeated.coordinates.display_geometry_hash
+        );
+        assert_ne!(
+            core.coordinates.snapshot_id,
+            repeated.coordinates.snapshot_id
+        );
+        assert_ne!(
+            core.coordinates.display_geometry_hash,
+            usb.coordinates.display_geometry_hash
+        );
+        assert_eq!(
+            core.coordinates.display_geometry_hash,
+            hash_serializable(&("test-device", &core.coordinates.displays)).unwrap()
+        );
     }
 
     #[test]
