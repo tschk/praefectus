@@ -22,8 +22,11 @@ const TLS_12: [u8; 2] = [0x03, 0x03];
 const CT_HANDSHAKE: u8 = 0x16;
 const CT_CHANGE_CIPHER_SPEC: u8 = 0x14;
 const CT_APPLICATION_DATA: u8 = 0x17;
+const CT_ALERT: u8 = 0x15;
 /// Maximum plaintext bytes per TLS record (RFC 5246 §6.2.1)
 const TLS_MAX_PLAINTEXT: usize = 16384;
+const TLS_MAX_CIPHERTEXT: usize = TLS_MAX_PLAINTEXT + 2048;
+const MAX_HANDSHAKE: usize = 65536;
 const HS_CLIENT_HELLO: u8 = 0x01;
 const HS_SERVER_HELLO: u8 = 0x02;
 const HS_SERVER_HELLO_DONE: u8 = 0x0E;
@@ -223,8 +226,8 @@ fn decrypt_record(
     ct: u8,
     encrypted: &[u8],
 ) -> Result<Vec<u8>, IdeviceError> {
-    if encrypted.len() < 16 {
-        return Err(IdeviceError::InternalError("TLS record too short".into()));
+    if encrypted.len() < 32 || encrypted.len() > TLS_MAX_CIPHERTEXT {
+        return Err(record_authentication_error());
     }
 
     let iv = &encrypted[..16];
@@ -244,40 +247,63 @@ fn decrypt_record(
         CipherSuite::Aes128CbcSha => {
             let dec = Aes128CbcDec::new(read_key[..16].into(), iv.into());
             dec.decrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(ciphertext)
-                .map_err(|e| IdeviceError::InternalError(format!("CBC decrypt: {e}")))?
+                .map_err(|_| record_authentication_error())?
         }
         CipherSuite::Aes256CbcSha384 => {
             let dec = Aes256CbcDec::new(read_key[..32].into(), iv.into());
             dec.decrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(ciphertext)
-                .map_err(|e| IdeviceError::InternalError(format!("CBC decrypt: {e}")))?
+                .map_err(|_| record_authentication_error())?
         }
     };
 
     if decrypted.is_empty() {
-        return Err(IdeviceError::InternalError("Empty decrypted data".into()));
+        return Err(record_authentication_error());
     }
 
-    // Remove PKCS#7 padding: last byte is pad_value, remove (pad_value+1) bytes
     let pad_value = *decrypted.last().unwrap() as usize;
-    let content_len = decrypted.len() - (pad_value + 1);
+    let content_len = decrypted
+        .len()
+        .checked_sub(pad_value + 1)
+        .ok_or_else(record_authentication_error)?;
+    if decrypted[content_len..]
+        .iter()
+        .any(|&byte| byte as usize != pad_value)
+    {
+        return Err(record_authentication_error());
+    }
     let mac_len = keys.suite.mac_key_len();
     if content_len < mac_len {
-        return Err(IdeviceError::InternalError(
-            "Decrypted content too short for MAC".into(),
-        ));
+        return Err(record_authentication_error());
     }
 
     let plaintext = &decrypted[..content_len - mac_len];
     let received_mac = &decrypted[content_len - mac_len..content_len];
 
-    let expected_mac = compute_mac(mac_key, seq, ct, plaintext, keys.suite);
-    if received_mac != expected_mac.as_slice() {
-        return Err(IdeviceError::InternalError(
-            "TLS MAC verification failed".into(),
-        ));
+    let mut authenticated = seq.to_be_bytes().to_vec();
+    authenticated.extend_from_slice(&[ct, 0x03, 0x03]);
+    authenticated.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
+    authenticated.extend_from_slice(plaintext);
+    let valid = match keys.suite {
+        CipherSuite::Aes128CbcSha => {
+            let mut mac = HmacSha1::new_from_slice(mac_key).unwrap();
+            mac.update(&authenticated);
+            mac.verify_slice(received_mac).is_ok()
+        }
+        CipherSuite::Aes256CbcSha384 => {
+            let mut mac = HmacSha384::new_from_slice(mac_key).unwrap();
+            mac.update(&authenticated);
+            mac.verify_slice(received_mac).is_ok()
+        }
+    };
+    if !valid || plaintext.len() > TLS_MAX_PLAINTEXT {
+        return Err(record_authentication_error());
     }
 
     Ok(plaintext.to_vec())
+}
+
+fn record_authentication_error() -> IdeviceError {
+    IdeviceError::InternalError("TLS record authentication failed".into())
 }
 
 fn finished_verify_data(
@@ -312,28 +338,37 @@ fn make_handshake(msg_type: u8, body: &[u8]) -> Vec<u8> {
 async fn read_record<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u8, Vec<u8>), IdeviceError> {
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).await?;
+    if header[1..3] != TLS_12 {
+        return Err(record_authentication_error());
+    }
     let ct = header[0];
     let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    if len > TLS_MAX_CIPHERTEXT {
+        return Err(record_authentication_error());
+    }
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload).await?;
     Ok((ct, payload))
 }
 
-/// Extract handshake messages from a record payload.
-/// A single record can contain multiple handshake messages.
-fn parse_handshake_messages(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
+/// Consume complete messages, retaining a partial message for the next record.
+fn parse_handshake_messages(data: &mut Vec<u8>) -> Result<Vec<(u8, Vec<u8>)>, IdeviceError> {
     let mut msgs = Vec::new();
     let mut pos = 0;
     while pos + 4 <= data.len() {
         let msg_type = data[pos];
         let msg_len = u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        if msg_len > MAX_HANDSHAKE {
+            return Err(record_authentication_error());
+        }
         if pos + 4 + msg_len > data.len() {
             break;
         }
         msgs.push((msg_type, data[pos..pos + 4 + msg_len].to_vec()));
         pos += 4 + msg_len;
     }
-    msgs
+    data.drain(..pos);
+    Ok(msgs)
 }
 
 /// Perform TLS 1.2 PSK handshake and return an encrypted stream.
@@ -363,71 +398,57 @@ pub async fn tls_psk_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream.write_all(&make_record(CT_HANDSHAKE, &ch)).await?;
     debug!("Sent ClientHello");
 
-    // 2. Read ServerHello, optional ServerKeyExchange (PSK hint), ServerHelloDone
-    loop {
+    // Reassemble messages independently of record boundaries. Do not mistake
+    // bytes inside a random or PSK identity hint for ServerHelloDone.
+    let mut pending_handshake = Vec::new();
+    let mut hello_seen = false;
+    let mut hello_done = false;
+    while !hello_done {
         let (ct, payload) = read_record(&mut stream).await?;
-        if ct == 21 {
-            // TLS Alert
-            let level = payload.first().copied().unwrap_or(0);
-            let desc = payload.get(1).copied().unwrap_or(0);
-            return Err(IdeviceError::InternalError(format!(
-                "TLS Alert: level={level} desc={desc} ({})",
-                match desc {
-                    0 => "close_notify",
-                    10 => "unexpected_message",
-                    20 => "bad_record_mac",
-                    40 => "handshake_failure",
-                    47 => "illegal_parameter",
-                    70 => "protocol_version",
-                    71 => "insufficient_security",
-                    80 => "internal_error",
-                    _ => "unknown",
-                }
-            )));
+        if ct != CT_HANDSHAKE || transcript.len() + payload.len() > MAX_HANDSHAKE {
+            return Err(record_authentication_error());
         }
-        if ct != CT_HANDSHAKE {
-            return Err(IdeviceError::InternalError(format!(
-                "Expected handshake, got ct={ct}"
-            )));
-        }
-        transcript.extend_from_slice(&payload);
-
-        for (msg_type, _msg_bytes) in parse_handshake_messages(&payload) {
+        pending_handshake.extend_from_slice(&payload);
+        for (msg_type, message) in parse_handshake_messages(&mut pending_handshake)? {
+            if hello_done {
+                return Err(record_authentication_error());
+            }
             match msg_type {
-                HS_SERVER_HELLO => {
-                    // ServerHello layout (after 4-byte handshake header):
-                    // 2 bytes version, 32 bytes random, 1 byte session_id_len,
-                    // session_id, 2 bytes cipher_suite
-                    if payload.len() >= 4 + 2 + 32 {
-                        server_random.copy_from_slice(&payload[6..38]);
-                        let sid_len = payload[38] as usize;
-                        if payload.len() >= 39 + sid_len + 2 {
-                            selected_cipher
-                                .copy_from_slice(&payload[39 + sid_len..39 + sid_len + 2]);
-                        }
+                HS_SERVER_HELLO if !hello_seen => {
+                    if message.len() < 42 || message[4..6] != TLS_12 {
+                        return Err(record_authentication_error());
                     }
-                    debug!("Got ServerHello, cipher={selected_cipher:02x?}");
+                    let sid_len = message[38] as usize;
+                    let end = 42 + sid_len;
+                    if sid_len > 32 || message.len() < end || message[end - 1] != 0 {
+                        return Err(record_authentication_error());
+                    }
+                    // No TLS extensions were offered by this client.
+                    if message.len() != end
+                        && (message.len() != end + 2 || message[end..] != [0, 0])
+                    {
+                        return Err(record_authentication_error());
+                    }
+                    server_random.copy_from_slice(&message[6..38]);
+                    selected_cipher.copy_from_slice(&message[39 + sid_len..41 + sid_len]);
+                    hello_seen = true;
                 }
-                HS_SERVER_HELLO_DONE => {
-                    debug!("Got ServerHelloDone");
+                0x0c if hello_seen => {
+                    if message.len() < 6
+                        || u16::from_be_bytes([message[4], message[5]]) as usize
+                            != message.len() - 6
+                    {
+                        return Err(record_authentication_error());
+                    }
                 }
-                _ => {
-                    debug!("Got handshake msg type {msg_type}");
-                }
+                HS_SERVER_HELLO_DONE if hello_seen && message.len() == 4 => hello_done = true,
+                _ => return Err(record_authentication_error()),
             }
+            transcript.extend_from_slice(&message);
         }
-
-        // Check if we've seen ServerHelloDone
-        if payload.contains(&HS_SERVER_HELLO_DONE) && payload.len() >= 4 {
-            // Simple check: if ServerHelloDone is in the payload, we're done
-            // ServerHelloDone is a 0-length message: [0x0E, 0x00, 0x00, 0x00]
-            if payload
-                .windows(4)
-                .any(|w| w == [HS_SERVER_HELLO_DONE, 0x00, 0x00, 0x00])
-            {
-                break;
-            }
-        }
+    }
+    if !pending_handshake.is_empty() {
+        return Err(record_authentication_error());
     }
 
     // 3. Determine cipher suite and derive keys
@@ -466,37 +487,39 @@ pub async fn tls_psk_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     // 7. Read server ChangeCipherSpec + Finished
     let mut server_seq: u64 = 0;
+    let mut cipher_changed = false;
     loop {
         let (ct, payload) = read_record(&mut stream).await?;
-        if ct == 21 {
-            let level = payload.first().copied().unwrap_or(0);
-            let desc = payload.get(1).copied().unwrap_or(0);
-            return Err(IdeviceError::InternalError(format!(
-                "TLS Alert after Finished: level={level} desc={desc}"
-            )));
-        }
         match ct {
-            CT_CHANGE_CIPHER_SPEC => {
-                debug!("Got server ChangeCipherSpec");
+            CT_CHANGE_CIPHER_SPEC if !cipher_changed && payload == [1] => {
+                cipher_changed = true;
             }
-            CT_APPLICATION_DATA | CT_HANDSHAKE => {
+            CT_HANDSHAKE if cipher_changed => {
                 let plaintext = decrypt_record(&keys, true, server_seq, CT_HANDSHAKE, &payload)?;
                 server_seq += 1;
-
-                if plaintext.len() >= 4 && plaintext[0] == HS_FINISHED {
+                pending_handshake.extend_from_slice(&plaintext);
+                if pending_handshake.len() > 16 {
+                    return Err(record_authentication_error());
+                }
+                let messages = parse_handshake_messages(&mut pending_handshake)?;
+                if let Some((msg_type, message)) = messages.first() {
+                    if *msg_type != HS_FINISHED
+                        || messages.len() != 1
+                        || message.len() != 16
+                        || !pending_handshake.is_empty()
+                    {
+                        return Err(record_authentication_error());
+                    }
+                    // A valid record MAC does not substitute for transcript authentication.
                     let server_vd =
                         finished_verify_data(&master, b"server finished", &transcript, suite);
-                    if plaintext[4..] == server_vd {
-                        debug!("Server Finished verified!");
-                    } else {
-                        debug!("Server Finished verify_data mismatch (continuing anyway)");
+                    if message[4..] != server_vd {
+                        return Err(record_authentication_error());
                     }
                     break;
                 }
             }
-            _ => {
-                debug!("Unexpected record type {ct} during handshake");
-            }
+            _ => return Err(record_authentication_error()),
         }
     }
 
@@ -511,6 +534,7 @@ pub async fn tls_psk_handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
         pending_record: Vec::new(),
         pending_record_total: 0,
         write_buf: Vec::new(),
+        closed: false,
     })
 }
 
@@ -528,6 +552,7 @@ pub struct TlsPskStream<S> {
     pending_record_total: usize,
     /// Partial outbound TLS record waiting to be flushed
     write_buf: Vec<u8>,
+    closed: bool,
 }
 
 impl<S> std::fmt::Debug for TlsPskStream<S> {
@@ -539,40 +564,6 @@ impl<S> std::fmt::Debug for TlsPskStream<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsPskStream<S> {
-    /// Encrypt and send application data, splitting into multiple TLS records if needed.
-    pub async fn write_app_data(&mut self, data: &[u8]) -> Result<(), IdeviceError> {
-        for chunk in data.chunks(TLS_MAX_PLAINTEXT) {
-            let encrypted = encrypt_record(&self.keys, self.write_seq, CT_APPLICATION_DATA, chunk);
-            self.write_seq += 1;
-            self.inner
-                .write_all(&make_record(CT_APPLICATION_DATA, &encrypted))
-                .await?;
-        }
-        self.inner.flush().await?;
-        Ok(())
-    }
-
-    /// Read and decrypt application data.
-    pub async fn read_app_data(&mut self) -> Result<Vec<u8>, IdeviceError> {
-        let (ct, payload) = read_record(&mut self.inner).await?;
-        if ct != CT_APPLICATION_DATA {
-            return Err(IdeviceError::InternalError(format!(
-                "Expected application data, got ct={ct}"
-            )));
-        }
-        let plaintext = decrypt_record(
-            &self.keys,
-            true,
-            self.read_seq,
-            CT_APPLICATION_DATA,
-            &payload,
-        )?;
-        self.read_seq += 1;
-        Ok(plaintext)
-    }
-}
-
 // AsyncRead: assemble complete TLS records across multiple poll_read calls
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream<S> {
     fn poll_read(
@@ -581,6 +572,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        if buf.remaining() == 0 || this.closed {
+            return Poll::Ready(Ok(()));
+        }
 
         // 1. Serve from decrypted buffer first
         if !this.read_buf.is_empty() {
@@ -596,6 +590,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream
             if this.pending_record.len() >= 5 && this.pending_record_total == 0 {
                 let body_len =
                     u16::from_be_bytes([this.pending_record[3], this.pending_record[4]]) as usize;
+                if this.pending_record[1..3] != TLS_12 || body_len > TLS_MAX_CIPHERTEXT {
+                    this.closed = true;
+                    return Poll::Ready(Err(std::io::Error::other("Invalid TLS record")));
+                }
                 this.pending_record_total = 5 + body_len;
             }
 
@@ -611,6 +609,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream
                 match decrypt_record(&this.keys, true, this.read_seq, ct, &body) {
                     Ok(plaintext) => {
                         this.read_seq += 1;
+                        match ct {
+                            CT_APPLICATION_DATA if plaintext.is_empty() => continue,
+                            CT_APPLICATION_DATA => {}
+                            CT_ALERT if plaintext == [1, 0] => {
+                                this.closed = true;
+                                return Poll::Ready(Ok(()));
+                            }
+                            _ => {
+                                this.closed = true;
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "Unexpected TLS control record",
+                                )));
+                            }
+                        }
                         let n = buf.remaining().min(plaintext.len());
                         buf.put_slice(&plaintext[..n]);
                         if n < plaintext.len() {
@@ -618,15 +630,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream
                         }
                         return Poll::Ready(Ok(()));
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "TLS decrypt failed (ct={ct}, seq={}, body_len={}): {e}",
-                            this.read_seq,
-                            body.len()
-                        );
-                        return Poll::Ready(Err(std::io::Error::other(format!(
-                            "TLS decrypt: {e}"
-                        ))));
+                    Err(_) => {
+                        this.closed = true;
+                        return Poll::Ready(Err(std::io::Error::other(
+                            "TLS record authentication failed",
+                        )));
                     }
                 }
             }
@@ -640,7 +648,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncRead for TlsPskStream
                 Poll::Ready(Ok(())) => {
                     let n = tmp_buf.filled().len();
                     if n == 0 {
-                        return Poll::Ready(Ok(())); // EOF
+                        this.closed = true;
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "TLS stream ended without close_notify",
+                        )));
                     }
                     this.pending_record.extend_from_slice(&tmp[..n]);
                     // Loop back to check if we now have a complete record
@@ -661,6 +673,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
         // Flush any pending partial write first
         while !this.write_buf.is_empty() {
             match Pin::new(&mut this.inner).poll_write(cx, &this.write_buf) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                }
                 Poll::Ready(Ok(n)) => {
                     this.write_buf.drain(..n);
                 }
@@ -669,6 +684,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
             }
         }
 
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         // Clamp to TLS max record size to avoid oversized records
         let chunk = &data[..data.len().min(TLS_MAX_PLAINTEXT)];
 
@@ -678,6 +696,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
         this.write_seq += 1;
 
         match Pin::new(&mut this.inner).poll_write(cx, &record) {
+            Poll::Ready(Ok(0)) => Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
             Poll::Ready(Ok(written)) => {
                 if written < record.len() {
                     // Buffer the unsent remainder
@@ -692,7 +711,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
             Poll::Pending => {
                 // Buffer the entire record for later flush
                 this.write_buf = record;
-                Poll::Pending
+                Poll::Ready(Ok(chunk.len()))
             }
         }
     }
@@ -703,6 +722,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
         // Flush buffered write data first
         while !this.write_buf.is_empty() {
             match Pin::new(&mut this.inner).poll_write(cx, &this.write_buf) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                }
                 Poll::Ready(Ok(n)) => {
                     this.write_buf.drain(..n);
                 }
@@ -714,7 +736,267 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + Sync> AsyncWrite for TlsPskStrea
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        std::task::ready!(self.as_mut().poll_flush(cx))?;
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn keys(suite: CipherSuite) -> KeyBlock {
+        derive_key_block(&[7; 48], &[2; 32], &[3; 32], suite)
+    }
+
+    fn server_keys(keys: &KeyBlock) -> KeyBlock {
+        KeyBlock {
+            client_mac_key: keys.server_mac_key.clone(),
+            server_mac_key: keys.client_mac_key.clone(),
+            client_write_key: keys.server_write_key.clone(),
+            server_write_key: keys.client_write_key.clone(),
+            suite: keys.suite,
+        }
+    }
+
+    #[derive(Default)]
+    struct Wire {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+        pending: bool,
+        shutdown: bool,
+    }
+    impl AsyncRead for Wire {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.input).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for Wire {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if std::mem::take(&mut self.pending) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let count = bytes.len().min(7);
+            self.output.extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.shutdown = true;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn encrypted_stream(input: Vec<u8>, suite: CipherSuite) -> TlsPskStream<Wire> {
+        TlsPskStream {
+            inner: Wire {
+                input: Cursor::new(input),
+                pending: true,
+                ..Wire::default()
+            },
+            keys: keys(suite),
+            write_seq: 0,
+            read_seq: 0,
+            read_buf: Vec::new(),
+            pending_record: Vec::new(),
+            pending_record_total: 0,
+            write_buf: Vec::new(),
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn buffered_writes_deliver_each_plaintext_once_and_shutdown_flushes() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
+                let mut stream = encrypted_stream(Vec::new(), suite);
+                stream.write_all(b"first").await.unwrap();
+                stream.write_all(b"second message").await.unwrap();
+                stream.shutdown().await.unwrap();
+                assert!(stream.inner.shutdown);
+                let mut wire = stream.inner.output.as_slice();
+                for (seq, expected) in [b"first".as_slice(), b"second message"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let (ct, body) = read_record(&mut wire).await.unwrap();
+                    assert_eq!(ct, CT_APPLICATION_DATA);
+                    assert_eq!(
+                        decrypt_record(&stream.keys, false, seq as u64, ct, &body).unwrap(),
+                        expected
+                    );
+                }
+                assert!(
+                    wire.is_empty(),
+                    "plaintext must not be sent twice after Pending"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn reads_skip_empty_data_and_never_expose_control_records() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
+                let keys = server_keys(&keys(suite));
+                let mut wire = Vec::new();
+                for (seq, ct, data) in [
+                    (0, CT_APPLICATION_DATA, b"".as_slice()),
+                    (1, CT_APPLICATION_DATA, b"payload"),
+                    (2, CT_ALERT, &[1, 0]),
+                ] {
+                    wire.extend(make_record(ct, &encrypt_record(&keys, seq, ct, data)));
+                }
+                let mut stream = encrypted_stream(wire, suite);
+                let mut data = Vec::new();
+                stream.read_to_end(&mut data).await.unwrap();
+                assert_eq!(data, b"payload");
+                for ct in [CT_HANDSHAKE, CT_ALERT] {
+                    let wire = make_record(ct, &encrypt_record(&keys, 0, ct, &[2, 40]));
+                    assert!(encrypted_stream(wire, suite).read_u8().await.is_err());
+                }
+                let wire = make_record(
+                    CT_APPLICATION_DATA,
+                    &encrypt_record(&keys, 0, CT_APPLICATION_DATA, b"cut"),
+                );
+                assert!(
+                    encrypted_stream(wire[..wire.len() - 1].to_vec(), suite)
+                        .read_u8()
+                        .await
+                        .is_err()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn malformed_padding_and_macs_return_uniform_errors_without_panicking() {
+        let keys = keys(CipherSuite::Aes128CbcSha);
+        for last in [0, 1, 15, 16, 255] {
+            let mut block = [0; 16];
+            block[15] = last;
+            let iv = [0; 16];
+            let ciphertext =
+                Aes128CbcEnc::new(keys.client_write_key[..16].into(), &iv.into())
+                    .encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&block);
+            let mut record = iv.to_vec();
+            record.extend(ciphertext);
+            assert_eq!(
+                decrypt_record(&keys, false, 0, CT_APPLICATION_DATA, &record)
+                    .unwrap_err()
+                    .to_string(),
+                record_authentication_error().to_string()
+            );
+        }
+        let record = encrypt_record(&keys, 1, CT_APPLICATION_DATA, b"valid");
+        assert_eq!(
+            decrypt_record(&keys, false, 1, CT_APPLICATION_DATA, &record).unwrap(),
+            b"valid"
+        );
+        assert!(decrypt_record(&keys, false, 2, CT_APPLICATION_DATA, &record).is_err());
+    }
+
+    async fn server(mut stream: tokio::io::DuplexStream, suite: CipherSuite, bad_finished: bool) {
+        let (_, hello) = read_record(&mut stream).await.unwrap();
+        let client_random: [u8; 32] = hello[6..38].try_into().unwrap();
+        let random = [0x0e; 32];
+        let mut body = TLS_12.to_vec();
+        body.extend(random);
+        body.push(0);
+        body.extend(match suite {
+            CipherSuite::Aes128CbcSha => [0, 0x8c],
+            CipherSuite::Aes256CbcSha384 => [0, 0xaf],
+        });
+        body.push(0);
+        let server_hello = make_handshake(HS_SERVER_HELLO, &body);
+        let done = make_handshake(HS_SERVER_HELLO_DONE, &[]);
+        let mut transcript = hello;
+        transcript.extend(&server_hello);
+        transcript.extend(&done);
+        let mut flight = server_hello;
+        flight.extend(done);
+        for chunk in flight.chunks(2) {
+            stream
+                .write_all(&make_record(CT_HANDSHAKE, chunk))
+                .await
+                .unwrap();
+        }
+        let (_, exchange) = read_record(&mut stream).await.unwrap();
+        transcript.extend(exchange);
+        assert_eq!(
+            read_record(&mut stream).await.unwrap(),
+            (CT_CHANGE_CIPHER_SPEC, vec![1])
+        );
+        let (_, encrypted) = read_record(&mut stream).await.unwrap();
+        let master = derive_master_secret(b"test psk", &client_random, &random, suite);
+        let keys = derive_key_block(&master, &client_random, &random, suite);
+        let client_finished = decrypt_record(&keys, false, 0, CT_HANDSHAKE, &encrypted).unwrap();
+        assert_eq!(
+            client_finished,
+            make_handshake(
+                HS_FINISHED,
+                &finished_verify_data(&master, b"client finished", &transcript, suite)
+            )
+        );
+        transcript.extend(client_finished);
+        let mut verify = finished_verify_data(&master, b"server finished", &transcript, suite);
+        if bad_finished {
+            verify[0] ^= 1;
+        }
+        stream
+            .write_all(&make_record(CT_CHANGE_CIPHER_SPEC, &[1]))
+            .await
+            .unwrap();
+        let finished = make_handshake(HS_FINISHED, &verify);
+        for (seq, chunk) in finished.chunks(3).enumerate() {
+            let record = encrypt_record(&server_keys(&keys), seq as u64, CT_HANDSHAKE, chunk);
+            stream
+                .write_all(&make_record(CT_HANDSHAKE, &record))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn handshake_reassembles_fragments_and_requires_server_finished_proof() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for suite in [CipherSuite::Aes128CbcSha, CipherSuite::Aes256CbcSha384] {
+                for bad_finished in [false, true] {
+                    let (client, peer) = tokio::io::duplex(65536);
+                    let peer = tokio::spawn(server(peer, suite, bad_finished));
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        tls_psk_handshake(client, b"test psk"),
+                    )
+                    .await
+                    .unwrap();
+                    peer.await.unwrap();
+                    assert_eq!(result.is_err(), bad_finished);
+                }
+            }
+            let mut malformed = make_handshake(HS_SERVER_HELLO, &[0; 34]);
+            malformed = make_record(CT_HANDSHAKE, &malformed);
+            let wire = Wire {
+                input: Cursor::new(malformed),
+                ..Wire::default()
+            };
+            assert!(tls_psk_handshake(wire, b"test psk").await.is_err());
+        });
     }
 }

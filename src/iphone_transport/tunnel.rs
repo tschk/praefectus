@@ -4,6 +4,7 @@
 //! These functions combine TLS-PSK handshake + CDTunnel handshake into a single call.
 //! The CDTunnel protocol itself lives in [`crate::tunnel`].
 
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
 
 use idevice::{IdeviceError, ReadWrite};
@@ -38,7 +39,6 @@ pub async fn connect_tls_psk_tunnel_native<S: ReadWrite>(
     let mut tls_stream = super::tls_psk::tls_psk_handshake(stream, encryption_key).await?;
     debug!("Native TLS-PSK handshake complete");
 
-    // CDTunnel handshake over TLS using the record-level API
     let request = serde_json::json!({
         "type": "clientHandshakeRequest",
         "mtu": DEFAULT_MTU
@@ -49,32 +49,34 @@ pub async fn connect_tls_psk_tunnel_native<S: ReadWrite>(
     pkt.extend_from_slice(CDTUNNEL_MAGIC);
     pkt.extend_from_slice(&(body.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&body);
-    tls_stream.write_app_data(&pkt).await?;
+    tls_stream.write_all(&pkt).await?;
+    tls_stream.flush().await?;
 
     debug!("Sent CDTunnel handshake request via TLS");
 
-    let response_data = tls_stream.read_app_data().await?;
-    if response_data.len() < CDTUNNEL_MAGIC.len() + 2 {
-        return Err(IdeviceError::UnexpectedResponse(
-            "CDTunnel handshake response too short".into(),
-        ));
-    }
-    if &response_data[..CDTUNNEL_MAGIC.len()] != CDTUNNEL_MAGIC {
+    let info = read_tunnel_info(&mut tls_stream).await?;
+    Ok(CdTunnel {
+        inner: tls_stream,
+        info,
+    })
+}
+
+async fn read_tunnel_info<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<TunnelInfo, IdeviceError> {
+    let mut header = [0; 10];
+    stream.read_exact(&mut header).await?;
+    if &header[..8] != CDTUNNEL_MAGIC {
         return Err(IdeviceError::UnexpectedResponse(
             "CDTunnel handshake response missing magic header".into(),
         ));
     }
-    let body_len = u16::from_be_bytes([
-        response_data[CDTUNNEL_MAGIC.len()],
-        response_data[CDTUNNEL_MAGIC.len() + 1],
-    ]) as usize;
-    let body_start = CDTUNNEL_MAGIC.len() + 2;
-    let response_body = &response_data[body_start..body_start + body_len];
+    let body_len = u16::from_be_bytes([header[8], header[9]]) as usize;
+    let mut response_body = vec![0; body_len];
+    stream.read_exact(&mut response_body).await?;
 
-    let response: serde_json::Value = serde_json::from_slice(response_body)
-        .map_err(|e| IdeviceError::InternalError(e.to_string()))?;
-
-    debug!("CDTunnel handshake response: {response:#?}");
+    let response: serde_json::Value = serde_json::from_slice(&response_body)
+        .map_err(|_| IdeviceError::UnexpectedResponse("Invalid CDTunnel response".into()))?;
 
     let client_params =
         response
@@ -121,10 +123,36 @@ pub async fn connect_tls_psk_tunnel_native<S: ReadWrite>(
         server_rsd_port,
     };
 
-    debug!("CDTunnel established: {info:?}");
+    Ok(info)
+}
 
-    Ok(CdTunnel {
-        inner: tls_stream,
-        info,
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_response_preserves_surplus_and_refuses_truncation() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let body = br#"{"clientParameters":{"address":"fd00::2","mtu":1500},"serverAddress":"fd00::1","serverRSDPort":49152}"#;
+            let mut frame = CDTUNNEL_MAGIC.to_vec();
+            frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            frame.extend_from_slice(body);
+            let (mut peer, mut stream) = tokio::io::duplex(1);
+            let outgoing = frame.clone();
+            let writer = tokio::spawn(async move {
+                peer.write_all(&outgoing).await.unwrap();
+                peer.write_all(b"subsequent packet").await.unwrap();
+            });
+            let info = read_tunnel_info(&mut stream).await.unwrap();
+            assert_eq!(info.client_address, "fd00::2");
+            assert_eq!(info.server_rsd_port, 49152);
+            let mut surplus = Vec::new();
+            stream.read_to_end(&mut surplus).await.unwrap();
+            assert_eq!(surplus, b"subsequent packet");
+            writer.await.unwrap();
+            for end in [0, 7, 9, 10, frame.len() - 1] {
+                assert!(read_tunnel_info(&mut &frame[..end]).await.is_err());
+            }
+        });
+    }
 }
